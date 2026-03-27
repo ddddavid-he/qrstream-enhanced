@@ -190,8 +190,10 @@ def _worker_detect_qr(frame_data):
     # Downscale high-res frames before detection
     frame = _downscale_frame(frame)
 
-    qr_detector = cv2.QRCodeDetector()
-    qr_data = try_decode_qr(frame, qr_detector)
+    # Reuse QRCodeDetector to avoid repeated object creation
+    if not hasattr(_worker_detect_qr, '_qr_detector'):
+        _worker_detect_qr._qr_detector = cv2.QRCodeDetector()
+    qr_data = try_decode_qr(frame, _worker_detect_qr._qr_detector)
 
     if qr_data is not None:
         try:

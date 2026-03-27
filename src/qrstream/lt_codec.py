@@ -6,8 +6,10 @@ Ported from the original decode.py with key improvement:
 - xor_bytes() uses numpy for vectorized XOR (10-50x faster)
 """
 
+import functools
 from math import log, floor, sqrt
 from collections import defaultdict
+import bisect
 
 import numpy as np
 
@@ -47,9 +49,11 @@ def gen_mu(k, delta, c):
     return [(rho[d] + tau[d]) / normalizer for d in range(k)]
 
 
+@functools.lru_cache(maxsize=64)
 def gen_rsd_cdf(k, delta, c):
     mu = gen_mu(k, delta, c)
-    return [sum(mu[:d + 1]) for d in range(k)]
+    cdf = tuple(sum(mu[:d + 1]) for d in range(k))
+    return cdf
 
 
 # ── PRNG ──────────────────────────────────────────────────────────
@@ -68,10 +72,10 @@ class PRNG:
 
     def _sample_d(self):
         p = self._get_next() / PRNG_MAX_RAND
-        for ix, v in enumerate(self.cdf):
-            if v > p:
-                return ix + 1
-        return ix + 1
+        # Use binary search instead of linear search for CDF sampling
+        # Clamp to K so degree never exceeds the number of source blocks
+        ix = bisect.bisect_right(self.cdf, p)
+        return min(ix + 1, self.K)
 
     def set_seed(self, seed):
         self.state = seed

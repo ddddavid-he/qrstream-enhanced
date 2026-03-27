@@ -4,6 +4,7 @@ LT Fountain Code Encoder: file → LT encoded blocks → QR frames → MP4 video
 
 import os
 import zlib
+from itertools import repeat
 from math import ceil
 from concurrent.futures import ProcessPoolExecutor
 
@@ -159,20 +160,14 @@ def encode_to_video(input_path: str, output_path: str,
 
         if workers > 1:
             # Parallel: generate QR images in batches using ProcessPoolExecutor
-            ec_levels = [ec_level] * batch_size
-            versions = [qr_version] * batch_size
-            # Use default box_size=10 and border=4
-            box_sizes = [10] * batch_size
-            borders = [4] * batch_size
-
+            # Use itertools.repeat for constant parameters to avoid list allocation
             with ProcessPoolExecutor(max_workers=workers) as pool:
                 for i in range(0, num_blocks, batch_size):
                     batch = all_packed[i:i + batch_size]
                     n = len(batch)
                     qr_imgs = list(pool.map(
                         generate_qr_image, batch,
-                        ec_levels[:n], box_sizes[:n],
-                        borders[:n], versions[:n],
+                        repeat(ec_level), repeat(10), repeat(4), repeat(qr_version)
                     ))
                     for qr_img in qr_imgs:
                         if qr_img.shape[:2] != (h, w):
