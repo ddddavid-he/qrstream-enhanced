@@ -12,7 +12,7 @@ V1 (legacy, 13 bytes):
 V2 (new, 20 bytes):
     Offset  Size  Field
      0      1     version      0x02
-     1      1     flags        bit0=compressed(zlib), bit1-7=reserved
+     1      1     flags        bit0=compressed(zlib), bit1=binary_qr, bit2-7=reserved
      2      4     filesize     uint32 BE (compressed size if compressed)
      6      2     blocksize    uint16 BE
      8      2     block_count  uint16 BE  K = ceil(filesize / blocksize)
@@ -108,15 +108,21 @@ class V2Header:
     seed: int
     block_seq: int
     crc32: int
+    binary_qr: bool = False
 
 
 # ── V2 packing ───────────────────────────────────────────────────
 
 def pack_v2(filesize: int, blocksize: int, block_count: int,
             seed: int, block_seq: int, data: bytes,
-            compressed: bool = False) -> bytes:
+            compressed: bool = False,
+            binary_qr: bool = False) -> bytes:
     """Serialize a V2 block (header + data) to bytes."""
-    flags = 0x01 if compressed else 0x00
+    flags = 0x00
+    if compressed:
+        flags |= 0x01
+    if binary_qr:
+        flags |= 0x02
     # Build the header without CRC first (bytes 0-15)
     header_no_crc = struct.pack('!BBIHHI',
                                 0x02,           # version
@@ -143,11 +149,12 @@ def pack_v2(filesize: int, blocksize: int, block_count: int,
 
 # ── Unpacking (auto-detect V1/V2) ────────────────────────────────
 
-def unpack(raw: bytes):
+def unpack(raw: bytes, skip_crc: bool = False):
     """Unpack a raw block. Returns (header, data_bytes).
 
     Auto-detects V1 vs V2 based on the first byte.
-    For V2, validates CRC32 and raises ValueError on mismatch.
+    For V2, validates CRC32 and raises ValueError on mismatch
+    unless skip_crc=True (for pre-validated blocks).
     """
     if len(raw) < V1_HEADER_SIZE:
         raise ValueError(f"Block too short: {len(raw)} bytes")
@@ -155,7 +162,7 @@ def unpack(raw: bytes):
     version_byte = raw[0]
 
     if version_byte == 0x02:
-        return _unpack_v2(raw)
+        return _unpack_v2(raw, skip_crc)
     else:
         return _unpack_v1(raw)
 
@@ -170,8 +177,8 @@ def _unpack_v1(raw: bytes):
     return header, data
 
 
-def _unpack_v2(raw: bytes):
-    """Parse a V2 block, checking CRC32."""
+def _unpack_v2(raw: bytes, skip_crc: bool = False):
+    """Parse a V2 block, optionally checking CRC32."""
     if len(raw) < V2_HEADER_SIZE:
         raise ValueError(f"V2 block too short: {len(raw)} bytes")
 
@@ -182,42 +189,54 @@ def _unpack_v2(raw: bytes):
     data = raw[V2_HEADER_SIZE:]
 
     # Validate CRC
-    computed_crc = zlib.crc32(raw[:16] + data) & 0xFFFFFFFF
-    if computed_crc != stored_crc:
-        raise ValueError(
-            f"CRC32 mismatch: stored=0x{stored_crc:08X}, "
-            f"computed=0x{computed_crc:08X}")
+    if not skip_crc:
+        computed_crc = zlib.crc32(raw[:16] + data) & 0xFFFFFFFF
+        if computed_crc != stored_crc:
+            raise ValueError(
+                f"CRC32 mismatch: stored=0x{stored_crc:08X}, "
+                f"computed=0x{computed_crc:08X}")
 
     compressed = bool(flags & 0x01)
+    binary_qr = bool(flags & 0x02)
     header = V2Header(version=version, compressed=compressed,
                       filesize=filesize, blocksize=blocksize,
                       block_count=block_count, seed=seed,
-                      block_seq=block_seq, crc32=stored_crc)
+                      block_seq=block_seq, crc32=stored_crc,
+                      binary_qr=binary_qr)
     return header, data
 
 
 # ── Auto blocksize ────────────────────────────────────────────────
 
 def auto_blocksize(filesize: int, ec_level: int = 1,
-                   qr_version: int = 20) -> int:
+                   qr_version: int = 20,
+                   binary_qr: bool = False) -> int:
     """Choose optimal blocksize given file size, QR error-correction level,
     and target QR version.
 
-    Aims to fit each encoded block (header + data) into a single QR code
-    after base64 encoding (4/3 expansion).
+    Aims to fit each encoded block (header + data) into a single QR code.
+    When binary_qr=False (default), accounts for base64 encoding (4/3 expansion).
+    When binary_qr=True, uses raw byte capacity (33% more data per QR).
 
     Args:
         filesize:    Size of the (possibly compressed) data in bytes
         ec_level:    0=L, 1=M (default), 2=Q, 3=H
         qr_version:  QR code version 1-40 (default: 20)
+        binary_qr:   If True, skip base64 expansion calculation
     """
     qr_capacity = _QR_CAPACITY_BY_VERSION.get(
         (qr_version, ec_level),
         _QR_BINARY_CAPACITY.get(ec_level, 2331),  # fallback to v40
     )
-    # base64 encodes every 3 bytes as 4 chars: ceil(N/3)*4 <= qr_capacity
-    # So max raw bytes N = floor(qr_capacity / 4) * 3
-    max_usable = (qr_capacity // 4) * 3
+
+    if binary_qr:
+        # Binary mode: raw byte capacity (no base64 overhead)
+        max_usable = qr_capacity
+    else:
+        # base64 encodes every 3 bytes as 4 chars: ceil(N/3)*4 <= qr_capacity
+        # So max raw bytes N = floor(qr_capacity / 4) * 3
+        max_usable = (qr_capacity // 4) * 3
+
     max_blocksize = max_usable - V2_HEADER_SIZE
     max_blocksize = max(max_blocksize, 64)  # minimum sensible block size
 

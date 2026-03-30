@@ -1,9 +1,10 @@
 """
 LT Fountain Code primitives: PRNG, Robust Soliton Distribution, BlockGraph.
 
-Ported from the original decode.py with key improvement:
-- Data stored as `bytes` instead of Python big-int
+Ported from the original decode.py with key improvements:
+- Data stored as numpy uint8 arrays internally for zero-copy XOR
 - xor_bytes() uses numpy for vectorized XOR (10-50x faster)
+- BlockGraph uses in-place numpy XOR to eliminate allocation overhead
 """
 
 import functools
@@ -119,13 +120,38 @@ def xor_bytes(a: bytes, b: bytes) -> bytes:
     return bytes(np.bitwise_xor(arr_a, arr_b))
 
 
-# ── Block Graph (bytes-based) ────────────────────────────────────
+def _to_np(data) -> np.ndarray:
+    """Convert data to numpy uint8 array if it isn't already."""
+    if isinstance(data, np.ndarray):
+        return data
+    return np.frombuffer(data, dtype=np.uint8).copy()
+
+
+def _xor_np(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """XOR two numpy arrays, padding shorter one if needed. Returns new array."""
+    if len(a) == len(b):
+        return np.bitwise_xor(a, b)
+    maxlen = max(len(a), len(b))
+    if len(a) < maxlen:
+        a = np.pad(a, (0, maxlen - len(a)))
+    if len(b) < maxlen:
+        b = np.pad(b, (0, maxlen - len(b)))
+    return np.bitwise_xor(a, b)
+
+
+def _xor_np_inplace(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """In-place XOR: a ^= b. Arrays must be same length. Returns a."""
+    np.bitwise_xor(a, b, out=a)
+    return a
+
+
+# ── Block Graph (numpy-optimized) ────────────────────────────────
 
 class CheckNode:
     """A check node in the bipartite LT graph."""
     __slots__ = ('src_nodes', 'check')
 
-    def __init__(self, src_nodes, check: bytes):
+    def __init__(self, src_nodes, check: np.ndarray):
         self.check = check
         self.src_nodes = src_nodes
 
@@ -133,18 +159,25 @@ class CheckNode:
 class BlockGraph:
     """Bipartite graph for LT decoding using belief-propagation (peeling).
 
-    Stores block data as `bytes` and uses numpy-vectorized XOR.
+    Stores block data as numpy uint8 arrays for zero-copy in-place XOR.
     """
 
     def __init__(self, num_blocks):
         self.checks = defaultdict(list)
         self.num_blocks = num_blocks
-        self.eliminated = {}  # block_index -> bytes
+        self.eliminated = {}  # block_index -> np.ndarray (uint8)
 
-    def add_block(self, nodes, data: bytes):
-        """Add an encoded block. Returns True when all source blocks are recovered."""
+    def add_block(self, nodes, data):
+        """Add an encoded block. Returns True when all source blocks are recovered.
+
+        Args:
+            nodes: set of source block indices
+            data: block data as bytes or numpy array
+        """
+        data = _to_np(data)
+
         if len(nodes) == 1:
-            to_eliminate = list(self.eliminate(next(iter(nodes)), data))
+            to_eliminate = list(self.eliminate(next(iter(nodes)), data.copy()))
             while to_eliminate:
                 other, check = to_eliminate.pop()
                 to_eliminate.extend(self.eliminate(other, check))
@@ -152,22 +185,26 @@ class BlockGraph:
             for node in list(nodes):
                 if node in self.eliminated:
                     nodes.remove(node)
-                    data = xor_bytes(data, self.eliminated[node])
+                    data = _xor_np(data, self.eliminated[node])
             if len(nodes) == 1:
                 return self.add_block(nodes, data)
             else:
-                check = CheckNode(nodes, data)
+                check = CheckNode(nodes, data.copy())
                 for node in nodes:
                     self.checks[node].append(check)
         return len(self.eliminated) >= self.num_blocks
 
-    def eliminate(self, node, data: bytes):
+    def eliminate(self, node, data: np.ndarray):
         """Eliminate a source block node, propagating through the graph."""
         self.eliminated[node] = data
         others = self.checks[node]
         del self.checks[node]
         for check in others:
-            check.check = xor_bytes(check.check, data)
+            # In-place XOR avoids allocating a new array each time
+            if len(check.check) == len(data):
+                _xor_np_inplace(check.check, data)
+            else:
+                check.check = _xor_np(check.check, data)
             check.src_nodes.remove(node)
             if len(check.src_nodes) == 1:
-                yield (next(iter(check.src_nodes)), check.check)
+                yield (next(iter(check.src_nodes)), check.check.copy())

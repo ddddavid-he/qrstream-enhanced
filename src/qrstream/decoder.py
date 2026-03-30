@@ -2,6 +2,7 @@
 LT Fountain Code Decoder: QR video → LT decode → file reconstruction.
 
 Supports both V1 (legacy) and V2 (with CRC32) protocol formats.
+Uses shared memory for zero-copy frame transfer to worker processes.
 """
 
 import sys
@@ -12,6 +13,7 @@ from struct import unpack as struct_unpack
 from math import ceil
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
+from multiprocessing import shared_memory
 
 import cv2
 import numpy as np
@@ -99,12 +101,13 @@ class LTDecoder:
         self.done = self.block_graph.add_block(src_blocks, data)
         return self.done, self.compressed
 
-    def decode_bytes(self, block_bytes: bytes) -> tuple[bool, bool]:
+    def decode_bytes(self, block_bytes: bytes, skip_crc: bool = False) -> tuple[bool, bool]:
         """Decode a raw block from bytes (auto-detects V1/V2).
 
-        For V2, validates CRC32 — raises ValueError on corrupt data.
+        For V2, validates CRC32 — raises ValueError on corrupt data,
+        unless skip_crc=True (for pre-validated blocks).
         """
-        header, data = unpack(block_bytes)
+        header, data = unpack(block_bytes, skip_crc=skip_crc)
         return self.consume_block(header, data)
 
     def decode_bytes_v1_compat(self, block_bytes: bytes) -> tuple[bool, bool]:
@@ -140,13 +143,19 @@ class LTDecoder:
         return self.done, self.compressed
 
     def bytes_dump(self) -> bytes:
-        """Reconstruct the original file data from recovered blocks."""
+        """Reconstruct the original file data from recovered blocks.
+
+        Handles both numpy arrays and bytes from the BlockGraph.
+        """
         buf = io.BytesIO()
         for ix in range(self.K):
             block = self.block_graph.eliminated.get(ix)
             if block is None:
                 raise RuntimeError(
                     f"Missing block {ix}/{self.K} — decoding incomplete")
+            # Convert numpy array to bytes if needed
+            if isinstance(block, np.ndarray):
+                block = block.tobytes()
             if ix < self.K - 1 or self.filesize % self.blocksize == 0:
                 buf.write(block)
             else:
@@ -162,6 +171,9 @@ class LTDecoder:
 # Max pixel dimension for QR detection. Frames larger than this are
 # downscaled before detection to avoid wasting CPU on 4K+ input.
 _MAX_DETECT_DIM = 1080
+
+# Use shared memory for frame transfer (avoids JPEG encode/decode overhead)
+_USE_SHARED_MEMORY = True
 
 
 def _downscale_frame(frame: np.ndarray) -> np.ndarray:
@@ -179,13 +191,29 @@ def _downscale_frame(frame: np.ndarray) -> np.ndarray:
 def _worker_detect_qr(frame_data):
     """Worker function for multiprocessing QR detection.
 
-    Takes (frame_idx, jpeg_bytes). Returns (frame_idx, block_bytes_or_None, seed_or_None).
+    Accepts either:
+      (frame_idx, jpeg_bytes)  — legacy JPEG mode
+      (frame_idx, shm_name, shape_h, shape_w, shape_c)  — shared memory mode
+
+    Returns (frame_idx, block_bytes_or_None, seed_or_None).
     """
-    frame_idx, jpeg_bytes = frame_data
-    frame = cv2.imdecode(
-        np.frombuffer(jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
-    if frame is None:
-        return (frame_idx, None, None)
+    if len(frame_data) == 5:
+        # Shared memory mode
+        frame_idx, shm_name, sh, sw, sc = frame_data
+        try:
+            shm = shared_memory.SharedMemory(name=shm_name)
+            frame = np.ndarray((sh, sw, sc), dtype=np.uint8, buffer=shm.buf).copy()
+            shm.close()
+            shm.unlink()
+        except Exception:
+            return (frame_idx, None, None)
+    else:
+        # Legacy JPEG mode
+        frame_idx, jpeg_bytes = frame_data
+        frame = cv2.imdecode(
+            np.frombuffer(jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if frame is None:
+            return (frame_idx, None, None)
 
     # Downscale high-res frames before detection
     frame = _downscale_frame(frame)
@@ -197,7 +225,16 @@ def _worker_detect_qr(frame_data):
 
     if qr_data is not None:
         try:
+            # Try base64 decode first (standard mode)
             block_bytes = base64.b64decode(qr_data)
+        except Exception:
+            # May be binary QR mode — QR data is raw bytes encoded as Latin-1
+            try:
+                block_bytes = qr_data.encode('latin-1')
+            except Exception:
+                return (frame_idx, None, None)
+
+        try:
             # Detect version and extract seed for dedup
             if len(block_bytes) >= V2_HEADER_SIZE and block_bytes[0] == 0x02:
                 # V2: validate CRC32 before trusting this block
@@ -207,8 +244,24 @@ def _worker_detect_qr(frame_data):
                     & 0xFFFFFFFF
                 )
                 if computed_crc != stored_crc:
-                    # CRC mismatch — corrupted QR read (e.g. frame transition)
-                    return (frame_idx, None, None)
+                    # CRC mismatch — try the other decode path
+                    # If we base64-decoded, try latin-1; if latin-1, try base64
+                    try:
+                        alt_bytes = qr_data.encode('latin-1')
+                        if len(alt_bytes) >= V2_HEADER_SIZE and alt_bytes[0] == 0x02:
+                            alt_crc = int.from_bytes(alt_bytes[16:20], 'big')
+                            alt_computed = (
+                                zlib.crc32(alt_bytes[:16] + alt_bytes[V2_HEADER_SIZE:])
+                                & 0xFFFFFFFF
+                            )
+                            if alt_computed == alt_crc:
+                                block_bytes = alt_bytes
+                            else:
+                                return (frame_idx, None, None)
+                        else:
+                            return (frame_idx, None, None)
+                    except Exception:
+                        return (frame_idx, None, None)
                 seed = int.from_bytes(block_bytes[10:14], 'big')
             elif len(block_bytes) >= V1_HEADER_SIZE:
                 # V1: seed at offset 9, 4 bytes BE
@@ -222,14 +275,13 @@ def _worker_detect_qr(frame_data):
     return (frame_idx, None, None)
 
 
-def _read_frames(video_path, sample_rate, total_frames, start_frame=0):
-    """Generator that reads frames from video and yields (frame_idx, jpeg_bytes).
+def _read_frames(video_path, sample_rate, total_frames, start_frame=0,
+                 use_shm=False):
+    """Generator that reads frames from video.
 
-    Args:
-        video_path: Path to the video file
-        sample_rate: Process every Nth frame
-        total_frames: Total frame count (for reference)
-        start_frame: Frame index to start reading from (skip earlier frames)
+    When use_shm=True, yields (frame_idx, shm_name, h, w, c) tuples with
+    frame data in shared memory (zero-copy to workers).
+    Otherwise yields (frame_idx, jpeg_bytes) tuples (legacy mode).
     """
     cap = cv2.VideoCapture(video_path)
     if start_frame > 0:
@@ -240,9 +292,26 @@ def _read_frames(video_path, sample_rate, total_frames, start_frame=0):
         if not ret:
             break
         if (frame_idx - start_frame) % sample_rate == 0:
-            _, jpeg_bytes = cv2.imencode(
-                '.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-            yield (frame_idx, jpeg_bytes.tobytes())
+            if use_shm:
+                try:
+                    shm = shared_memory.SharedMemory(
+                        create=True, size=frame.nbytes)
+                    shared_arr = np.ndarray(
+                        frame.shape, dtype=frame.dtype, buffer=shm.buf)
+                    shared_arr[:] = frame[:]
+                    h, w, c = frame.shape
+                    name = shm.name
+                    shm.close()  # close handle but don't unlink (worker will)
+                    yield (frame_idx, name, h, w, c)
+                except Exception:
+                    # Fallback to JPEG if shared memory fails
+                    _, jpeg_bytes = cv2.imencode(
+                        '.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    yield (frame_idx, jpeg_bytes.tobytes())
+            else:
+                _, jpeg_bytes = cv2.imencode(
+                    '.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                yield (frame_idx, jpeg_bytes.tobytes())
         frame_idx += 1
     cap.release()
 
@@ -260,7 +329,7 @@ def _probe_sample_rate(video_path: str, workers: int,
     Returns:
         (sample_rate, probe_results, frames_probed)
     """
-    PROBE_FRAMES = 60  # Probe first ~1s at 60fps
+    PROBE_FRAMES = 20  # Probe first ~0.3s at 60fps (sufficient for sample rate)
 
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -269,7 +338,8 @@ def _probe_sample_rate(video_path: str, workers: int,
     probe_count = min(PROBE_FRAMES, total_frames)
 
     # Read probe frames with sample_rate=1
-    probe_frames = list(_read_frames(video_path, 1, total_frames))
+    probe_frames = list(_read_frames(video_path, 1, total_frames,
+                                     use_shm=_USE_SHARED_MEMORY))
     probe_frames = probe_frames[:probe_count]
 
     if not probe_frames:
@@ -386,7 +456,7 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
                     decoded_count += 1
                     try:
                         if block_bytes[0] == 0x02:
-                            done, _ = lt_decoder.decode_bytes(block_bytes)
+                            done, _ = lt_decoder.decode_bytes(block_bytes, skip_crc=True)
                         else:
                             done, _ = lt_decoder.decode_bytes_v1_compat(
                                 block_bytes)
@@ -423,7 +493,8 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
 
         for frame_data in _read_frames(video_path, sample_rate,
                                         total_frames,
-                                        start_frame=frames_probed):
+                                        start_frame=frames_probed,
+                                        use_shm=_USE_SHARED_MEMORY):
             batch.append(frame_data)
 
             current_frame_idx = frame_data[0]
@@ -479,8 +550,9 @@ def _process_batch(executor, batch, seen_seeds, unique_blocks,
 
                 try:
                     # Try V2 first, fall back to V1 compat
+                    # Workers already validated CRC, skip re-validation
                     if block_bytes[0] == 0x02:
-                        done, _ = lt_decoder.decode_bytes(block_bytes)
+                        done, _ = lt_decoder.decode_bytes(block_bytes, skip_crc=True)
                     else:
                         done, _ = lt_decoder.decode_bytes_v1_compat(
                             block_bytes)

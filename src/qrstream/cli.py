@@ -2,7 +2,7 @@
 Unified CLI for QRStream: encode and decode subcommands.
 
 Usage:
-    qrstream encode <file> -o output.mp4 [--overhead 2.5] [--fps 10] [--ec-level 1] [--qr-version 20] [-w 8] [-v]
+    qrstream encode <file> -o output.mp4 [--overhead 2.0] [--fps 10] [--ec-level 1] [--qr-version 20] [-w 8] [-v]
     qrstream decode <video> -o output_file [-s sample_rate] [-w workers] [-v]
 """
 
@@ -23,7 +23,8 @@ def cmd_encode(args):
     output = args.output
     if output is None:
         base = os.path.splitext(os.path.basename(args.file))[0]
-        output = f"{base}.mp4"
+        ext = '.avi' if args.codec == 'mjpeg' else '.mp4'
+        output = f"{base}{ext}"
 
     encode_to_video(
         input_path=args.file,
@@ -35,6 +36,9 @@ def cmd_encode(args):
         compress=not args.no_compress,
         verbose=args.verbose,
         workers=args.workers,
+        use_legacy_qr=args.legacy_qr,
+        codec=args.codec,
+        binary_qr=args.binary_qr,
     )
 
 
@@ -103,6 +107,12 @@ def main():
                      help='QR code version 1-40, controls density (default: 20)')
     enc.add_argument('--no-compress', action='store_true',
                      help='Disable zlib compression')
+    enc.add_argument('--legacy-qr', action='store_true',
+                     help='Use qrcode library instead of OpenCV for QR generation (slower, more control)')
+    enc.add_argument('--codec', choices=['mp4v', 'mjpeg'], default='mp4v',
+                     help='Video codec: mp4v (default) or mjpeg (faster encoding, larger files)')
+    enc.add_argument('--binary-qr', action='store_true',
+                     help='Embed raw bytes in QR (skip base64, 33%% more capacity per frame, experimental)')
     enc.add_argument('-w', '--workers', type=int, default=None,
                      help='Number of parallel workers for QR generation (default: CPU count, max 8)')
     enc.add_argument('-v', '--verbose', action='store_true',
