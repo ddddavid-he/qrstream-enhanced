@@ -12,6 +12,9 @@ build/
 *.swp
 *.swo
 
+# CodeBuddy
+.codebuddy/
+
 # OS
 .DS_Store
 Thumbs.db

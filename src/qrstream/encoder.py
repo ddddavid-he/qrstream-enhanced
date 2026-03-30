@@ -53,7 +53,7 @@ class LTEncoder:
         for idx in src_blocks:
             result = xor_bytes(result, self._get_block(idx))
 
-        seq = self._seq
+        seq = self._seq & 0xFFFF  # Wrap to uint16 range (0-65535)
         self._seq += 1
         return result, seq
 
