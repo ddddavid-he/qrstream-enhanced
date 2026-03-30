@@ -12,6 +12,7 @@ from qrstream.lt_codec import (
 )
 from qrstream.protocol import (
     pack_v2, unpack, auto_blocksize, V2Header, V2_HEADER_SIZE,
+    cobs_encode, cobs_decode,
 )
 from qrstream.encoder import LTEncoder
 from qrstream.decoder import LTDecoder
@@ -215,3 +216,106 @@ class TestStrategyStats:
     def test_reset(self):
         reset_strategy_stats()
         # Just verify it doesn't crash
+
+
+class TestCobs:
+    """Test COBS encode/decode correctness."""
+
+    def test_roundtrip_simple(self):
+        data = b'Hello, World!'
+        assert cobs_decode(cobs_encode(data)) == data
+
+    def test_roundtrip_with_nulls(self):
+        data = b'\x00\x00\x00'
+        encoded = cobs_encode(data)
+        assert b'\x00' not in encoded
+        assert cobs_decode(encoded) == data
+
+    def test_roundtrip_mixed(self):
+        data = b'\x01\x00\x02\x00\x03'
+        encoded = cobs_encode(data)
+        assert b'\x00' not in encoded
+        assert cobs_decode(encoded) == data
+
+    def test_roundtrip_no_nulls(self):
+        data = b'\x01\x02\x03\x04\x05'
+        encoded = cobs_encode(data)
+        assert b'\x00' not in encoded
+        assert cobs_decode(encoded) == data
+
+    def test_roundtrip_binary(self):
+        data = bytes(range(256)) * 3  # all byte values including \x00
+        encoded = cobs_encode(data)
+        assert b'\x00' not in encoded
+        assert cobs_decode(encoded) == data
+
+    def test_roundtrip_random(self):
+        data = os.urandom(1000)
+        encoded = cobs_encode(data)
+        assert b'\x00' not in encoded
+        assert cobs_decode(encoded) == data
+
+    def test_empty(self):
+        assert cobs_decode(cobs_encode(b'')) == b''
+
+    def test_single_null(self):
+        data = b'\x00'
+        encoded = cobs_encode(data)
+        assert b'\x00' not in encoded
+        assert cobs_decode(encoded) == data
+
+    def test_overhead_is_small(self):
+        """COBS overhead should be at most ~0.4%."""
+        data = os.urandom(10000)
+        encoded = cobs_encode(data)
+        overhead = len(encoded) - len(data)
+        max_expected = ceil(len(data) / 254) + 1
+        assert overhead <= max_expected
+
+    def test_v2_block_roundtrip_with_cobs(self):
+        """Full V2 block → COBS encode → COBS decode → unpack."""
+        block_data = os.urandom(64)
+        packed = pack_v2(filesize=64, blocksize=64, block_count=1,
+                         seed=42, block_seq=0, data=block_data,
+                         binary_qr=True)
+        encoded = cobs_encode(packed)
+        assert b'\x00' not in encoded
+        decoded = cobs_decode(encoded)
+        assert decoded == packed
+        header, data = unpack(decoded)
+        assert header.seed == 42
+        assert data == block_data
+
+
+class TestBinaryQrCobsGeneration:
+    """Test binary QR generation uses COBS (no null bytes in QR payload)."""
+
+    def test_binary_qr_generates_image(self):
+        data = pack_v2(filesize=100, blocksize=64, block_count=2,
+                       seed=1, block_seq=0, data=b'\x00' * 64,
+                       binary_qr=True)
+        img = generate_qr_image(data, ec_level=1, version=20,
+                                binary_mode=True)
+        assert img is not None
+        assert len(img.shape) == 3
+
+    def test_binary_qr_detectable_by_opencv(self):
+        """COBS-encoded binary QR should be decodable by OpenCV."""
+        import cv2
+        from qrstream.protocol import cobs_encode
+
+        block_data = os.urandom(64)
+        packed = pack_v2(filesize=100, blocksize=64, block_count=2,
+                         seed=1, block_seq=0, data=block_data,
+                         binary_qr=True)
+        img = generate_qr_image(packed, ec_level=1, version=20,
+                                binary_mode=True)
+
+        detector = cv2.QRCodeDetector()
+        qr_str, _, _ = detector.detectAndDecode(img)
+        assert qr_str, "OpenCV should detect the COBS QR code"
+
+        # Decode: latin-1 → COBS decode → original packed bytes
+        raw = qr_str.encode('latin-1')
+        recovered = cobs_decode(raw)
+        assert recovered == packed

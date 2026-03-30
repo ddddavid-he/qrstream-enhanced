@@ -69,11 +69,7 @@ def generate_qr_image(data: bytes, ec_level: int = 1,
         binary_mode: Embed raw bytes directly (skip base64), requires qrcode lib
     """
     if binary_mode:
-        # Binary mode requires qrcode library for proper byte-mode encoding
-        if not HAS_QRCODE:
-            raise RuntimeError(
-                "Binary QR mode requires the 'qrcode' library. "
-                "Install it with: pip install qrcode[pil]")
+        # COBS binary mode: works with OpenCV encoder (no qrcode lib required)
         return _generate_qr_binary(data, ec_level, box_size, border, version)
 
     b64 = base64.b64encode(data).decode('ascii')
@@ -148,23 +144,63 @@ def _generate_qr_legacy(b64: str, ec_level: int, box_size: int,
 
 def _generate_qr_binary(data: bytes, ec_level: int, box_size: int,
                           border: int, version: int | None) -> np.ndarray:
-    """Generate QR with raw binary data (no base64). 33% more capacity.
+    """Generate QR with COBS-encoded binary data. ~33% more capacity than base64.
 
-    Uses qrcode library's byte-mode encoding with optimize=0 to
-    prevent the library from attempting to split the data into
-    mixed-mode segments.
+    Pipeline: raw bytes → COBS encode (eliminates \\x00) → latin-1 string → QR.
+    This avoids OpenCV's null-termination truncation issue while keeping
+    overhead to ~0.4% (vs base64's 33%).
     """
-    qr = qrcode.QRCode(
-        version=version,
-        error_correction=_EC_MAP.get(ec_level, ERROR_CORRECT_M),
-        box_size=box_size,
-        border=border,
-    )
-    qr.add_data(data, optimize=0)  # Force byte mode, no optimization
-    qr.make(fit=True)
-    pil_img = qr.make_image(fill_color="black", back_color="white")
-    img_array = np.array(pil_img.convert('RGB'))
-    return cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+    from .protocol import cobs_encode
+
+    cobs_data = cobs_encode(data)
+    # Convert to latin-1 string for QR embedding (all bytes 0x01-0xFF, no nulls)
+    payload = cobs_data.decode('latin-1')
+
+    # Use OpenCV encoder for speed (COBS data is null-free, safe for OpenCV)
+    try:
+        params = cv2.QRCodeEncoder_Params()
+        params.correction_level = _OPENCV_EC_MAP.get(
+            ec_level, cv2.QRCODE_ENCODER_CORRECT_LEVEL_M)
+        if version is not None:
+            params.version = version
+        params.mode = cv2.QRCODE_ENCODER_MODE_AUTO
+
+        encoder = cv2.QRCodeEncoder.create(params)
+        img = encoder.encode(payload)
+        if img is None:
+            raise RuntimeError("OpenCV QR encoder returned None")
+
+        h, w = img.shape[:2]
+        scale = box_size
+        if border > 0:
+            border_px = border * scale
+            img_scaled = cv2.resize(img, (w * scale, h * scale),
+                                    interpolation=cv2.INTER_NEAREST)
+            padded = cv2.copyMakeBorder(img_scaled,
+                                        border_px, border_px, border_px, border_px,
+                                        cv2.BORDER_CONSTANT, value=255)
+        else:
+            padded = cv2.resize(img, (w * scale, h * scale),
+                                interpolation=cv2.INTER_NEAREST)
+
+        if len(padded.shape) == 2:
+            return cv2.cvtColor(padded, cv2.COLOR_GRAY2BGR)
+        return padded
+    except Exception:
+        # Fallback to qrcode library
+        if not HAS_QRCODE:
+            raise
+        qr = qrcode.QRCode(
+            version=version,
+            error_correction=_EC_MAP.get(ec_level, ERROR_CORRECT_M),
+            box_size=box_size,
+            border=border,
+        )
+        qr.add_data(payload)
+        qr.make(fit=True)
+        pil_img = qr.make_image(fill_color="black", back_color="white")
+        img_array = np.array(pil_img.convert('RGB'))
+        return cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
 
 
 # ── QR Detection (Adaptive Strategy) ────────────────────────────

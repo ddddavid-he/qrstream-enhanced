@@ -27,6 +27,70 @@ import zlib
 from dataclasses import dataclass
 from math import ceil
 
+# ── COBS (Consistent Overhead Byte Stuffing) ─────────────────────
+# Eliminates all \x00 bytes from data with ~0.4% overhead.
+# This allows binary data to survive OpenCV's null-terminated string returns.
+
+
+def cobs_encode(data: bytes) -> bytes:
+    """COBS-encode data: output contains no \\x00 bytes.
+
+    Overhead is at most 1 byte per 254 input bytes (~0.4%).
+    Uses the standard COBS algorithm (Wikipedia reference).
+    """
+    output = bytearray()
+    idx = 0
+    length = len(data)
+    while idx <= length:
+        # Start a new code group
+        group = bytearray()
+        while idx < length and data[idx] != 0 and len(group) < 254:
+            group.append(data[idx])
+            idx += 1
+        if idx < length and data[idx] == 0:
+            # Found a zero: code = len(group) + 1, skip the zero
+            output.append(len(group) + 1)
+            output.extend(group)
+            idx += 1
+        else:
+            # End of data or 254-byte block without zero
+            if len(group) == 254:
+                # Special: 254 non-zero bytes → code 0xFF, no implicit zero
+                output.append(0xFF)
+                output.extend(group)
+            else:
+                # Final group: code = len(group) + 1
+                output.append(len(group) + 1)
+                output.extend(group)
+                break
+    return bytes(output)
+
+
+def cobs_decode(data: bytes) -> bytes:
+    """Decode COBS-encoded data back to original bytes."""
+    output = bytearray()
+    idx = 0
+    length = len(data)
+    while idx < length:
+        code = data[idx]
+        if code == 0:
+            raise ValueError("COBS decode error: unexpected zero byte in encoded data")
+        idx += 1
+        for _ in range(code - 1):
+            if idx >= length:
+                raise ValueError("COBS decode error: truncated data")
+            output.append(data[idx])
+            idx += 1
+        if code < 0xFF and idx < length:
+            output.append(0)
+    return bytes(output)
+
+
+def cobs_overhead(data_len: int) -> int:
+    """Calculate the maximum COBS overhead for a given data length."""
+    return ceil(data_len / 254)
+
+
 # ── Header sizes ──────────────────────────────────────────────────
 
 V1_HEADER_SIZE = 13
@@ -230,8 +294,10 @@ def auto_blocksize(filesize: int, ec_level: int = 1,
     )
 
     if binary_qr:
-        # Binary mode: raw byte capacity (no base64 overhead)
-        max_usable = qr_capacity
+        # COBS mode: raw byte capacity minus COBS overhead (~0.4%)
+        # COBS adds at most ceil(N/254) bytes. Solve: N + ceil(N/254) <= qr_capacity
+        # Approximation: N <= qr_capacity * 254 / 255
+        max_usable = (qr_capacity * 254) // 255
     else:
         # base64 encodes every 3 bytes as 4 chars: ceil(N/3)*4 <= qr_capacity
         # So max raw bytes N = floor(qr_capacity / 4) * 3

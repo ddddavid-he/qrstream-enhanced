@@ -197,16 +197,24 @@ def _worker_detect_qr(frame_data):
 
     Returns (frame_idx, block_bytes_or_None, seed_or_None).
     """
+    from .protocol import cobs_decode
+
     if len(frame_data) == 5:
-        # Shared memory mode
+        # Shared memory mode — always clean up shm even on failure
         frame_idx, shm_name, sh, sw, sc = frame_data
+        shm = None
         try:
             shm = shared_memory.SharedMemory(name=shm_name)
             frame = np.ndarray((sh, sw, sc), dtype=np.uint8, buffer=shm.buf).copy()
-            shm.close()
-            shm.unlink()
         except Exception:
             return (frame_idx, None, None)
+        finally:
+            if shm is not None:
+                try:
+                    shm.close()
+                    shm.unlink()
+                except Exception:
+                    pass
     else:
         # Legacy JPEG mode
         frame_idx, jpeg_bytes = frame_data
@@ -223,56 +231,63 @@ def _worker_detect_qr(frame_data):
         _worker_detect_qr._qr_detector = cv2.QRCodeDetector()
     qr_data = try_decode_qr(frame, _worker_detect_qr._qr_detector)
 
-    if qr_data is not None:
-        try:
-            # Try base64 decode first (standard mode)
-            block_bytes = base64.b64decode(qr_data)
-        except Exception:
-            # May be binary QR mode — QR data is raw bytes encoded as Latin-1
-            try:
-                block_bytes = qr_data.encode('latin-1')
-            except Exception:
-                return (frame_idx, None, None)
+    if qr_data is None:
+        return (frame_idx, None, None)
 
-        try:
-            # Detect version and extract seed for dedup
-            if len(block_bytes) >= V2_HEADER_SIZE and block_bytes[0] == 0x02:
-                # V2: validate CRC32 before trusting this block
-                stored_crc = int.from_bytes(block_bytes[16:20], 'big')
-                computed_crc = (
-                    zlib.crc32(block_bytes[:16] + block_bytes[V2_HEADER_SIZE:])
-                    & 0xFFFFFFFF
-                )
-                if computed_crc != stored_crc:
-                    # CRC mismatch — try the other decode path
-                    # If we base64-decoded, try latin-1; if latin-1, try base64
-                    try:
-                        alt_bytes = qr_data.encode('latin-1')
-                        if len(alt_bytes) >= V2_HEADER_SIZE and alt_bytes[0] == 0x02:
-                            alt_crc = int.from_bytes(alt_bytes[16:20], 'big')
-                            alt_computed = (
-                                zlib.crc32(alt_bytes[:16] + alt_bytes[V2_HEADER_SIZE:])
-                                & 0xFFFFFFFF
-                            )
-                            if alt_computed == alt_crc:
-                                block_bytes = alt_bytes
-                            else:
-                                return (frame_idx, None, None)
-                        else:
-                            return (frame_idx, None, None)
-                    except Exception:
-                        return (frame_idx, None, None)
-                seed = int.from_bytes(block_bytes[10:14], 'big')
-            elif len(block_bytes) >= V1_HEADER_SIZE:
-                # V1: seed at offset 9, 4 bytes BE
-                seed = int.from_bytes(block_bytes[9:13], 'big')
-            else:
-                return (frame_idx, None, None)
-            return (frame_idx, block_bytes, seed)
-        except Exception:
-            pass
+    # Try decoding the QR payload via multiple strategies:
+    # 1) base64 (standard mode)
+    # 2) latin-1 → COBS decode (binary_qr mode)
+    block_bytes = None
 
-    return (frame_idx, None, None)
+    for decode_fn in (_try_base64, lambda d: _try_cobs(d, cobs_decode)):
+        candidate = decode_fn(qr_data)
+        if candidate is None:
+            continue
+        # Validate with CRC32
+        if len(candidate) >= V2_HEADER_SIZE and candidate[0] == 0x02:
+            stored_crc = int.from_bytes(candidate[16:20], 'big')
+            computed_crc = (
+                zlib.crc32(candidate[:16] + candidate[V2_HEADER_SIZE:])
+                & 0xFFFFFFFF
+            )
+            if computed_crc == stored_crc:
+                block_bytes = candidate
+                break
+        elif len(candidate) >= V1_HEADER_SIZE:
+            # V1 has no CRC, accept it
+            block_bytes = candidate
+            break
+
+    if block_bytes is None:
+        return (frame_idx, None, None)
+
+    try:
+        if len(block_bytes) >= V2_HEADER_SIZE and block_bytes[0] == 0x02:
+            seed = int.from_bytes(block_bytes[10:14], 'big')
+        elif len(block_bytes) >= V1_HEADER_SIZE:
+            seed = int.from_bytes(block_bytes[9:13], 'big')
+        else:
+            return (frame_idx, None, None)
+        return (frame_idx, block_bytes, seed)
+    except Exception:
+        return (frame_idx, None, None)
+
+
+def _try_base64(qr_data: str) -> bytes | None:
+    """Try to decode QR payload as base64."""
+    try:
+        return base64.b64decode(qr_data)
+    except Exception:
+        return None
+
+
+def _try_cobs(qr_data: str, cobs_decode_fn) -> bytes | None:
+    """Try to decode QR payload as COBS-encoded binary (latin-1 → COBS decode)."""
+    try:
+        raw = qr_data.encode('latin-1')
+        return cobs_decode_fn(raw)
+    except Exception:
+        return None
 
 
 def _read_frames(video_path, sample_rate, total_frames, start_frame=0,
