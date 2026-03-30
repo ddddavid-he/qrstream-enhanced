@@ -13,7 +13,6 @@ from struct import unpack as struct_unpack
 from math import ceil
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
-from multiprocessing import shared_memory
 
 import cv2
 import numpy as np
@@ -172,8 +171,7 @@ class LTDecoder:
 # downscaled before detection to avoid wasting CPU on 4K+ input.
 _MAX_DETECT_DIM = 1080
 
-# Use shared memory for frame transfer (avoids JPEG encode/decode overhead)
-_USE_SHARED_MEMORY = True
+# Shared memory was removed — downscaling in reader + JPEG is simpler and leak-free.
 
 
 def _downscale_frame(frame: np.ndarray) -> np.ndarray:
@@ -191,40 +189,16 @@ def _downscale_frame(frame: np.ndarray) -> np.ndarray:
 def _worker_detect_qr(frame_data):
     """Worker function for multiprocessing QR detection.
 
-    Accepts either:
-      (frame_idx, jpeg_bytes)  — legacy JPEG mode
-      (frame_idx, shm_name, shape_h, shape_w, shape_c)  — shared memory mode
-
+    Takes (frame_idx, jpeg_bytes).
     Returns (frame_idx, block_bytes_or_None, seed_or_None).
     """
     from .protocol import cobs_decode
 
-    if len(frame_data) == 5:
-        # Shared memory mode — always clean up shm even on failure
-        frame_idx, shm_name, sh, sw, sc = frame_data
-        shm = None
-        try:
-            shm = shared_memory.SharedMemory(name=shm_name)
-            frame = np.ndarray((sh, sw, sc), dtype=np.uint8, buffer=shm.buf).copy()
-        except Exception:
-            return (frame_idx, None, None)
-        finally:
-            if shm is not None:
-                try:
-                    shm.close()
-                    shm.unlink()
-                except Exception:
-                    pass
-    else:
-        # Legacy JPEG mode
-        frame_idx, jpeg_bytes = frame_data
-        frame = cv2.imdecode(
-            np.frombuffer(jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if frame is None:
-            return (frame_idx, None, None)
-
-    # Downscale high-res frames before detection
-    frame = _downscale_frame(frame)
+    frame_idx, jpeg_bytes = frame_data
+    frame = cv2.imdecode(
+        np.frombuffer(jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if frame is None:
+        return (frame_idx, None, None)
 
     # Reuse QRCodeDetector to avoid repeated object creation
     if not hasattr(_worker_detect_qr, '_qr_detector'):
@@ -290,13 +264,11 @@ def _try_cobs(qr_data: str, cobs_decode_fn) -> bytes | None:
         return None
 
 
-def _read_frames(video_path, sample_rate, total_frames, start_frame=0,
-                 use_shm=False):
+def _read_frames(video_path, sample_rate, total_frames, start_frame=0):
     """Generator that reads frames from video.
 
-    When use_shm=True, yields (frame_idx, shm_name, h, w, c) tuples with
-    frame data in shared memory (zero-copy to workers).
-    Otherwise yields (frame_idx, jpeg_bytes) tuples (legacy mode).
+    Yields (frame_idx, jpeg_bytes) tuples. Frames are downscaled to
+    _MAX_DETECT_DIM before JPEG encoding to reduce IPC payload size.
     """
     cap = cv2.VideoCapture(video_path)
     if start_frame > 0:
@@ -307,26 +279,11 @@ def _read_frames(video_path, sample_rate, total_frames, start_frame=0,
         if not ret:
             break
         if (frame_idx - start_frame) % sample_rate == 0:
-            if use_shm:
-                try:
-                    shm = shared_memory.SharedMemory(
-                        create=True, size=frame.nbytes)
-                    shared_arr = np.ndarray(
-                        frame.shape, dtype=frame.dtype, buffer=shm.buf)
-                    shared_arr[:] = frame[:]
-                    h, w, c = frame.shape
-                    name = shm.name
-                    shm.close()  # close handle but don't unlink (worker will)
-                    yield (frame_idx, name, h, w, c)
-                except Exception:
-                    # Fallback to JPEG if shared memory fails
-                    _, jpeg_bytes = cv2.imencode(
-                        '.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                    yield (frame_idx, jpeg_bytes.tobytes())
-            else:
-                _, jpeg_bytes = cv2.imencode(
-                    '.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                yield (frame_idx, jpeg_bytes.tobytes())
+            # Downscale before encoding to reduce JPEG payload
+            frame = _downscale_frame(frame)
+            _, jpeg_bytes = cv2.imencode(
+                '.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            yield (frame_idx, jpeg_bytes.tobytes())
         frame_idx += 1
     cap.release()
 
@@ -353,8 +310,7 @@ def _probe_sample_rate(video_path: str, workers: int,
     probe_count = min(PROBE_FRAMES, total_frames)
 
     # Read probe frames with sample_rate=1
-    probe_frames = list(_read_frames(video_path, 1, total_frames,
-                                     use_shm=_USE_SHARED_MEMORY))
+    probe_frames = list(_read_frames(video_path, 1, total_frames))
     probe_frames = probe_frames[:probe_count]
 
     if not probe_frames:
@@ -508,8 +464,7 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
 
         for frame_data in _read_frames(video_path, sample_rate,
                                         total_frames,
-                                        start_frame=frames_probed,
-                                        use_shm=_USE_SHARED_MEMORY):
+                                        start_frame=frames_probed):
             batch.append(frame_data)
 
             current_frame_idx = frame_data[0]
