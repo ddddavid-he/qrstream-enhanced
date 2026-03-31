@@ -1,6 +1,6 @@
 [project]
-name = "qrstream-enhanced"
-version = "0.4.0"
+name = "qrstream"
+version = "0.4.1"
 description = "Encode and decode files via QR code video streams using LT fountain codes"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,7 +18,7 @@ keywords = [
     "opencv",
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
@@ -44,6 +44,7 @@ Issues = "https://github.com/ddddavid-he/qrstream-enhanced/issues"
 
 [project.scripts]
 qrs = "qrstream.cli:main"
+qrstream = "qrstream.cli:main"
 
 [build-system]
 requires = ["hatchling"]

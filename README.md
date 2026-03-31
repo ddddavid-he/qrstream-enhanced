@@ -1,4 +1,4 @@
-# QRStream Enhanced
+# QRStream
 
 [中文文档](README-zh.md)
 
@@ -27,6 +27,46 @@ Encoder                                     Decoder
 
 ## Installation
 
+### From PyPI with pip
+
+```bash
+pip install qrstream
+```
+
+Use either command after installation:
+
+```bash
+qrstream <command> [options]
+# or
+qrs <command> [options]
+```
+
+You can also run it as a module:
+
+```bash
+python -m qrstream <command> [options]
+```
+
+### From PyPI with uv
+
+```bash
+uv tool install qrstream
+```
+
+Then run:
+
+```bash
+qrstream <command> [options]
+```
+
+For one-off execution without a persistent install:
+
+```bash
+uvx qrstream <command> [options]
+```
+
+### Development Install
+
 ```bash
 git clone https://github.com/ddddavid-he/qrstream-enhanced.git && cd qrstream-enhanced
 uv sync --dev
@@ -40,13 +80,15 @@ uv sync --dev
 ## Usage
 
 ```bash
-uv run qrs <command> [options]
+qrstream <command> [options]
 ```
+
+`qrs` is kept as a short alias, and `python -m qrstream` works as well.
 
 ### Encode (File → QR Video)
 
 ```bash
-uv run qrs encode <file> -o output.mp4 [options]
+qrstream encode <file> -o output.mp4 [options]
 ```
 
 | Option | Default | Description |
@@ -69,7 +111,7 @@ uv run qrs encode <file> -o output.mp4 [options]
 ### Decode (QR Video → File)
 
 ```bash
-uv run qrs decode <video> -o output_file [options]
+qrstream decode <video> -o output_file [options]
 ```
 
 | Option | Default | Description |
@@ -84,13 +126,13 @@ uv run qrs decode <video> -o output_file [options]
 
 ```bash
 # Encode a PDF (default: COBS binary mode, 2x redundancy)
-uv run qrs encode report.pdf -o report.mp4 --overhead 2.0 -v
+qrstream encode report.pdf -o report.mp4 --overhead 2.0 -v
 
 # Decode video (adaptive sample rate + targeted recovery)
-uv run qrs decode report.mp4 -o report_recovered.pdf -v
+qrstream decode report.mp4 -o report_recovered.pdf -v
 
 # Encode with high error correction (for phone screen capture)
-uv run qrs encode data.bin -o data.mp4 --ec-level 3 --qr-version 15
+qrstream encode data.bin -o data.mp4 --ec-level 3 --qr-version 15
 ```
 
 ### Python API
@@ -114,7 +156,7 @@ print(f"wrote {written} bytes")
 ## Project Structure
 
 ```
-qrstream-enhanced/
+project-root/
 ├── pyproject.toml             # Project config & dependencies
 ├── src/qrstream/
 │   ├── cli.py                 # CLI entry (encode/decode subcommands)

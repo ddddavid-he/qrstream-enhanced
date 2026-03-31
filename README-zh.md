@@ -1,4 +1,4 @@
-# QRStream Enhanced
+# QRStream
 
 [English](README.md)
 
@@ -25,6 +25,46 @@
 
 ## 安装
 
+### 通过 pip 从 PyPI 安装
+
+```bash
+pip install qrstream
+```
+
+安装后可直接使用以下任一命令：
+
+```bash
+qrstream <command> [options]
+# 或
+qrs <command> [options]
+```
+
+也可以通过模块方式运行：
+
+```bash
+python -m qrstream <command> [options]
+```
+
+### 通过 uv 从 PyPI 安装
+
+```bash
+uv tool install qrstream
+```
+
+安装后运行：
+
+```bash
+qrstream <command> [options]
+```
+
+如果只想临时执行而不常驻安装：
+
+```bash
+uvx qrstream <command> [options]
+```
+
+### 开发环境安装
+
 ```bash
 git clone https://github.com/ddddavid-he/qrstream-enhanced.git && cd qrstream-enhanced
 uv sync --dev
@@ -38,13 +78,15 @@ uv sync --dev
 ## 使用方式
 
 ```bash
-uv run qrs <command> [options]
+qrstream <command> [options]
 ```
+
+同时保留 `qrs` 这个短命令别名，也支持 `python -m qrstream`。
 
 ### 编码（文件 → QR 码视频）
 
 ```bash
-uv run qrs encode <file> -o output.mp4 [options]
+qrstream encode <file> -o output.mp4 [options]
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -67,7 +109,7 @@ uv run qrs encode <file> -o output.mp4 [options]
 ### 解码（QR 码视频 → 文件）
 
 ```bash
-uv run qrs decode <video> -o output_file [options]
+qrstream decode <video> -o output_file [options]
 ```
 
 | 参数 | 默认值 | 说明 |
@@ -82,13 +124,13 @@ uv run qrs decode <video> -o output_file [options]
 
 ```bash
 # 编码 PDF 文件（默认 COBS 二进制模式，2 倍冗余）
-uv run qrs encode report.pdf -o report.mp4 --overhead 2.0 -v
+qrstream encode report.pdf -o report.mp4 --overhead 2.0 -v
 
 # 解码视频（自适应采样率 + 定向恢复）
-uv run qrs decode report.mp4 -o report_recovered.pdf -v
+qrstream decode report.mp4 -o report_recovered.pdf -v
 
 # 编码时使用高纠错等级（适合手机拍屏场景）
-uv run qrs encode data.bin -o data.mp4 --ec-level 3 --qr-version 15
+qrstream encode data.bin -o data.mp4 --ec-level 3 --qr-version 15
 ```
 
 ### 编程接口
@@ -112,7 +154,7 @@ print(f"wrote {written} bytes")
 ## 项目结构
 
 ```
-qrstream-enhanced/
+project-root/
 ├── pyproject.toml             # 项目配置与依赖
 ├── src/qrstream/
 │   ├── cli.py                 # CLI 入口（encode/decode 子命令）

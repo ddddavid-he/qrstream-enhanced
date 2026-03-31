@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-QRStream Enhanced main entry point.
+QRStream main entry point.
 
 Usage:
   uv run main.py [args]
-  uv run qrs [args]
+  uv run qrstream [args]
 """
 
 from qrstream.cli import main

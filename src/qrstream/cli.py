@@ -1,9 +1,9 @@
 """
-Unified CLI for QRStream Enhanced.
+Unified CLI for QRStream.
 
 Usage:
-    qrs encode <file> -o output.mp4 [--overhead 2.0] [--fps 10] [-v]
-    qrs decode <video> -o output_file [-s sample_rate] [-v]
+    qrstream encode <file> -o output.mp4 [--overhead 2.0] [--fps 10] [-v]
+    qrstream decode <video> -o output_file [-s sample_rate] [-v]
 """
 
 import sys
@@ -71,10 +71,11 @@ def cmd_decode(args):
     print(f"\nSuccess! Saved to: {output_path} ({written} bytes)")
 
 
-def main():
+def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
+    """Build the top-level CLI parser."""
     parser = argparse.ArgumentParser(
-        prog='qrs',
-        description='QRStream Enhanced: Encode and decode files via QR code video streams')
+        prog=prog,
+        description='QRStream: Encode and decode files via QR code video streams')
 
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
 
@@ -123,7 +124,12 @@ def main():
     dec.add_argument('-v', '--verbose', action='store_true',
                      help='Print detailed progress')
 
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv: list[str] | None = None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
 
     if args.command == 'encode':
         cmd_encode(args)
