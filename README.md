@@ -1,177 +1,199 @@
 # QRStream Enhanced
 
-通过 QR 码视频流传输任意文件。基于 **LT 喷泉码（Luby Transform Fountain Codes）** 实现可靠的无反馈信道数据传输——即使丢失部分帧也能完整恢复原始文件。
+[中文文档](README-zh.md)
 
-## 原理概览
+Transfer arbitrary files through QR code video streams. Built on **LT Fountain Codes (Luby Transform)** for reliable, feedback-free data transmission — the original file can be fully recovered even if some frames are lost.
+
+## How It Works
 
 ```
-编码端                                    解码端
-┌──────────┐   LT 喷泉码    ┌──────────┐   录屏/拍摄   ┌──────────┐   QR 识别    ┌──────────┐
-│ 原始文件  │ ──────────── → │ QR 码视频 │ ──────────→ │ 视频文件  │ ──────────→ │ 还原文件  │
-└──────────┘   zlib + COBS  └──────────┘              └──────────┘   LT 解码    └──────────┘
+Encoder                                     Decoder
+┌──────────┐   LT Fountain    ┌──────────┐   Screen cap   ┌──────────┐   QR detect    ┌──────────┐
+│   File    │ ────────────── → │ QR Video │ ──────────── → │  Video   │ ────────────→ │ Recovered│
+└──────────┘   zlib + COBS    └──────────┘                └──────────┘   LT decode    │   File   │
+                                                                                       └──────────┘
 ```
 
-1. **编码**：将文件（可选 zlib 压缩）分块，通过 LT 喷泉码生成冗余编码块，每块序列化为 V2 协议帧，经 COBS 编码后嵌入 QR 码，最终输出 MP4 视频。
-2. **解码**：使用 WeChatQRCode 从视频中高鲁棒性地提取 QR 码，COBS 解码后 CRC32 校验去除损坏帧，喂入 LT 解码器进行信念传播（peeling），恢复所有源块后重建原始文件。
+1. **Encode**: Split the file (optionally zlib-compressed) into blocks, generate redundant coded blocks via LT fountain codes, serialize each into a V3 protocol frame, COBS-encode, embed into QR codes, and output an MP4 video.
+2. **Decode**: Extract QR codes from video using WeChatQRCode (highly robust), COBS-decode, CRC32-validate to discard corrupted frames, feed into the LT decoder for belief propagation (peeling), and reconstruct the original file. The decoder auto-detects V2/V3 protocols.
 
-**核心优势**：
-- **LT 喷泉码**：无码率纠删码，天然容忍帧丢失、模糊、遮挡
-- **COBS 编码**：仅 0.4% overhead，比 base64 节省 33% 容量
-- **WeChatQRCode 检测器**：对手机拍摄场景（透视、摩尔纹、光照）鲁棒性远超标准 QR 检测器
-- **自适应采样率**：根据检测率和帧重复数自动选择最优采样策略
-- **定向恢复**：首轮扫描后针对缺失块的时间位置精准补扫
+**Key Features**:
+- **LT Fountain Codes**: Rateless erasure codes — naturally tolerant of frame loss, blur, and occlusion
+- **COBS Encoding**: Only ~0.4% overhead, saves 33% capacity compared to base64
+- **WeChatQRCode Detector**: Far more robust than standard QR detectors for phone-captured screens (perspective, moire, lighting)
+- **Adaptive Sample Rate**: Automatically selects optimal sampling strategy based on detection rate and frame repetition
+- **Targeted Recovery**: After initial scan, precisely re-scans video segments where missing blocks are expected
+- **Low-Memory Paths**: mmap-backed encoding and streaming decode-to-file for large inputs
 
-## 安装
+## Installation
 
 ```bash
-git clone <repo-url> && cd qrstream-enhanced
+git clone https://github.com/ddddavid-he/qrstream-enhanced.git && cd qrstream-enhanced
 uv sync --dev
 ```
 
-### 系统要求
+### Requirements
 
 - Python >= 3.10
-- 依赖：`opencv-contrib-python`, `numpy`, `tqdm`, `qrcode[pil]`
+- Dependencies: `opencv-contrib-python`, `numpy`, `tqdm`, `qrcode[pil]`
 
-## 使用方式
+## Usage
 
 ```bash
 uv run qrs <command> [options]
 ```
 
-### 编码（文件 → QR 码视频）
+### Encode (File → QR Video)
 
 ```bash
 uv run qrs encode <file> -o output.mp4 [options]
 ```
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `<file>` | - | 输入文件路径 |
-| `-o, --output` | `<filename>.mp4` | 输出视频路径 |
-| `--overhead` | `2.0` | 编码冗余倍率（源块数的倍数） |
-| `--fps` | `10` | 输出视频帧率 |
-| `--ec-level` | `1` | QR 纠错等级：0=L(7%), 1=M(15%), 2=Q(25%), 3=H(30%) |
-| `--qr-version` | `20` | QR 码版本 1-40（越大密度越高） |
-| `--no-compress` | - | 禁用 zlib 压缩 |
-| `--base64-qr` | - | 使用 base64 编码代替 COBS（兼容性更好但容量少 33%） |
-| `--legacy-qr` | - | 使用 qrcode 库生成 QR（更慢但参数控制更精细） |
-| `--codec` | `mp4v` | 视频编码器：`mp4v` 或 `mjpeg`（更快但文件更大） |
-| `-w, --workers` | CPU 核心数 | 并行 QR 生成的工作进程数 |
-| `-v, --verbose` | - | 输出额外详细信息（进度条始终显示） |
+| Option | Default | Description |
+|--------|---------|-------------|
+| `<file>` | - | Input file path |
+| `-o, --output` | `<filename>.mp4` | Output video path |
+| `--overhead` | `2.0` | Encoding redundancy ratio (multiple of source block count) |
+| `--fps` | `10` | Output video frame rate |
+| `--ec-level` | `1` | QR error correction: 0=L(7%), 1=M(15%), 2=Q(25%), 3=H(30%) |
+| `--qr-version` | `20` | QR code version 1-40 (higher = denser) |
+| `--no-compress` | - | Disable zlib compression |
+| `--force-compress` | - | Force compression for large V3 inputs (higher memory usage) |
+| `--base64-qr` | - | Use base64 encoding instead of COBS (better compat, 33% less capacity) |
+| `--legacy-qr` | - | Use `qrcode` library for QR generation (slower, finer control) |
+| `--codec` | `mp4v` | Video codec: `mp4v` or `mjpeg` (faster but larger files) |
+| `--protocol` | `v3` | Protocol version: `v3` (default) or `v2` |
+| `-w, --workers` | CPU count | Parallel workers for QR generation |
+| `-v, --verbose` | - | Print extra detail (progress bars always shown) |
 
-### 解码（QR 码视频 → 文件）
+### Decode (QR Video → File)
 
 ```bash
 uv run qrs decode <video> -o output_file [options]
 ```
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `<video>` | - | 输入视频路径（MP4, MOV 等） |
-| `-o, --output` | `decoded_output` | 输出文件路径 |
-| `-s, --sample-rate` | `0`（自动） | 每 N 帧采样一次（0=自适应探测） |
-| `-w, --workers` | 全部 CPU 核心 | 并行 QR 识别的工作进程数 |
-| `-v, --verbose` | - | 输出详细进度信息 |
+| Option | Default | Description |
+|--------|---------|-------------|
+| `<video>` | - | Input video path (MP4, MOV, etc.) |
+| `-o, --output` | `decoded_output` | Output file path |
+| `-s, --sample-rate` | `0` (auto) | Sample every Nth frame (0 = adaptive probing) |
+| `-w, --workers` | All CPU cores | Parallel workers for QR detection |
+| `-v, --verbose` | - | Print detailed progress |
 
-### 示例
+### Examples
 
 ```bash
-# 编码 PDF 文件（默认 COBS 二进制模式，2 倍冗余）
+# Encode a PDF (default: COBS binary mode, 2x redundancy)
 uv run qrs encode report.pdf -o report.mp4 --overhead 2.0 -v
 
-# 解码视频（自适应采样率 + 定向恢复）
+# Decode video (adaptive sample rate + targeted recovery)
 uv run qrs decode report.mp4 -o report_recovered.pdf -v
 
-# 编码时使用高纠错等级（适合手机拍屏场景）
+# Encode with high error correction (for phone screen capture)
 uv run qrs encode data.bin -o data.mp4 --ec-level 3 --qr-version 15
 ```
 
-### 编程接口
+### Python API
 
 ```python
 from qrstream.encoder import encode_to_video
-from qrstream.decoder import extract_qr_from_video, decode_blocks
+from qrstream.decoder import extract_qr_from_video, decode_blocks, decode_blocks_to_file
 
-# 编码（默认使用 COBS 二进制模式）
+# Encode (default: COBS binary mode)
 encode_to_video("input.bin", "output.mp4", overhead=2.0, verbose=True)
 
-# 解码（自适应采样率 + 定向恢复）
+# Decode to memory
 blocks = extract_qr_from_video("output.mp4", verbose=True)
 result = decode_blocks(blocks, verbose=True)
-with open("recovered.bin", "wb") as f:
-    f.write(result)
+
+# Better for large files: stream directly to file with incremental decompression
+written = decode_blocks_to_file(blocks, "recovered.bin", verbose=True)
+print(f"wrote {written} bytes")
 ```
 
-## 项目结构
+## Project Structure
 
 ```
 qrstream-enhanced/
-├── pyproject.toml             # 项目配置与依赖
+├── pyproject.toml             # Project config & dependencies
 ├── src/qrstream/
-│   ├── cli.py                 # CLI 入口（encode/decode 子命令）
-│   ├── encoder.py             # LT 编码 → QR 帧生成 → MP4 视频写入
-│   ├── decoder.py             # 视频帧提取 → QR 检测 → LT 解码 → 文件重建
-│   ├── lt_codec.py            # LT 喷泉码原语（PRNG、RSD、BlockGraph）
-│   ├── protocol.py            # V2 协议序列化 + COBS 编解码
-│   └── qr_utils.py            # QR 生成（OpenCV）+ 检测（WeChatQRCode）
+│   ├── cli.py                 # CLI entry (encode/decode subcommands)
+│   ├── encoder.py             # LT encode → QR frame generation → MP4 video
+│   ├── decoder.py             # Video frame extraction → QR detect → LT decode → file rebuild
+│   ├── lt_codec.py            # LT fountain code primitives (PRNG, RSD, BlockGraph)
+│   ├── protocol.py            # V2/V3 protocol serialization + COBS codec
+│   └── qr_utils.py            # QR generation (OpenCV) + detection (WeChatQRCode)
 ├── tests/
-│   ├── test_lt_codec.py       # LT 编解码器单元测试
-│   ├── test_protocol.py       # V2 协议 + COBS 测试
-│   ├── test_roundtrip.py      # 端到端回环测试
-│   └── test_optimizations.py  # 性能优化 + WeChatQR + COBS 测试
+│   ├── test_lt_codec.py       # LT codec unit tests
+│   ├── test_protocol.py       # V2/V3 protocol + COBS tests
+│   ├── test_decoder.py        # Decoder validation + probe strategy tests
+│   ├── test_roundtrip.py      # End-to-end roundtrip tests
+│   └── test_optimizations.py  # Perf optimizations + WeChatQR + COBS tests
 └── benchmarks/
-    └── benchmark.py           # 性能基准测试
+    └── benchmark.py           # Performance benchmarks
 ```
 
-## 技术细节
+## Technical Details
 
-### V2 协议格式（20 字节头部）
+### V3 Protocol Format (24-byte header + 4-byte trailing CRC)
 
 ```
 Offset  Size  Field
-  0      1    version      0x02
-  1      1    flags        bit0=zlib 压缩, bit1=COBS 二进制模式
-  2      4    filesize     uint32 BE（压缩后大小）
-  6      2    blocksize    uint16 BE
-  8      2    block_count  uint16 BE  K = ceil(filesize / blocksize)
- 10      4    seed         uint32 BE  PRNG 种子
- 14      2    block_seq    uint16 BE  单调递增序号
- 16      4    crc32        CRC32（header[0:16] + data）
- 20      ...  data         blocksize 字节的编码数据
+  0      1    version      0x03
+  1      1    flags        bit0=zlib compressed, bit1=COBS binary mode
+  2      8    filesize     uint64 BE (encoded payload size; compressed size when zlib is on)
+ 10      2    blocksize    uint16 BE
+ 12      4    block_count  uint32 BE  K = ceil(filesize / blocksize)
+ 16      4    seed         uint32 BE  PRNG seed
+ 20      2    block_seq    uint16 BE  monotonically increasing sequence number
+ 22      2    reserved     reserved (currently 0)
+ 24      ...  data         blocksize bytes of encoded data
+ ...     4    crc32        CRC32(header[0:24] + data)
 ```
 
-### 编码模式
+- Default encoding uses **V3**.
+- The decoder auto-detects **V2** and **V3**.
+- V3 extends `filesize` to `uint64` and `block_count` to `uint32`, supporting larger files and block counts.
 
-| 模式 | QR 内容 | 容量开销 | 默认 |
-|------|---------|----------|------|
-| COBS 二进制 | raw bytes → COBS → latin-1 string | ~0.4% | 是 |
-| Base64 | raw bytes → base64 string | ~33% | 否（`--base64-qr`） |
+### Encoding Modes
 
-COBS（Consistent Overhead Byte Stuffing）消除所有 `\x00` 字节，使数据可安全通过 QR 字符串接口传递。
+| Mode | QR Content | Capacity Overhead | Default |
+|------|-----------|-------------------|---------|
+| COBS binary | raw bytes → COBS → latin-1 string | ~0.4% | Yes |
+| Base64 | raw bytes → base64 string | ~33% | No (`--base64-qr`) |
 
-### 解码管线
+COBS (Consistent Overhead Byte Stuffing) eliminates all `\x00` bytes, allowing binary data to safely pass through QR string interfaces.
 
-1. **探测阶段**：扫描前 30 帧，测量检测率 p 和帧重复数 R，计算最优采样率
-2. **主扫描**：按自适应采样率并行检测 QR 码，实时喂入 LT 解码器
-3. **定向恢复**：若首轮未恢复完整，定位缺失 seed 对应的视频时间段精准补扫
-4. **LT 解码**：信念传播（peeling）算法恢复所有源块
+### Large Files & Low-Memory Paths
 
-### LT 喷泉码参数
+- For large **V3** inputs, the encoder uses `mmap` for random access, avoiding loading the entire file into memory.
+- When the input is large enough, V3 encoding automatically disables `zlib` compression to preserve the low-memory path; use `--force-compress` to override.
+- The decoder supports streaming writes with incremental decompression, reducing memory overhead.
+- Large file decoding shows **LT block decoding progress** and **output write progress** bars.
 
-| 参数 | 值 | 说明 |
-|------|-----|------|
-| 度分布 | Robust Soliton Distribution | c=0.1, delta=0.5 |
-| PRNG | LCG (a=16807, m=2^31-1) | 5 轮预热消除序列种子偏差 |
-| XOR | numpy 向量化 + 原地操作 | 比纯 Python 快 10-50x |
-| 解码 | Belief Propagation (Peeling) | 基于二部图的迭代消元 |
+### Decoding Pipeline
 
-## 测试
+1. **Probe phase**: Sample 3 spread-out windows in the video (120 frames each by default), measure detection rate and repetition per window, pick the most conservative `sample_rate`
+2. **Main scan**: Detect QR codes in parallel at the adaptive sample rate, feeding into the LT decoder in real time
+3. **Targeted recovery**: If the first pass didn't recover all blocks, use linear regression on observed (seed, frame) pairs to locate missing seeds and re-scan those segments precisely
+4. **LT decode**: Belief propagation (peeling) to recover all source blocks
+5. **Output writeback**: Write recovered blocks sequentially; incremental decompression in compressed mode
+
+### LT Fountain Code Parameters
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Degree distribution | Robust Soliton Distribution | c=0.1, delta=0.5 |
+| PRNG | LCG (a=16807, m=2^31-1) | 5 warmup rounds to eliminate sequential seed bias |
+| XOR | numpy vectorized + in-place | 10-50x faster than pure Python |
+| Decoding | Belief Propagation (Peeling) | Iterative elimination on bipartite graph |
+
+## Testing
 
 ```bash
 uv run pytest tests/ -v
 ```
 
-## 许可证
+## License
 
 MIT

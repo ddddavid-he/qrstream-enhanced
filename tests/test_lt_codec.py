@@ -122,6 +122,16 @@ class TestBlockGraph:
         assert self._as_bytes(bg.eliminated[1]) == src[1]
         assert self._as_bytes(bg.eliminated[2]) == src[2]
 
+    def test_add_block_does_not_mutate_input_set(self):
+        bg = BlockGraph(2)
+        bg.add_block({0}, b'\xAA')
+
+        nodes = {0, 1}
+        original = set(nodes)
+        bg.add_block(nodes, b'\xBB')
+
+        assert nodes == original
+
 
 class TestDegreeDistribution:
     """Verify PRNG warmup produces a healthy RSD degree distribution."""

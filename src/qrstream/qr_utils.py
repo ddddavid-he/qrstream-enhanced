@@ -79,7 +79,7 @@ def generate_qr_image(data: bytes, ec_level: int = 1,
     # Default: OpenCV QRCodeEncoder (much faster)
     try:
         return _generate_qr_opencv(b64, ec_level, box_size, border, version)
-    except Exception:
+    except (RuntimeError, cv2.error):
         # Fall back to qrcode library if OpenCV encoder fails
         if HAS_QRCODE:
             return _generate_qr_legacy(b64, ec_level, box_size, border, version)
@@ -180,7 +180,7 @@ def _generate_qr_binary(data: bytes, ec_level: int, box_size: int,
         if len(padded.shape) == 2:
             return cv2.cvtColor(padded, cv2.COLOR_GRAY2BGR)
         return padded
-    except Exception:
+    except (RuntimeError, cv2.error):
         if not HAS_QRCODE:
             raise
         qr = qrcode.QRCode(
@@ -211,7 +211,7 @@ def try_decode_qr(frame: np.ndarray, qr_detector=None) -> str | None:
     if not hasattr(try_decode_qr, '_wechat'):
         try:
             try_decode_qr._wechat = cv2.wechat_qrcode_WeChatQRCode()
-        except Exception:
+        except (cv2.error, OSError):
             try_decode_qr._wechat = None
 
     if try_decode_qr._wechat is not None:
@@ -228,17 +228,3 @@ def reset_strategy_stats():
     """Reset detector state (useful for testing)."""
     if hasattr(try_decode_qr, '_wechat'):
         del try_decode_qr._wechat
-
-
-def detect_qr_data(frame: np.ndarray, qr_detector=None) -> bytes | None:
-    """Detect and decode a QR code from a video frame.
-
-    Returns decoded raw bytes (after base64 decode) or None.
-    """
-    qr_string = try_decode_qr(frame, qr_detector)
-    if qr_string is None:
-        return None
-    try:
-        return base64.b64decode(qr_string)
-    except Exception:
-        return None

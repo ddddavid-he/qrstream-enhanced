@@ -63,6 +63,8 @@ class PRNG:
     """Linear congruential PRNG for deterministic block selection."""
 
     def __init__(self, K, delta=DEFAULT_DELTA, c=DEFAULT_C):
+        if K <= 0:
+            raise ValueError(f"K must be positive, got {K}")
         self.state = None
         self.K = K
         self.cdf = gen_rsd_cdf(K, delta, c)
@@ -175,6 +177,7 @@ class BlockGraph:
             data: block data as bytes or numpy array
         """
         data = _to_np(data)
+        nodes = set(nodes)
 
         if len(nodes) == 1:
             to_eliminate = list(self.eliminate(next(iter(nodes)), data.copy()))
