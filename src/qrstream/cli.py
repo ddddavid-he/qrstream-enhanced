@@ -33,6 +33,8 @@ def cmd_encode(args):
         fps=args.fps,
         ec_level=args.ec_level,
         qr_version=args.qr_version,
+        border=args.border,
+        lead_in_seconds=args.lead_in_seconds,
         compress=not args.no_compress,
         verbose=args.verbose,
         workers=args.workers,
@@ -94,6 +96,11 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
     enc.add_argument('--qr-version', type=int, default=20,
                      choices=range(1, 41), metavar='N',
                      help='QR code version 1-40, controls density (default: 20)')
+    enc.add_argument('--border', type=float, default=0.0,
+                     help='Quiet-zone width as a percentage of QR content width')
+    enc.add_argument('--lead-in-seconds', type=float, default=0.0,
+                     dest='lead_in_seconds',
+                     help='White lead-in duration before the first QR frame')
     enc.add_argument('--no-compress', action='store_true',
                      help='Disable zlib compression')
     enc.add_argument('--force-compress', action='store_true',

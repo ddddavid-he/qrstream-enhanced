@@ -45,7 +45,7 @@ _OPENCV_EC_MAP = {
 # ── QR Generation ────────────────────────────────────────────────
 
 def generate_qr_image(data: bytes, ec_level: int = 1,
-                      box_size: int = 10, border: int = 4,
+                      box_size: int = 10, border: float = 4,
                       version: int | None = None,
                       use_legacy: bool = False,
                       binary_mode: bool = False) -> np.ndarray:
@@ -63,7 +63,7 @@ def generate_qr_image(data: bytes, ec_level: int = 1,
         data: Raw bytes to encode
         ec_level: Error correction level (0=L, 1=M, 2=Q, 3=H)
         box_size: Pixel size of each QR module
-        border: Module-width of the quiet zone border
+        border: Quiet-zone border width in QR modules
         version: QR code version 1-40 (None = auto-fit smallest)
         use_legacy: Force use of qrcode library instead of OpenCV
         binary_mode: Use COBS encoding (skip base64), requires qrcode lib
@@ -87,7 +87,7 @@ def generate_qr_image(data: bytes, ec_level: int = 1,
 
 
 def _generate_qr_opencv(b64: str, ec_level: int, box_size: int,
-                         border: int, version: int | None) -> np.ndarray:
+                         border: float, version: int | None) -> np.ndarray:
     """Generate QR using OpenCV QRCodeEncoder (fast path)."""
     params = cv2.QRCodeEncoder_Params()
     params.correction_level = _OPENCV_EC_MAP.get(
@@ -107,7 +107,7 @@ def _generate_qr_opencv(b64: str, ec_level: int, box_size: int,
 
     # Add border by padding
     if border > 0:
-        border_px = border * scale
+        border_px = round(border * scale)
         img_scaled = cv2.resize(img, (w * scale, h * scale),
                                 interpolation=cv2.INTER_NEAREST)
         padded = cv2.copyMakeBorder(img_scaled,
@@ -124,13 +124,13 @@ def _generate_qr_opencv(b64: str, ec_level: int, box_size: int,
 
 
 def _generate_qr_legacy(b64: str, ec_level: int, box_size: int,
-                         border: int, version: int | None) -> np.ndarray:
+                         border: float, version: int | None) -> np.ndarray:
     """Generate QR using qrcode library (legacy path, more control)."""
     qr = qrcode.QRCode(
         version=version,
         error_correction=_EC_MAP.get(ec_level, ERROR_CORRECT_M),
         box_size=box_size,
-        border=border,
+        border=round(border),
     )
     qr.add_data(b64)
     qr.make(fit=True)
@@ -140,7 +140,7 @@ def _generate_qr_legacy(b64: str, ec_level: int, box_size: int,
 
 
 def _generate_qr_binary(data: bytes, ec_level: int, box_size: int,
-                          border: int, version: int | None) -> np.ndarray:
+                          border: float, version: int | None) -> np.ndarray:
     """Generate QR with COBS-encoded binary data. ~33% more capacity than base64.
 
     Pipeline: raw bytes -> COBS encode (eliminates \\x00) -> latin-1 string -> QR.
@@ -167,7 +167,7 @@ def _generate_qr_binary(data: bytes, ec_level: int, box_size: int,
         h, w = img.shape[:2]
         scale = box_size
         if border > 0:
-            border_px = border * scale
+            border_px = round(border * scale)
             img_scaled = cv2.resize(img, (w * scale, h * scale),
                                     interpolation=cv2.INTER_NEAREST)
             padded = cv2.copyMakeBorder(img_scaled,
@@ -187,7 +187,7 @@ def _generate_qr_binary(data: bytes, ec_level: int, box_size: int,
             version=version,
             error_correction=_EC_MAP.get(ec_level, ERROR_CORRECT_M),
             box_size=box_size,
-            border=border,
+            border=round(border),
         )
         qr.add_data(payload)
         qr.make(fit=True)

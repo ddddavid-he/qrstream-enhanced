@@ -169,6 +169,8 @@ def encode_to_video(input_path: str, output_path: str,
                     fps: int = 10,
                     ec_level: int = 1,
                     qr_version: int = 20,
+                    border: float = 0.0,
+                    lead_in_seconds: float = 0.0,
                     compress: bool = True,
                     verbose: bool = False,
                     workers: int | None = None,
@@ -205,8 +207,11 @@ def encode_to_video(input_path: str, output_path: str,
             binary_qr=binary_qr,
             protocol_version=protocol_version,
         )
+        border_modules = round((qr_version - 1) * 4 + 21) * border / 100.0
         K = ceil(payload_size / blocksize)
         num_blocks = int(K * overhead)
+        lead_in_frames = max(0, round(lead_in_seconds * fps))
+        total_frames = num_blocks + lead_in_frames
 
         if verbose:
             mode_str = "binary" if binary_qr else "base64"
@@ -226,6 +231,8 @@ def encode_to_video(input_path: str, output_path: str,
         first_qr = generate_qr_image(
             first_packed,
             ec_level=ec_level,
+            box_size=10,
+            border=border_modules,
             version=qr_version,
             use_legacy=use_legacy_qr,
             binary_mode=binary_qr,
@@ -237,7 +244,7 @@ def encode_to_video(input_path: str, output_path: str,
 
         if verbose:
             print(f"QR frame size: {w}x{h}, video FPS: {fps}, workers: {workers}")
-            print(f"Estimated duration: {num_blocks / fps:.1f}s")
+            print(f"Estimated duration: {total_frames / fps:.1f}s")
 
         fourcc_str, default_ext = _CODEC_MAP.get(codec, ('mp4v', '.mp4'))
         fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
@@ -248,6 +255,11 @@ def encode_to_video(input_path: str, output_path: str,
         writer = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
         if not writer.isOpened():
             raise RuntimeError(f"Cannot open video writer for {output_path}")
+
+        if lead_in_frames:
+            blank_frame = np.full((h, w, 3), 255, dtype=first_qr.dtype)
+            for _ in range(lead_in_frames):
+                writer.write(blank_frame)
 
         batch_size = max(workers * 4, 64)
         progress = tqdm(total=num_blocks, desc="Encoding frames")
@@ -278,7 +290,7 @@ def encode_to_video(input_path: str, output_path: str,
                         break
                     qr_imgs = list(pool.map(
                         generate_qr_image, batch,
-                        repeat(ec_level), repeat(10), repeat(4),
+                        repeat(ec_level), repeat(10), repeat(border_modules),
                         repeat(qr_version), repeat(use_legacy_qr),
                         repeat(binary_qr),
                     ))
@@ -296,6 +308,8 @@ def encode_to_video(input_path: str, output_path: str,
                 qr_img = generate_qr_image(
                     packed,
                     ec_level=ec_level,
+                    box_size=10,
+                    border=border_modules,
                     version=qr_version,
                     use_legacy=use_legacy_qr,
                     binary_mode=binary_qr,
@@ -317,7 +331,7 @@ def encode_to_video(input_path: str, output_path: str,
 
     output_size = os.path.getsize(output_path)
     if verbose:
-        print(f"Output: {output_path} ({output_size} bytes, {num_blocks} frames)")
+        print(f"Output: {output_path} ({output_size} bytes, {total_frames} frames)")
     else:
         print(f"Encoded {input_path} → {output_path} "
-              f"({num_blocks} frames, {num_blocks / fps:.1f}s)")
+              f"({total_frames} frames, {total_frames / fps:.1f}s)")

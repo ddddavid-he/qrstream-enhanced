@@ -99,6 +99,8 @@ qrstream encode <file> -o output.mp4 [options]
 | `--fps` | `10` | Output video frame rate |
 | `--ec-level` | `1` | QR error correction: 0=L(7%), 1=M(15%), 2=Q(25%), 3=H(30%) |
 | `--qr-version` | `20` | QR code version 1-40 (higher = denser) |
+| `--border` | `0.0` | Quiet-zone width as a percentage of QR content width (`--border 10` = 10%) |
+| `--lead-in-seconds` | `0.0` | Insert white lead-in frames before the first QR frame |
 | `--no-compress` | - | Disable zlib compression |
 | `--force-compress` | - | Force compression for large V3 inputs (higher memory usage) |
 | `--base64-qr` | - | Use base64 encoding instead of COBS (better compat, 33% less capacity) |
@@ -133,6 +135,9 @@ qrstream decode report.mp4 -o report_recovered.pdf -v
 
 # Encode with high error correction (for phone screen capture)
 qrstream encode data.bin -o data.mp4 --ec-level 3 --qr-version 15
+
+# Add a larger quiet zone and white lead-in before recording
+qrstream encode slides.zip -o slides.mp4 --border 10 --lead-in-seconds 1.5
 ```
 
 ### Python API
@@ -143,6 +148,9 @@ from qrstream.decoder import extract_qr_from_video, decode_blocks, decode_blocks
 
 # Encode (default: COBS binary mode)
 encode_to_video("input.bin", "output.mp4", overhead=2.0, verbose=True)
+
+# Add recording-friendly quiet zone and white lead-in
+encode_to_video("input.bin", "output.mp4", border=10.0, lead_in_seconds=1.5)
 
 # Decode to memory
 blocks = extract_qr_from_video("output.mp4", verbose=True)
