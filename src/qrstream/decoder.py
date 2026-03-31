@@ -1,16 +1,15 @@
 """
 LT Fountain Code Decoder: QR video → LT decode → file reconstruction.
 
-Supports both V1 (legacy) and V2 (with CRC32) protocol formats.
-Uses shared memory for zero-copy frame transfer to worker processes.
+Supports V2 protocol with CRC32 validation.
+Features adaptive sample rate and targeted frame recovery.
 """
 
 import sys
 import io
 import zlib
 import base64
-from struct import unpack as struct_unpack
-from math import ceil
+from math import ceil, log
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 
@@ -20,7 +19,7 @@ from tqdm import tqdm
 
 from .lt_codec import PRNG, BlockGraph, DEFAULT_C, DEFAULT_DELTA
 from .protocol import (
-    unpack, V1Header, V2Header, V1_HEADER_SIZE, V2_HEADER_SIZE,
+    unpack, V2Header, V2_HEADER_SIZE,
 )
 from .qr_utils import try_decode_qr
 
@@ -28,8 +27,8 @@ from .qr_utils import try_decode_qr
 class LTDecoder:
     """Consumes LT fountain-coded blocks and reconstructs the original data.
 
-    Accepts both V1 and V2 blocks. V2 blocks are CRC-validated; corrupt
-    blocks are silently discarded.
+    Accepts V2 blocks with CRC validation; corrupt blocks are silently
+    discarded.
     """
 
     def __init__(self, c: float = DEFAULT_C, delta: float = DEFAULT_DELTA):
@@ -65,18 +64,10 @@ class LTDecoder:
 
         Returns (done, compressed).
         """
-        if isinstance(header, V2Header):
-            filesize = header.filesize
-            blocksize = header.blocksize
-            seed = header.seed
-            compressed = header.compressed
-        elif isinstance(header, V1Header):
-            filesize = header.filesize
-            blocksize = header.blocksize
-            seed = header.seed
-            compressed = header.compressed
-        else:
-            raise TypeError(f"Unknown header type: {type(header)}")
+        filesize = header.filesize
+        blocksize = header.blocksize
+        seed = header.seed
+        compressed = header.compressed
 
         if compressed:
             self.compressed = True
@@ -101,45 +92,13 @@ class LTDecoder:
         return self.done, self.compressed
 
     def decode_bytes(self, block_bytes: bytes, skip_crc: bool = False) -> tuple[bool, bool]:
-        """Decode a raw block from bytes (auto-detects V1/V2).
+        """Decode a raw V2 block from bytes.
 
-        For V2, validates CRC32 — raises ValueError on corrupt data,
+        Validates CRC32 — raises ValueError on corrupt data,
         unless skip_crc=True (for pre-validated blocks).
         """
         header, data = unpack(block_bytes, skip_crc=skip_crc)
         return self.consume_block(header, data)
-
-    def decode_bytes_v1_compat(self, block_bytes: bytes) -> tuple[bool, bool]:
-        """Decode a V1 block using the old int-based path for backward compat.
-
-        This method handles V1 blocks that were encoded with int representation.
-        """
-        header_tuple = struct_unpack('!BIII', block_bytes[:V1_HEADER_SIZE])
-        magic_byte, filesize, blocksize, seed = header_tuple
-
-        compressed = bool(magic_byte & 0x01)
-        if compressed:
-            self.compressed = True
-
-        if not self.initialized:
-            self.filesize = filesize
-            self.blocksize = blocksize
-            self.K = ceil(filesize / blocksize)
-            self.block_graph = BlockGraph(self.K)
-            self.prng = PRNG(self.K, delta=self.delta, c=self.c)
-            self.initialized = True
-
-        _, _, src_blocks = self.prng.get_src_blocks(seed=seed)
-
-        # V1 data: raw bytes after 13-byte header, pad to blocksize
-        data = block_bytes[V1_HEADER_SIZE:]
-        if len(data) < self.blocksize:
-            data = data + b'\x00' * (self.blocksize - len(data))
-        elif len(data) > self.blocksize:
-            data = data[:self.blocksize]
-
-        self.done = self.block_graph.add_block(src_blocks, data)
-        return self.done, self.compressed
 
     def bytes_dump(self) -> bytes:
         """Reconstruct the original file data from recovered blocks.
@@ -170,8 +129,6 @@ class LTDecoder:
 # Max pixel dimension for QR detection. Frames larger than this are
 # downscaled before detection to avoid wasting CPU on 4K+ input.
 _MAX_DETECT_DIM = 1080
-
-# Shared memory was removed — downscaling in reader + JPEG is simpler and leak-free.
 
 
 def _downscale_frame(frame: np.ndarray) -> np.ndarray:
@@ -227,10 +184,6 @@ def _worker_detect_qr(frame_data):
             if computed_crc == stored_crc:
                 block_bytes = candidate
                 break
-        elif len(candidate) >= V1_HEADER_SIZE:
-            # V1 has no CRC, accept it
-            block_bytes = candidate
-            break
 
     if block_bytes is None:
         return (frame_idx, None, None)
@@ -238,8 +191,6 @@ def _worker_detect_qr(frame_data):
     try:
         if len(block_bytes) >= V2_HEADER_SIZE and block_bytes[0] == 0x02:
             seed = int.from_bytes(block_bytes[10:14], 'big')
-        elif len(block_bytes) >= V1_HEADER_SIZE:
-            seed = int.from_bytes(block_bytes[9:13], 'big')
         else:
             return (frame_idx, None, None)
         return (frame_idx, block_bytes, seed)
@@ -288,20 +239,42 @@ def _read_frames(video_path, sample_rate, total_frames, start_frame=0):
     cap.release()
 
 
+def _read_frame_ranges(video_path, frame_ranges):
+    """Generator that reads specific frame ranges from video.
+
+    Args:
+        frame_ranges: list of (start_frame, end_frame) tuples (inclusive).
+
+    Yields (frame_idx, jpeg_bytes) tuples for all frames within ranges.
+    """
+    if not frame_ranges:
+        return
+    cap = cv2.VideoCapture(video_path)
+    for start, end in sorted(frame_ranges):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+        for fidx in range(start, end + 1):
+            ret, frame = cap.read()
+            if not ret:
+                break
+            frame = _downscale_frame(frame)
+            _, jpeg_bytes = cv2.imencode(
+                '.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            yield (fidx, jpeg_bytes.tobytes())
+    cap.release()
+
+
 def _probe_sample_rate(video_path: str, workers: int,
                        verbose: bool = False):
     """Probe the first segment of a video to determine optimal sample_rate.
 
-    Scans frames with sample_rate=1, counts how many consecutive frames
-    share the same seed, and returns (auto_sample_rate, probe_results).
-
-    probe_results is a list of (frame_idx, block_bytes, seed) from the probe
-    phase that should be reused (not re-scanned).
+    Measures both repeat count (R) and detection rate (p), then computes
+    the optimal sample_rate so that each QR code has enough detection
+    chances to be reliably recovered.
 
     Returns:
-        (sample_rate, probe_results, frames_probed)
+        (sample_rate, probe_results, frames_probed, detect_rate, avg_repeat)
     """
-    PROBE_FRAMES = 20  # Probe first ~0.3s at 60fps (sufficient for sample rate)
+    PROBE_FRAMES = 30  # Slightly more than before for better stats
 
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -314,9 +287,9 @@ def _probe_sample_rate(video_path: str, workers: int,
     probe_frames = probe_frames[:probe_count]
 
     if not probe_frames:
-        return 1, [], 0
+        return 1, [], 0, 0.0, 1.0
 
-    # Detect QR codes in probe frames with progress bar
+    # Detect QR codes in probe frames
     probe_results = []
     pbar = tqdm(total=probe_count, desc="Probing sample rate",
                 unit="frame", dynamic_ncols=True)
@@ -332,8 +305,12 @@ def _probe_sample_rate(video_path: str, workers: int,
     # Sort by frame index
     probe_results.sort(key=lambda x: x[0])
 
-    # Count consecutive frames with the same seed
-    seed_runs = []  # lengths of consecutive runs of the same seed
+    # ── Measure detection rate ─────────────────────────────────────
+    detected = sum(1 for _, b, s in probe_results if b is not None)
+    detect_rate = detected / probe_count if probe_count > 0 else 0.0
+
+    # ── Measure average repeat count ───────────────────────────────
+    seed_runs = []
     current_seed = None
     current_run = 0
 
@@ -346,28 +323,45 @@ def _probe_sample_rate(video_path: str, workers: int,
                     seed_runs.append(current_run)
                 current_seed = seed
                 current_run = 1
-        else:
-            # Failed detection — don't break the run, could be a blurry frame
-            pass
+        # Failed detection doesn't break runs
 
     if current_run > 0:
         seed_runs.append(current_run)
 
     if not seed_runs:
-        # No QR codes detected at all in probe
-        return 1, probe_results, probe_count
+        return 1, probe_results, probe_count, detect_rate, 1.0
 
     avg_run = sum(seed_runs) / len(seed_runs)
 
-    # Use half the average run as sample_rate (conservative).
-    # This ensures we sample each QR code at least twice on average,
-    # reducing the chance of missing critical low-degree LT blocks.
-    auto_rate = max(1, int(avg_run / 2))
+    # ── Compute adaptive sample_rate ───────────────────────────────
+    # Goal: for each QR code shown R times, sampling every S frames
+    # gives chances = R / S detection opportunities.
+    # Probability of detecting at least once = 1 - (1-p)^chances
+    # We want this probability >= target (e.g., 0.95).
+    #
+    # Solve: 1 - (1-p)^(R/S) >= target
+    #    →   (1-p)^(R/S) <= 1-target
+    #    →   (R/S) * log(1-p) <= log(1-target)
+    #    →   R/S >= log(1-target) / log(1-p)
+    #    →   S <= R * log(1-p) / log(1-target)
 
-    print(f"Probe complete: {probe_count} frames, "
-          f"avg repeat={avg_run:.1f}, auto sample_rate={auto_rate}")
+    TARGET_DETECT_PROB = 0.95  # want 95% chance per QR
+    p = detect_rate
 
-    return auto_rate, probe_results, probe_count
+    if p >= 0.99:
+        # Nearly perfect detection — can sample aggressively
+        auto_rate = max(1, int(avg_run / 1.5))
+    elif p > 0.01:
+        min_chances = log(1 - TARGET_DETECT_PROB) / log(1 - p)
+        auto_rate = max(1, int(avg_run / min_chances))
+    else:
+        # Very low detection rate — sample every frame
+        auto_rate = 1
+
+    print(f"Probe: {probe_count} frames, detect_rate={detect_rate:.0%}, "
+          f"avg_repeat={avg_run:.1f} → sample_rate={auto_rate}")
+
+    return auto_rate, probe_results, probe_count, detect_rate, avg_run
 
 
 def extract_qr_from_video(video_path: str, sample_rate: int = 0,
@@ -376,6 +370,10 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
 
     Uses an LT decoder internally for early termination: stops scanning
     as soon as all source blocks are recovered.
+
+    When initial scan doesn't recover all blocks, performs targeted
+    recovery by reading only the video segments corresponding to
+    missing seeds.
 
     Args:
         sample_rate: Process every Nth frame. 0 = auto-detect (default).
@@ -389,16 +387,16 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
         print(f"Error: Cannot open video file: {video_path}")
         sys.exit(1)
 
-    fps = cap.get(cv2.CAP_PROP_FPS)
+    src_fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    duration = total_frames / fps if fps > 0 else 0
+    duration = total_frames / src_fps if src_fps > 0 else 0
     cap.release()
 
     if workers is None:
         workers = min(multiprocessing.cpu_count(), 8)
 
     if verbose:
-        print(f"Video: {total_frames} frames, {fps:.1f} FPS, {duration:.1f}s")
+        print(f"Video: {total_frames} frames, {src_fps:.1f} FPS, {duration:.1f}s")
         print(f"Using {workers} worker processes")
 
     seen_seeds = set()
@@ -410,9 +408,12 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
     # ── Auto sample_rate probe ────────────────────────────────────
     probe_results = []
     frames_probed = 0
+    detect_rate = 1.0
+    avg_repeat = 1.0
 
     if sample_rate <= 0:
-        auto_rate, probe_results, frames_probed = _probe_sample_rate(
+        (auto_rate, probe_results, frames_probed,
+         detect_rate, avg_repeat) = _probe_sample_rate(
             video_path, workers, verbose)
         sample_rate = auto_rate
         if verbose:
@@ -426,13 +427,8 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
                     unique_blocks.append(block_bytes)
                     decoded_count += 1
                     try:
-                        if block_bytes[0] == 0x02:
-                            done, _ = lt_decoder.decode_bytes(block_bytes, skip_crc=True)
-                        else:
-                            done, _ = lt_decoder.decode_bytes_v1_compat(
-                                block_bytes)
+                        done, _ = lt_decoder.decode_bytes(block_bytes, skip_crc=True)
                         if done:
-                            # All blocks recovered during probe!
                             print(f"Extraction done (during probe): "
                                   f"{frames_probed} frames, "
                                   f"{decoded_count} unique blocks")
@@ -452,7 +448,6 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
     pbar = tqdm(total=total_frames, desc="Scanning frames",
                 unit="frame", dynamic_ncols=True)
 
-    # Account for already-probed frames
     if frames_probed > 0:
         pbar.update(frames_probed)
 
@@ -501,7 +496,106 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
           f"{decoded_count} unique blocks, "
           f"{no_detect_count} missed")
 
+    # ── Targeted recovery for missing seeds ───────────────────────
+    if (not early_done and lt_decoder.initialized
+            and not lt_decoder.done and sample_rate > 1):
+        unique_blocks, decoded_count, no_detect_count = _targeted_recovery(
+            video_path, total_frames, src_fps, workers,
+            seen_seeds, unique_blocks, decoded_count, no_detect_count,
+            lt_decoder, avg_repeat, verbose)
+
     return unique_blocks
+
+
+def _targeted_recovery(video_path, total_frames, src_fps, workers,
+                       seen_seeds, unique_blocks, decoded_count,
+                       no_detect_count, lt_decoder, avg_repeat, verbose):
+    """Targeted recovery: read only the video segments where missing seeds
+    are expected to appear, scanning every frame in those segments.
+
+    Seeds are sequential (1, 2, ..., N) and the source video plays at
+    src_fps. Each seed i appears around frame = (i-1) * frames_per_qr.
+    """
+    # Figure out total encoded block count from the max seed we've seen
+    if not seen_seeds:
+        return unique_blocks, decoded_count, no_detect_count
+
+    max_seed = max(seen_seeds)
+    # frames_per_qr = how many video frames each QR code is shown
+    frames_per_qr = max(1, avg_repeat)
+
+    # Identify missing seeds (seeds we never detected)
+    all_seeds = set(range(1, max_seed + 1))
+    missing_seeds = all_seeds - seen_seeds
+
+    if not missing_seeds:
+        return unique_blocks, decoded_count, no_detect_count
+
+    # Calculate frame ranges for missing seeds
+    # Each seed i occupies frames roughly [(i-1)*fpq, i*fpq)
+    frame_ranges = []
+    margin = max(2, int(frames_per_qr * 0.5))  # extra frames for safety
+
+    for seed in sorted(missing_seeds):
+        center = int((seed - 1) * frames_per_qr)
+        start = max(0, center - margin)
+        end = min(total_frames - 1, center + int(frames_per_qr) + margin)
+        frame_ranges.append((start, end))
+
+    # Merge overlapping ranges
+    frame_ranges = _merge_ranges(frame_ranges)
+
+    target_frames = sum(e - s + 1 for s, e in frame_ranges)
+    print(f"Targeted recovery: {len(missing_seeds)} missing seeds, "
+          f"reading {target_frames} frames in {len(frame_ranges)} segments")
+
+    # Read and process targeted frames
+    BATCH_SIZE = workers * 4
+    pbar = tqdm(total=target_frames, desc="Targeted recovery",
+                unit="frame", dynamic_ncols=True)
+
+    early_done = False
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        batch = []
+        for frame_data in _read_frame_ranges(video_path, frame_ranges):
+            batch.append(frame_data)
+            if len(batch) >= BATCH_SIZE:
+                decoded_count, no_detect_count, early_done = _process_batch(
+                    executor, batch, seen_seeds, unique_blocks,
+                    decoded_count, no_detect_count, lt_decoder, pbar, verbose)
+                batch.clear()
+                if early_done:
+                    if verbose:
+                        tqdm.write(
+                            "  Targeted recovery: all blocks recovered!")
+                    break
+
+        if batch and not early_done:
+            decoded_count, no_detect_count, early_done = _process_batch(
+                executor, batch, seen_seeds, unique_blocks,
+                decoded_count, no_detect_count, lt_decoder, pbar, verbose)
+
+    pbar.close()
+
+    status = " (complete)" if early_done else ""
+    print(f"Targeted recovery done{status}: "
+          f"{decoded_count} unique blocks, {no_detect_count} missed")
+
+    return unique_blocks, decoded_count, no_detect_count
+
+
+def _merge_ranges(ranges):
+    """Merge overlapping or adjacent (start, end) ranges."""
+    if not ranges:
+        return []
+    sorted_ranges = sorted(ranges)
+    merged = [sorted_ranges[0]]
+    for start, end in sorted_ranges[1:]:
+        if start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
 
 
 def _process_batch(executor, batch, seen_seeds, unique_blocks,
@@ -519,13 +613,8 @@ def _process_batch(executor, batch, seen_seeds, unique_blocks,
                 decoded_count += 1
 
                 try:
-                    # Try V2 first, fall back to V1 compat
                     # Workers already validated CRC, skip re-validation
-                    if block_bytes[0] == 0x02:
-                        done, _ = lt_decoder.decode_bytes(block_bytes, skip_crc=True)
-                    else:
-                        done, _ = lt_decoder.decode_bytes_v1_compat(
-                            block_bytes)
+                    done, _ = lt_decoder.decode_bytes(block_bytes, skip_crc=True)
                     if done:
                         early_done = True
                 except Exception:
@@ -553,12 +642,7 @@ def decode_blocks(blocks, verbose=False) -> bytes | None:
 
     for i, block_bytes in enumerate(blocks):
         try:
-            # Auto-detect V1/V2
-            if block_bytes[0] == 0x02:
-                done, compressed = decoder.decode_bytes(block_bytes)
-            else:
-                done, compressed = decoder.decode_bytes_v1_compat(block_bytes)
-
+            done, compressed = decoder.decode_bytes(block_bytes)
             if done:
                 if verbose:
                     print(f"  Decoded after {i + 1}/{len(blocks)} blocks "

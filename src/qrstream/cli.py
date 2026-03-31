@@ -63,16 +63,6 @@ def cmd_decode(args):
 
     result = decode_blocks(blocks, args.verbose)
 
-    # Retry with sample_rate=1 if auto sample_rate was used and decoding failed
-    if result is None and used_sample_rate <= 0:
-        print("\nRetrying with sample_rate=1 (scanning every frame)...")
-        blocks = extract_qr_from_video(
-            args.video, 1, args.verbose, args.workers)
-
-        if blocks:
-            print(f"Found {len(blocks)} unique blocks. Decoding...")
-            result = decode_blocks(blocks, args.verbose)
-
     if result is None:
         sys.exit(1)
 
