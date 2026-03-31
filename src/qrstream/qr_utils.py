@@ -157,7 +157,7 @@ def _generate_qr_binary(data: bytes, ec_level: int, box_size: int,
             ec_level, cv2.QRCODE_ENCODER_CORRECT_LEVEL_M)
         if version is not None:
             params.version = version
-        params.mode = cv2.QRCODE_ENCODER_MODE_AUTO
+        params.mode = cv2.QRCODE_ENCODER_MODE_BYTE
 
         encoder = cv2.QRCodeEncoder.create(params)
         img = encoder.encode(payload)
