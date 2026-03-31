@@ -1,6 +1,6 @@
 # QRStream
 
-[中文文档](README-zh.md)
+[中文文档](https://github.com/ddddavid-he/qrstream-enhanced/blob/main/README-zh.md)
 
 Transfer arbitrary files through QR code video streams. Built on **LT Fountain Codes (Luby Transform)** for reliable, feedback-free data transmission — the original file can be fully recovered even if some frames are lost.
 

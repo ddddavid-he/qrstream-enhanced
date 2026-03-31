@@ -1,6 +1,6 @@
 # QRStream
 
-[English](README.md)
+[English](https://github.com/ddddavid-he/qrstream-enhanced/blob/main/README.md)
 
 通过 QR 码视频流传输任意文件。基于 **LT 喷泉码（Luby Transform Fountain Codes）** 实现可靠的无反馈信道数据传输——即使丢失部分帧也能完整恢复原始文件。
 
