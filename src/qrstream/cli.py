@@ -1,9 +1,9 @@
 """
-Unified CLI for QRStream: encode and decode subcommands.
+Unified CLI for QRStream Enhanced.
 
 Usage:
-    qrstream encode <file> -o output.mp4 [--overhead 2.5] [--fps 10] [--ec-level 1] [--qr-version 20] [-w 8] [-v]
-    qrstream decode <video> -o output_file [-s sample_rate] [-w workers] [-v]
+    qrs encode <file> -o output.mp4 [--overhead 2.0] [--fps 10] [-v]
+    qrs decode <video> -o output_file [-s sample_rate] [-v]
 """
 
 import sys
@@ -11,7 +11,7 @@ import os
 import argparse
 
 from .encoder import encode_to_video
-from .decoder import extract_qr_from_video, decode_blocks
+from .decoder import extract_qr_from_video, decode_blocks_to_file
 
 
 def cmd_encode(args):
@@ -23,7 +23,8 @@ def cmd_encode(args):
     output = args.output
     if output is None:
         base = os.path.splitext(os.path.basename(args.file))[0]
-        output = f"{base}.mp4"
+        ext = '.avi' if args.codec == 'mjpeg' else '.mp4'
+        output = f"{base}{ext}"
 
     encode_to_video(
         input_path=args.file,
@@ -35,6 +36,11 @@ def cmd_encode(args):
         compress=not args.no_compress,
         verbose=args.verbose,
         workers=args.workers,
+        use_legacy_qr=args.legacy_qr,
+        codec=args.codec,
+        binary_qr=not args.base64_qr,
+        protocol_version=2 if args.protocol == 'v2' else 3,
+        force_compress=args.force_compress,
     )
 
 
@@ -47,9 +53,8 @@ def cmd_decode(args):
     print(f"Processing: {args.video}")
     print("Extracting QR codes...")
 
-    used_sample_rate = args.sample_rate
     blocks = extract_qr_from_video(
-        args.video, used_sample_rate, args.verbose, args.workers)
+        args.video, args.sample_rate, args.verbose, args.workers)
 
     if not blocks:
         print("No QR codes detected. Check that the video clearly shows QR codes.")
@@ -57,32 +62,19 @@ def cmd_decode(args):
 
     print(f"Found {len(blocks)} unique blocks. Decoding...")
 
-    result = decode_blocks(blocks, args.verbose)
+    output_path = args.output or "decoded_output"
+    written = decode_blocks_to_file(blocks, output_path, args.verbose)
 
-    # Retry with sample_rate=1 if auto sample_rate was used and decoding failed
-    if result is None and used_sample_rate <= 0:
-        print("\nRetrying with sample_rate=1 (scanning every frame)...")
-        blocks = extract_qr_from_video(
-            args.video, 1, args.verbose, args.workers)
-
-        if blocks:
-            print(f"Found {len(blocks)} unique blocks. Decoding...")
-            result = decode_blocks(blocks, args.verbose)
-
-    if result is None:
+    if written is None:
         sys.exit(1)
 
-    output_path = args.output or "decoded_output"
-    with open(output_path, 'wb') as f:
-        f.write(result)
-
-    print(f"\nSuccess! Saved to: {output_path} ({len(result)} bytes)")
+    print(f"\nSuccess! Saved to: {output_path} ({written} bytes)")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        prog='qrstream',
-        description='QRStream: Encode and decode files via QR code video streams')
+        prog='qrs',
+        description='QRStream Enhanced: Encode and decode files via QR code video streams')
 
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
 
@@ -103,10 +95,20 @@ def main():
                      help='QR code version 1-40, controls density (default: 20)')
     enc.add_argument('--no-compress', action='store_true',
                      help='Disable zlib compression')
+    enc.add_argument('--force-compress', action='store_true',
+                     help='Force compression even for large V3 inputs (uses more memory)')
+    enc.add_argument('--legacy-qr', action='store_true',
+                     help='Use qrcode library instead of OpenCV for QR generation')
+    enc.add_argument('--base64-qr', action='store_true',
+                     help='Use base64 encoding instead of COBS binary (less capacity)')
+    enc.add_argument('--codec', choices=['mp4v', 'mjpeg'], default='mp4v',
+                     help='Video codec: mp4v (default) or mjpeg (faster, larger)')
+    enc.add_argument('--protocol', choices=['v2', 'v3'], default='v3',
+                     help='Protocol version for encoding (default: v3)')
     enc.add_argument('-w', '--workers', type=int, default=None,
-                     help='Number of parallel workers for QR generation (default: CPU count, max 8)')
+                     help='Parallel workers for QR generation (default: CPU count)')
     enc.add_argument('-v', '--verbose', action='store_true',
-                     help='Print detailed progress')
+                     help='Print extra detail (block stats, compression ratio, etc.)')
 
     # ── decode ────────────────────────────────────────────────────
     dec = subparsers.add_parser(
@@ -117,7 +119,7 @@ def main():
     dec.add_argument('-s', '--sample-rate', type=int, default=0,
                      help='Process every Nth frame (default: 0=auto-detect)')
     dec.add_argument('-w', '--workers', type=int, default=None,
-                     help='Number of parallel workers (default: CPU count, max 8)')
+                     help='Parallel workers (default: all CPU cores)')
     dec.add_argument('-v', '--verbose', action='store_true',
                      help='Print detailed progress')
 

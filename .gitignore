@@ -9,6 +9,7 @@ build/
 # IDE
 .idea/
 .vscode/
+.claude/
 *.swp
 *.swo
 
@@ -22,6 +23,8 @@ Thumbs.db
 # Project data (keep locally, exclude from repo)
 inputs/
 outputs/
+output
+skills/
 
 # Test / cache
 .pytest_cache/

@@ -78,12 +78,20 @@ class TestRSDCdf:
 
 
 class TestBlockGraph:
+    @staticmethod
+    def _as_bytes(val):
+        """Convert numpy array or bytes to bytes for comparison."""
+        import numpy as np
+        if isinstance(val, np.ndarray):
+            return val.tobytes()
+        return val
+
     def test_single_block_eliminated_immediately(self):
         bg = BlockGraph(3)
         done = bg.add_block({0}, b'\x01\x02\x03')
         assert not done
         assert 0 in bg.eliminated
-        assert bg.eliminated[0] == b'\x01\x02\x03'
+        assert self._as_bytes(bg.eliminated[0]) == b'\x01\x02\x03'
 
     def test_two_blocks_with_overlap(self):
         bg = BlockGraph(2)
@@ -95,7 +103,7 @@ class TestBlockGraph:
         assert 0 in bg.eliminated
         assert 1 in bg.eliminated
         expected_1 = xor_bytes(b'\xBB', b'\xAA')
-        assert bg.eliminated[1] == expected_1
+        assert self._as_bytes(bg.eliminated[1]) == expected_1
 
     def test_complete_recovery(self):
         """Simulate a simple LT decode: 3 source blocks recovered via check blocks."""
@@ -110,9 +118,19 @@ class TestBlockGraph:
         done = bg.add_block({1, 2}, xor_bytes(src[1], src[2]))
 
         assert done
-        assert bg.eliminated[0] == src[0]
-        assert bg.eliminated[1] == src[1]
-        assert bg.eliminated[2] == src[2]
+        assert self._as_bytes(bg.eliminated[0]) == src[0]
+        assert self._as_bytes(bg.eliminated[1]) == src[1]
+        assert self._as_bytes(bg.eliminated[2]) == src[2]
+
+    def test_add_block_does_not_mutate_input_set(self):
+        bg = BlockGraph(2)
+        bg.add_block({0}, b'\xAA')
+
+        nodes = {0, 1}
+        original = set(nodes)
+        bg.add_block(nodes, b'\xBB')
+
+        assert nodes == original
 
 
 class TestDegreeDistribution:

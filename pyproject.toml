@@ -1,17 +1,49 @@
 [project]
-name = "qrstream"
-version = "0.2.0"
+name = "qrstream-enhanced"
+version = "0.4.0"
 description = "Encode and decode files via QR code video streams using LT fountain codes"
+readme = "README.md"
 requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "David He", email = "hewei201031l@outlook.com" },
+]
+keywords = [
+    "qr-code",
+    "fountain-code",
+    "lt-code",
+    "luby-transform",
+    "video-transfer",
+    "erasure-code",
+    "opencv",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
 dependencies = [
-    "opencv-python>=4.5.0",
+    "opencv-contrib-python>=4.5.0",
     "numpy>=1.20.0",
     "tqdm>=4.60.0",
     "qrcode[pil]>=7.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/ddddavid-he/qrstream-enhanced"
+Repository = "https://github.com/ddddavid-he/qrstream-enhanced.git"
+Issues = "https://github.com/ddddavid-he/qrstream-enhanced/issues"
+
 [project.scripts]
-qrstream = "qrstream.cli:main"
+qrs = "qrstream.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -21,6 +53,11 @@ build-backend = "hatchling.build"
 packages = ["src/qrstream"]
 
 [project.optional-dependencies]
+dev = [
+    "pytest>=9.0.2",
+]
+
+[dependency-groups]
 dev = [
     "pytest>=9.0.2",
 ]

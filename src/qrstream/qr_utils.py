@@ -1,8 +1,9 @@
 """
 QR code generation and detection utilities.
 
-- generate_qr_code(): uses the `qrcode` library for fine-grained control
-- detect_qr_code():  multi-strategy QR detection via OpenCV
+- generate_qr_image(): uses OpenCV QRCodeEncoder by default for speed,
+  falls back to `qrcode` library for legacy compatibility
+- try_decode_qr(): uses WeChatQRCode for robust detection (from opencv-contrib)
 """
 
 import base64
@@ -32,16 +33,31 @@ if HAS_QRCODE:
         3: ERROR_CORRECT_H,
     }
 
+# Map ec_level int to OpenCV correction level constants
+_OPENCV_EC_MAP = {
+    0: cv2.QRCODE_ENCODER_CORRECT_LEVEL_L,
+    1: cv2.QRCODE_ENCODER_CORRECT_LEVEL_M,
+    2: cv2.QRCODE_ENCODER_CORRECT_LEVEL_Q,
+    3: cv2.QRCODE_ENCODER_CORRECT_LEVEL_H,
+}
+
 
 # ── QR Generation ────────────────────────────────────────────────
 
 def generate_qr_image(data: bytes, ec_level: int = 1,
                       box_size: int = 10, border: int = 4,
-                      version: int | None = None) -> np.ndarray:
+                      version: int | None = None,
+                      use_legacy: bool = False,
+                      binary_mode: bool = False) -> np.ndarray:
     """Generate a QR code image from binary data.
 
-    Data is base64-encoded before embedding in the QR code.
+    By default, data is base64-encoded before embedding in the QR code.
+    When binary_mode=True, COBS encoding is used (33% more capacity).
+
     Returns a BGR numpy array suitable for OpenCV.
+
+    By default uses OpenCV QRCodeEncoder for speed. Set use_legacy=True
+    to use the `qrcode` library (slower but offers finer control).
 
     Args:
         data: Raw bytes to encode
@@ -49,91 +65,166 @@ def generate_qr_image(data: bytes, ec_level: int = 1,
         box_size: Pixel size of each QR module
         border: Module-width of the quiet zone border
         version: QR code version 1-40 (None = auto-fit smallest)
+        use_legacy: Force use of qrcode library instead of OpenCV
+        binary_mode: Use COBS encoding (skip base64), requires qrcode lib
     """
+    if binary_mode:
+        return _generate_qr_binary(data, ec_level, box_size, border, version)
+
     b64 = base64.b64encode(data).decode('ascii')
 
-    if HAS_QRCODE:
+    if use_legacy and HAS_QRCODE:
+        return _generate_qr_legacy(b64, ec_level, box_size, border, version)
+
+    # Default: OpenCV QRCodeEncoder (much faster)
+    try:
+        return _generate_qr_opencv(b64, ec_level, box_size, border, version)
+    except (RuntimeError, cv2.error):
+        # Fall back to qrcode library if OpenCV encoder fails
+        if HAS_QRCODE:
+            return _generate_qr_legacy(b64, ec_level, box_size, border, version)
+        raise
+
+
+def _generate_qr_opencv(b64: str, ec_level: int, box_size: int,
+                         border: int, version: int | None) -> np.ndarray:
+    """Generate QR using OpenCV QRCodeEncoder (fast path)."""
+    params = cv2.QRCodeEncoder_Params()
+    params.correction_level = _OPENCV_EC_MAP.get(
+        ec_level, cv2.QRCODE_ENCODER_CORRECT_LEVEL_M)
+    if version is not None:
+        params.version = version
+    params.mode = cv2.QRCODE_ENCODER_MODE_AUTO
+
+    encoder = cv2.QRCodeEncoder.create(params)
+    img = encoder.encode(b64)
+    if img is None:
+        raise RuntimeError("OpenCV QR encoder returned None")
+
+    # OpenCV QR images have 1px per module. Scale to match expected size.
+    h, w = img.shape[:2]
+    scale = box_size
+
+    # Add border by padding
+    if border > 0:
+        border_px = border * scale
+        img_scaled = cv2.resize(img, (w * scale, h * scale),
+                                interpolation=cv2.INTER_NEAREST)
+        padded = cv2.copyMakeBorder(img_scaled,
+                                    border_px, border_px, border_px, border_px,
+                                    cv2.BORDER_CONSTANT, value=255)
+    else:
+        padded = cv2.resize(img, (w * scale, h * scale),
+                            interpolation=cv2.INTER_NEAREST)
+
+    # Convert to BGR
+    if len(padded.shape) == 2:
+        return cv2.cvtColor(padded, cv2.COLOR_GRAY2BGR)
+    return padded
+
+
+def _generate_qr_legacy(b64: str, ec_level: int, box_size: int,
+                         border: int, version: int | None) -> np.ndarray:
+    """Generate QR using qrcode library (legacy path, more control)."""
+    qr = qrcode.QRCode(
+        version=version,
+        error_correction=_EC_MAP.get(ec_level, ERROR_CORRECT_M),
+        box_size=box_size,
+        border=border,
+    )
+    qr.add_data(b64)
+    qr.make(fit=True)
+    pil_img = qr.make_image(fill_color="black", back_color="white")
+    img_array = np.array(pil_img.convert('RGB'))
+    return cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+
+
+def _generate_qr_binary(data: bytes, ec_level: int, box_size: int,
+                          border: int, version: int | None) -> np.ndarray:
+    """Generate QR with COBS-encoded binary data. ~33% more capacity than base64.
+
+    Pipeline: raw bytes -> COBS encode (eliminates \\x00) -> latin-1 string -> QR.
+    """
+    from .protocol import cobs_encode
+
+    cobs_data = cobs_encode(data)
+    payload = cobs_data.decode('latin-1')
+
+    # Use OpenCV encoder for speed (COBS data is null-free, safe for OpenCV)
+    try:
+        params = cv2.QRCodeEncoder_Params()
+        params.correction_level = _OPENCV_EC_MAP.get(
+            ec_level, cv2.QRCODE_ENCODER_CORRECT_LEVEL_M)
+        if version is not None:
+            params.version = version
+        params.mode = cv2.QRCODE_ENCODER_MODE_AUTO
+
+        encoder = cv2.QRCodeEncoder.create(params)
+        img = encoder.encode(payload)
+        if img is None:
+            raise RuntimeError("OpenCV QR encoder returned None")
+
+        h, w = img.shape[:2]
+        scale = box_size
+        if border > 0:
+            border_px = border * scale
+            img_scaled = cv2.resize(img, (w * scale, h * scale),
+                                    interpolation=cv2.INTER_NEAREST)
+            padded = cv2.copyMakeBorder(img_scaled,
+                                        border_px, border_px, border_px, border_px,
+                                        cv2.BORDER_CONSTANT, value=255)
+        else:
+            padded = cv2.resize(img, (w * scale, h * scale),
+                                interpolation=cv2.INTER_NEAREST)
+
+        if len(padded.shape) == 2:
+            return cv2.cvtColor(padded, cv2.COLOR_GRAY2BGR)
+        return padded
+    except (RuntimeError, cv2.error):
+        if not HAS_QRCODE:
+            raise
         qr = qrcode.QRCode(
-            version=version,  # None = auto-detect smallest version
+            version=version,
             error_correction=_EC_MAP.get(ec_level, ERROR_CORRECT_M),
             box_size=box_size,
             border=border,
         )
-        qr.add_data(b64)
+        qr.add_data(payload)
         qr.make(fit=True)
         pil_img = qr.make_image(fill_color="black", back_color="white")
-        # Convert PIL → numpy BGR
         img_array = np.array(pil_img.convert('RGB'))
         return cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-    else:
-        # Fallback: use OpenCV's QRCodeEncoder
-        encoder = cv2.QRCodeEncoder.create()
-        img = encoder.encode(b64)
-        if img is None:
-            raise RuntimeError("OpenCV QR encoder failed")
-        return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
 
 # ── QR Detection ─────────────────────────────────────────────────
-
-def preprocess_variants(frame: np.ndarray):
-    """Generate preprocessed frame variants to improve QR detection."""
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (0, 0), 3)
-    sharpened = cv2.addWeighted(gray, 1.5, blurred, -0.5, 0)
-    thresh = cv2.adaptiveThreshold(
-        sharpened, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY, 51, 10
-    )
-    return [gray, sharpened, thresh]
+# Uses WeChatQRCode from opencv-contrib as the primary detector.
+# It is faster, more robust, and handles phone-captured screens
+# significantly better than OpenCV's built-in QRCodeDetector.
 
 
 def try_decode_qr(frame: np.ndarray, qr_detector=None) -> str | None:
-    """Try multiple preprocessing strategies to decode a QR code from a frame.
+    """Decode a QR code from a frame using WeChatQRCode.
 
     Returns the decoded string or None.
     """
-    if qr_detector is None:
-        qr_detector = cv2.QRCodeDetector()
+    # Lazy-init WeChatQRCode detector (per-process, for multiprocessing)
+    if not hasattr(try_decode_qr, '_wechat'):
+        try:
+            try_decode_qr._wechat = cv2.wechat_qrcode_WeChatQRCode()
+        except (cv2.error, OSError):
+            try_decode_qr._wechat = None
 
-    # Try original frame first
-    data, points, _ = qr_detector.detectAndDecode(frame)
-    if data:
-        return data
-
-    # Try preprocessed variants
-    for variant in preprocess_variants(frame):
-        data, points, _ = qr_detector.detectAndDecode(variant)
-        if data:
-            return data
-
-    # Try scaling up only for small frames (< 800px on shorter side).
-    # For high-res frames (e.g. 4K), upscaling is wasteful.
-    min_dim = min(frame.shape[:2])
-    if min_dim < 800:
-        for scale in [1.5, 2.0]:
-            resized = cv2.resize(frame, None, fx=scale, fy=scale,
-                                 interpolation=cv2.INTER_CUBIC)
-            data, points, _ = qr_detector.detectAndDecode(resized)
-            if data:
-                return data
-            gray_resized = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
-            data, points, _ = qr_detector.detectAndDecode(gray_resized)
-            if data:
-                return data
+    if try_decode_qr._wechat is not None:
+        results, _ = try_decode_qr._wechat.detectAndDecode(frame)
+        if results:
+            for r in results:
+                if r:
+                    return r
 
     return None
 
 
-def detect_qr_data(frame: np.ndarray, qr_detector=None) -> bytes | None:
-    """Detect and decode a QR code from a video frame.
-
-    Returns decoded raw bytes (after base64 decode) or None.
-    """
-    qr_string = try_decode_qr(frame, qr_detector)
-    if qr_string is None:
-        return None
-    try:
-        return base64.b64decode(qr_string)
-    except Exception:
-        return None
+def reset_strategy_stats():
+    """Reset detector state (useful for testing)."""
+    if hasattr(try_decode_qr, '_wechat'):
+        del try_decode_qr._wechat
