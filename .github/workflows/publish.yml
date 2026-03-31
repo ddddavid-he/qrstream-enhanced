@@ -1,9 +1,9 @@
 name: publish-pypi
 
 on:
-  release:
-    types:
-      - published
+  push:
+    tags:
+      - 'v*'
 
 permissions:
   contents: read
