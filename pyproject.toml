@@ -4,7 +4,7 @@ version = "0.2.0"
 description = "Encode and decode files via QR code video streams using LT fountain codes"
 requires-python = ">=3.10"
 dependencies = [
-    "opencv-python>=4.5.0",
+    "opencv-contrib-python>=4.5.0",
     "numpy>=1.20.0",
     "tqdm>=4.60.0",
     "qrcode[pil]>=7.0",
@@ -27,3 +27,8 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

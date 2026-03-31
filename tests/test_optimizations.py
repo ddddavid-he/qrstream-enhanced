@@ -17,7 +17,7 @@ from qrstream.protocol import (
 from qrstream.encoder import LTEncoder
 from qrstream.decoder import LTDecoder
 from qrstream.qr_utils import (
-    generate_qr_image, _StrategyStats, reset_strategy_stats,
+    generate_qr_image, reset_strategy_stats, try_decode_qr,
 )
 
 
@@ -184,38 +184,58 @@ class TestQrGeneration:
         assert len(img.shape) == 3
 
 
-class TestStrategyStats:
-    """Test adaptive strategy stats."""
-
-    def test_warmup_phase(self):
-        stats = _StrategyStats()
-        # During warmup, should_skip always returns False
-        for _ in range(49):
-            stats.tick()
-            stats.record('gray', False)
-        assert not stats.warmup_done
-        assert not stats.should_skip('gray')
-
-    def test_skip_after_warmup(self):
-        stats = _StrategyStats()
-        # Record 50 frames with 0% gray success
-        for _ in range(50):
-            stats.tick()
-            stats.record('gray', False)
-        assert stats.warmup_done
-        assert stats.should_skip('gray')
-
-    def test_no_skip_high_success(self):
-        stats = _StrategyStats()
-        for _ in range(50):
-            stats.tick()
-            stats.record('gray', True)  # 100% success
-        assert stats.warmup_done
-        assert not stats.should_skip('gray')
+class TestWeChatDetector:
+    """Test WeChatQRCode detector integration."""
 
     def test_reset(self):
         reset_strategy_stats()
-        # Just verify it doesn't crash
+
+    def test_wechat_detects_base64_qr(self):
+        """WeChatQRCode can decode standard base64-encoded QR."""
+        import base64, zlib
+        data = os.urandom(64)
+        packed = pack_v2(filesize=100, blocksize=64, block_count=2,
+                         seed=42, block_seq=0, data=data)
+        img = generate_qr_image(packed, ec_level=1, version=20)
+        result = try_decode_qr(img)
+        assert result is not None
+        block = base64.b64decode(result)
+        assert block[0] == 0x02
+        stored = int.from_bytes(block[16:20], 'big')
+        computed = zlib.crc32(block[:16] + block[20:]) & 0xFFFFFFFF
+        assert stored == computed
+
+    def test_wechat_detects_cobs_binary_qr(self):
+        """WeChatQRCode can decode COBS binary QR and payload validates."""
+        import zlib
+        data = os.urandom(64)
+        packed = pack_v2(filesize=100, blocksize=64, block_count=2,
+                         seed=99, block_seq=0, data=data, binary_qr=True)
+        img = generate_qr_image(packed, ec_level=1, version=20,
+                                binary_mode=True)
+        result = try_decode_qr(img)
+        assert result is not None, "WeChatQRCode should detect COBS QR"
+        # Decode COBS: latin-1 -> cobs_decode -> raw bytes
+        raw = result.encode('latin-1')
+        block = cobs_decode(raw)
+        assert block[0] == 0x02
+        stored = int.from_bytes(block[16:20], 'big')
+        computed = zlib.crc32(block[:16] + block[20:]) & 0xFFFFFFFF
+        assert stored == computed, "COBS binary QR CRC must match"
+
+    def test_wechat_binary_qr_with_null_heavy_data(self):
+        """Binary QR with data full of null bytes still works via COBS."""
+        import zlib
+        data = b'\x00' * 64  # worst case for COBS
+        packed = pack_v2(filesize=64, blocksize=64, block_count=1,
+                         seed=7, block_seq=0, data=data, binary_qr=True)
+        img = generate_qr_image(packed, ec_level=1, version=20,
+                                binary_mode=True)
+        result = try_decode_qr(img)
+        assert result is not None
+        raw = result.encode('latin-1')
+        block = cobs_decode(raw)
+        assert block == packed
 
 
 class TestCobs:
@@ -299,9 +319,8 @@ class TestBinaryQrCobsGeneration:
         assert img is not None
         assert len(img.shape) == 3
 
-    def test_binary_qr_detectable_by_opencv(self):
-        """COBS-encoded binary QR should be decodable by OpenCV."""
-        import cv2
+    def test_binary_qr_detectable_by_wechat(self):
+        """COBS-encoded binary QR should be decodable by WeChatQRCode."""
         from qrstream.protocol import cobs_encode
 
         block_data = os.urandom(64)
@@ -311,11 +330,10 @@ class TestBinaryQrCobsGeneration:
         img = generate_qr_image(packed, ec_level=1, version=20,
                                 binary_mode=True)
 
-        detector = cv2.QRCodeDetector()
-        qr_str, _, _ = detector.detectAndDecode(img)
-        assert qr_str, "OpenCV should detect the COBS QR code"
+        qr_str = try_decode_qr(img)
+        assert qr_str, "WeChatQRCode should detect the COBS QR code"
 
-        # Decode: latin-1 → COBS decode → original packed bytes
+        # Decode: latin-1 -> COBS decode -> original packed bytes
         raw = qr_str.encode('latin-1')
         recovered = cobs_decode(raw)
         assert recovered == packed

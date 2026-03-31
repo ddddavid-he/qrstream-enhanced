@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "skills": {
+    "patent-assistant": {
+      "name": "Patent Assistant",
+      "zip_url": "https://lightmake.site/api/v1/download?slug=patent-assistant",
+      "source": "skillhub",
+      "version": "1.1.0"
+    },
+    "serper-google-search": {
+      "name": "Google Search Skill",
+      "zip_url": "https://lightmake.site/api/v1/download?slug=serper-google-search",
+      "source": "skillhub",
+      "version": "1.0.0"
+    },
+    "patent-novelty-search": {
+      "name": "patent-novelty-search",
+      "zip_url": "https://lightmake.site/api/v1/download?slug=patent-novelty-search",
+      "source": "skillhub",
+      "version": "1.0.0"
+    },
+    "patent-disclosure-writer": {
+      "name": "中文专利交底书撰写(Patent Disclosure Doc Writer)",
+      "zip_url": "https://lightmake.site/api/v1/download?slug=patent-disclosure-writer",
+      "source": "skillhub",
+      "version": "1.0.2"
+    },
+    "serper-v": {
+      "name": "serper-v",
+      "zip_url": "https://lightmake.site/api/v1/download?slug=serper-v",
+      "source": "skillhub",
+      "version": "2.0.1"
+    }
+  }
+}
