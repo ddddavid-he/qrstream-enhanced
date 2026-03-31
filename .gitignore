@@ -5,6 +5,7 @@ __pycache__/
 dist/
 build/
 .venv/
+src/qrstream/_version.py
 
 # IDE
 .idea/
