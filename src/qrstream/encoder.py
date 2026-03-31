@@ -134,7 +134,7 @@ def encode_to_video(input_path: str, output_path: str,
                     workers: int | None = None,
                     use_legacy_qr: bool = False,
                     codec: str = 'mp4v',
-                    binary_qr: bool = False):
+                    binary_qr: bool = True):
     """Encode a file to a QR-code video using LT fountain codes.
 
     Args:
@@ -189,7 +189,7 @@ def encode_to_video(input_path: str, output_path: str,
     h, w = first_qr.shape[:2]
 
     if workers is None:
-        workers = min(os.cpu_count() or 1, 8)
+        workers = os.cpu_count() or 1
 
     if verbose:
         print(f"QR frame size: {w}x{h}, video FPS: {fps}, workers: {workers}")
@@ -211,8 +211,7 @@ def encode_to_video(input_path: str, output_path: str,
     batch_size = max(workers * 4, 64)
 
     try:
-        progress = tqdm(total=num_blocks, desc="Encoding frames",
-                        disable=not verbose)
+        progress = tqdm(total=num_blocks, desc="Encoding frames")
 
         if workers > 1:
             # Streaming: produce blocks in a background thread,

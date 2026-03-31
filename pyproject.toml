@@ -1,6 +1,6 @@
 [project]
-name = "qrstream"
-version = "0.2.0"
+name = "qrstream-enhanced"
+version = "0.3.0"
 description = "Encode and decode files via QR code video streams using LT fountain codes"
 requires-python = ">=3.10"
 dependencies = [
@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.scripts]
-qrstream = "qrstream.cli:main"
+qrs = "qrstream.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -25,10 +25,10 @@ dev = [
     "pytest>=9.0.2",
 ]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

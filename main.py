@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-QRStream main entry point.
+QRStream Enhanced main entry point.
 
-Supports two calling modes:
-  - uv run main.py [args]
-  - uv run qrstream [args]
-
-The second form is configured via pyproject.toml console_scripts.
+Usage:
+  uv run main.py [args]
+  uv run qrs [args]
 """
 
 from qrstream.cli import main

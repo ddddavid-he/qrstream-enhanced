@@ -390,7 +390,7 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
     cap.release()
 
     if workers is None:
-        workers = min(multiprocessing.cpu_count(), 8)
+        workers = multiprocessing.cpu_count() or 1
 
     if verbose:
         print(f"Video: {total_frames} frames, {src_fps:.1f} FPS, {duration:.1f}s")
