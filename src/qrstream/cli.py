@@ -2,6 +2,7 @@
 Unified CLI for QRStream.
 
 Usage:
+    qrstream -V | --version
     qrstream encode <file> -o output.mp4 [--overhead 2.0] [--fps 10] [-v]
     qrstream decode <video> -o output_file [-s sample_rate] [-v]
 """
@@ -10,12 +11,13 @@ import sys
 import os
 import argparse
 
-from .encoder import encode_to_video
-from .decoder import extract_qr_from_video, decode_blocks_to_file
+from .__init__ import __version__
 
 
 def cmd_encode(args):
     """Handle the 'encode' subcommand."""
+    from .encoder import encode_to_video
+
     if not os.path.exists(args.file):
         print(f"Error: File not found: {args.file}")
         sys.exit(1)
@@ -48,6 +50,8 @@ def cmd_encode(args):
 
 def cmd_decode(args):
     """Handle the 'decode' subcommand."""
+    from .decoder import extract_qr_from_video, decode_blocks_to_file
+
     if not os.path.exists(args.video):
         print(f"Error: File not found: {args.video}")
         sys.exit(1)
@@ -78,6 +82,8 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=prog,
         description='QRStream: Encode and decode files via QR code video streams')
+    parser.add_argument('-V', '--version', action='version',
+                        version=f'%(prog)s {__version__}')
 
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
 
@@ -96,8 +102,8 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
     enc.add_argument('--qr-version', type=int, default=20,
                      choices=range(1, 41), metavar='N',
                      help='QR code version 1-40, controls density (default: 20)')
-    enc.add_argument('--border', type=float, default=0.0,
-                     help='Quiet-zone width as a percentage of QR content width')
+    enc.add_argument('--border', type=float, default=None,
+                     help='Quiet-zone width as a percentage of QR content width (default: standard 4-module quiet zone; use 0 to disable)')
     enc.add_argument('--lead-in-seconds', type=float, default=0.0,
                      dest='lead_in_seconds',
                      help='White lead-in duration before the first QR frame')

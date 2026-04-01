@@ -30,3 +30,4 @@ skills/
 # Test / cache
 .pytest_cache/
 *.egg
+uv.lock

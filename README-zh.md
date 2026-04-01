@@ -79,6 +79,8 @@ uv sync --dev
 
 ```bash
 qrstream <command> [options]
+qrstream -V
+qrstream --version
 ```
 
 同时保留 `qrs` 这个短命令别名，也支持 `python -m qrstream`。
@@ -97,6 +99,7 @@ qrstream encode <file> -o output.mp4 [options]
 | `--fps` | `10` | 输出视频帧率 |
 | `--ec-level` | `1` | QR 纠错等级：0=L(7%), 1=M(15%), 2=Q(25%), 3=H(30%) |
 | `--qr-version` | `20` | QR 码版本 1-40（越大密度越高） |
+| `--border` | 标准 4 模块静区 | 静区宽度，按 QR 内容宽度百分比计算（`--border 10` = 10%，`--border 0` 可关闭） |
 | `--no-compress` | - | 禁用 zlib 压缩 |
 | `--force-compress` | - | 对大文件的 V3 编码强制整体压缩（会占用更多内存） |
 | `--base64-qr` | - | 使用 base64 编码代替 COBS（兼容性更好但容量少 33%） |

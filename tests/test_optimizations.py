@@ -13,7 +13,9 @@ from qrstream.protocol import (
     pack_v2, unpack, V2_HEADER_SIZE,
     cobs_encode, cobs_decode,
 )
-from qrstream.encoder import LTEncoder
+from qrstream import __version__
+from qrstream.cli import build_parser
+from qrstream.encoder import LTEncoder, _resolve_border_modules
 from qrstream.decoder import LTDecoder
 from qrstream.qr_utils import (
     generate_qr_image, reset_strategy_stats, try_decode_qr,
@@ -95,6 +97,33 @@ class TestQrGeneration:
         img = generate_qr_image(data, ec_level=1, version=20, binary_mode=True)
         assert img is not None
         assert img.shape[2] == 3
+
+
+class TestCli:
+    def test_version_flag_prints_package_version(self, capsys):
+        parser = build_parser()
+        with pytest.raises(SystemExit) as exc_info:
+            parser.parse_args(['-V'])
+        assert exc_info.value.code == 0
+        assert capsys.readouterr().out.strip() == f'qrstream {__version__}'
+
+    def test_verbose_flag_stays_on_subcommands(self):
+        parser = build_parser()
+        args = parser.parse_args(['encode', 'input.bin', '-v'])
+        assert args.verbose is True
+
+    def test_encode_border_default_uses_standard_quiet_zone(self):
+        parser = build_parser()
+        args = parser.parse_args(['encode', 'input.bin'])
+        assert args.border is None
+
+
+class TestBorderDefaults:
+    def test_default_border_resolves_to_standard_quiet_zone(self):
+        assert _resolve_border_modules(20, None) == 4.0
+
+    def test_percentage_border_is_still_supported(self):
+        assert _resolve_border_modules(20, 10.0) == pytest.approx(9.7)
 
 
 class TestWeChatDetector:

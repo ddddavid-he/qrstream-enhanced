@@ -164,12 +164,19 @@ _CODEC_MAP = {
 }
 
 
+def _resolve_border_modules(qr_version: int, border: float | None) -> float:
+    """Resolve CLI/API border input to QR quiet-zone width in modules."""
+    if border is None:
+        return 4.0
+    return round((qr_version - 1) * 4 + 21) * border / 100.0
+
+
 def encode_to_video(input_path: str, output_path: str,
                     overhead: float = 2.0,
                     fps: int = 10,
                     ec_level: int = 1,
                     qr_version: int = 20,
-                    border: float = 0.0,
+                    border: float | None = None,
                     lead_in_seconds: float = 0.0,
                     compress: bool = True,
                     verbose: bool = False,
@@ -207,7 +214,7 @@ def encode_to_video(input_path: str, output_path: str,
             binary_qr=binary_qr,
             protocol_version=protocol_version,
         )
-        border_modules = round((qr_version - 1) * 4 + 21) * border / 100.0
+        border_modules = _resolve_border_modules(qr_version, border)
         K = ceil(payload_size / blocksize)
         num_blocks = int(K * overhead)
         lead_in_frames = max(0, round(lead_in_seconds * fps))
