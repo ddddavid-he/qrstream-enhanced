@@ -45,9 +45,9 @@ What this probe actually checks
    ``multiprocessing.get_context("fork")`` *before* calling any
    decoder entry point.
 2. Run the full ``extract_qr_from_video`` → ``decode_blocks_to_file``
-   pipeline on ``tests/fixtures/testcase-v070.mp4``.
+   pipeline on ``tests/fixtures/real-phone-v3/v070.mp4``.
 3. Compare the decoded SHA-256 against the committed fixture oracle
-   (``testcase-v070.input.bin``).
+   (``tests/fixtures/real-phone-v3/v070.input.bin``).
 
 Exit codes
 ----------
@@ -80,8 +80,8 @@ def _sha256_file(path: Path) -> str:
 
 def main() -> int:
     fixtures = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
-    video = fixtures / "testcase-v070.mp4"
-    input_bin = fixtures / "testcase-v070.input.bin"
+    video = fixtures / "real-phone-v3" / "v070.mp4"
+    input_bin = fixtures / "real-phone-v3" / "v070.input.bin"
     expected_sha = _sha256_file(input_bin)
 
     if not video.exists() or not input_bin.exists():

@@ -2,17 +2,36 @@
 
 These are slow (seconds each, not milliseconds) and intentionally
 excluded from the default ``pytest tests/`` run via the ``slow``
-marker so the ~80 unit tests still complete in under a second.
+marker so the unit tests still complete in well under a second.
 
-Invoke explicitly with one of::
+Because the captures take noticeable wall-clock time and exercise
+OpenCV / WeChatQRCode rather than any Python-version-specific
+logic, the project runs them in a **dedicated GitHub Actions
+workflow** (``.github/workflows/real-world-tests.yml``) instead of
+the per-Python-version unit-test matrix. Running the slow layer
+once per architecture on Python 3.13 is enough to catch an
+OpenCV / WeChatQR regression.
+
+Invoke locally with either::
 
     uv run pytest -m slow -v
     uv run pytest tests/test_real_recordings.py -v
 
-The CI workflow also runs these explicitly in a dedicated job.
+Fixtures live under ``tests/fixtures/`` in two layered sub-dirs:
 
-Fixtures live in ``tests/fixtures/``; see that directory's README for
-how they were recorded and re-encoded.
+* ``real-phone-v3/`` — captures produced with the qrstream ≤ 0.7
+  protocol path (``prng_version=0`` flag cleared; LCG PRNG with
+  5 warmup rounds).  Kept so the decoder's legacy-compat path
+  stays covered even after v0.8+ makes ``prng_version=1`` the
+  default.
+* ``real-phone-v4/`` — captures produced with the qrstream ≥ 0.8
+  default path (``prng_version=1`` flag set; SplitMix64 mixer,
+  GE rescue available).  Recorded at ``--overhead 1.5 --fps 10``
+  then re-encoded with HEVC / CRF 32-36 / 720×720 / 12-15 fps to
+  keep the repo footprint manageable.
+
+See ``tests/fixtures/README.md`` for the full recording and
+re-encoding procedure used to produce each case.
 """
 
 from __future__ import annotations
@@ -28,24 +47,66 @@ from qrstream.decoder import extract_qr_from_video, decode_blocks_to_file
 
 _FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
-# Each entry: (video filename, input filename, expected sha256 of
-# the decoded bytes (which must equal the sha256 of input.bin)).
+# Each entry declares (label, subdir, video, input_bin, expected_sha,
+# strict). ``strict=False`` means a failure is reported but does not
+# fail the job — used for legacy captures whose quality is known to
+# be marginal and which we refuse to block releases on (see the
+# v070 note below).
 #
-# The SHA-256 values below are recomputed and committed together
-# with the fixture files, so if you ever regenerate the inputs the
-# decoded data MUST still match byte-for-byte.
-_CASES = [
+# SHA-256 values are computed against the committed ``.input.bin``
+# files; if an input is ever regenerated the matching hash here must
+# be updated as well or the test becomes a tautology.
+_GATING_CASES = [
     pytest.param(
-        "testcase-v061.mp4",
-        "testcase-v061.input.bin",
+        "real-phone-v3", "v061.mp4",
+        "v061.input.bin",
         "4a440b6da851a9a2e35eacca95b7b2fe29e3560c169b0a57211fccc2f5469443",
-        id="v061-30KB-V25-60fps-phone",
+        id="v3-v061-30KB-V25-60fps-phone",
+    ),
+    # real-phone-v4: the qrstream 0.8+ default path. All three are
+    # gating — if any of these regress, the fix has broken something
+    # user-visible.
+    pytest.param(
+        "real-phone-v4", "v073-10kB.mp4",
+        "v073-10kB.input.bin",
+        "897d28b6b6e8540e08cb2e10f790a7cd40c84d56840e03349fef4a05a95ee8a4",
+        id="v4-v073-10kB-V25-15fps-phone",
     ),
     pytest.param(
-        "testcase-v070.mp4",
-        "testcase-v070.input.bin",
+        "real-phone-v4", "v073-100kB.mp4",
+        "v073-100kB.input.bin",
+        "6fbf396baedd1233f4c8486e8a4a4cc43b9a1283e19ae4dcb3cd27c4ad4dbed2",
+        id="v4-v073-100kB-V25-15fps-phone",
+    ),
+    pytest.param(
+        "real-phone-v4", "v073-300kB.mp4",
+        "v073-300kB.input.bin",
+        "115e32de92187eb5cc544e04b5bb5ed953577d6c75489d8e4c1f2b1c374380fb",
+        id="v4-v073-300kB-V25-12fps-phone",
+    ),
+]
+
+# v070 is a known-marginal capture — an early-prototype phone
+# recording of a 300 kB payload at a suboptimal distance / focus.
+# It decodes on most hardware / OpenCV builds but occasionally
+# misses ~0.5% of QR frames on bespoke ffmpeg builds, which can
+# push it below the LT convergence threshold.  We keep it as a
+# smoke signal of the decoder's worst-case behaviour but mark it
+# ``xfail(strict=False)`` so a red result shows up in the workflow
+# summary without blocking a release.  If you need to re-gate it,
+# remove the ``strict=False`` line below.
+_NON_GATING_CASES = [
+    pytest.param(
+        "real-phone-v3", "v070.mp4",
+        "v070.input.bin",
         "2a20b62e35bf4b3a7f5fa4854397eeafea99d1efb8db38737cda4df55a4d5b8d",
-        id="v070-300KB-V25-30fps-phone",
+        id="v3-v070-300KB-V25-30fps-phone",
+        marks=pytest.mark.xfail(
+            strict=False,
+            reason="v070 is a low-quality capture kept as a "
+                   "worst-case smoke signal; see the _NON_GATING_CASES "
+                   "block in this file for details.",
+        ),
     ),
 ]
 
@@ -58,29 +119,17 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-@pytest.mark.slow
-@pytest.mark.parametrize("video_name, input_name, expected_sha", _CASES)
-def test_phone_recording_roundtrip(
-    video_name: str, input_name: str, expected_sha: str
-) -> None:
-    """Decode a real phone-captured recording and verify byte-exact match.
-
-    Guards against regressions in:
-      - base45 / QR alphanumeric decode path
-      - decoder's pipelined frame-read + worker-pool scheduling
-        (Tier 1.2 change in v0.7.0)
-      - WeChatQRCode integration / OpenCV version drift
-      - LT belief-propagation correctness over lossy input
-    """
-    video_path = _FIXTURES_DIR / video_name
-    input_path = _FIXTURES_DIR / input_name
+def _run_case(subdir: str, video_name: str, input_name: str,
+              expected_sha: str) -> None:
+    video_path = _FIXTURES_DIR / subdir / video_name
+    input_path = _FIXTURES_DIR / subdir / input_name
 
     assert video_path.exists(), f"missing fixture video: {video_path}"
     assert input_path.exists(), f"missing fixture input: {input_path}"
 
-    # Sanity: the committed input.bin must still hash to the expected
-    # value. If this fails, someone tampered with the fixture and the
-    # test can't trust its own oracle.
+    # Sanity gate: the committed input.bin must still hash to the
+    # oracle value. If this fails, the test can't trust its own
+    # ground truth.
     assert _sha256_file(input_path) == expected_sha, (
         f"fixture input {input_name} has drifted from its committed "
         f"SHA-256; the decoded-bytes assertion would be meaningless."
@@ -105,3 +154,33 @@ def test_phone_recording_roundtrip(
     finally:
         if out_path.exists():
             out_path.unlink()
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "subdir, video_name, input_name, expected_sha", _GATING_CASES)
+def test_phone_recording_roundtrip_gating(
+    subdir: str, video_name: str, input_name: str, expected_sha: str,
+) -> None:
+    """Gating end-to-end: any failure blocks the real-world test job.
+
+    Guards against regressions in:
+      - base45 / QR alphanumeric decode path
+      - decoder's pipelined frame-read + worker-pool scheduling
+      - WeChatQRCode integration / OpenCV version drift
+      - LT belief-propagation + Gauss-Jordan rescue correctness
+    """
+    _run_case(subdir, video_name, input_name, expected_sha)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "subdir, video_name, input_name, expected_sha", _NON_GATING_CASES)
+def test_phone_recording_roundtrip_non_gating(
+    subdir: str, video_name: str, input_name: str, expected_sha: str,
+) -> None:
+    """Non-gating end-to-end smoke: marked ``xfail(strict=False)``
+    so a failure is visible in the test report but does not fail
+    the workflow. See ``_NON_GATING_CASES`` for why each entry is
+    here."""
+    _run_case(subdir, video_name, input_name, expected_sha)

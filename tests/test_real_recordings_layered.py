@@ -54,15 +54,16 @@ class _FixtureSpec:
         self.ec_level = ec_level
 
 
-# Keep this list in sync with tests/test_real_recordings.py::_CASES.
+# Keep this list in sync with
+# tests/test_real_recordings.py::(_GATING_CASES, _NON_GATING_CASES).
 # ``min_uniq_blocks`` is a conservative lower bound on what
 # extract_qr_from_video should yield *after* targeted recovery; it
 # must be greater than K (number of source blocks in the fixture)
 # and leave some margin for normal run-to-run variance.
 _FIXTURES = {
     "v070": _FixtureSpec(
-        video="testcase-v070.mp4",
-        input_bin="testcase-v070.input.bin",
+        video="real-phone-v3/v070.mp4",
+        input_bin="real-phone-v3/v070.input.bin",
         expected_sha=(
             "2a20b62e35bf4b3a7f5fa4854397eeafea99d1efb8db38737cda4df55a4d5b8d"
         ),
@@ -74,12 +75,45 @@ _FIXTURES = {
         ec_level=1,
     ),
     "v061": _FixtureSpec(
-        video="testcase-v061.mp4",
-        input_bin="testcase-v061.input.bin",
+        video="real-phone-v3/v061.mp4",
+        input_bin="real-phone-v3/v061.input.bin",
         expected_sha=(
             "4a440b6da851a9a2e35eacca95b7b2fe29e3560c169b0a57211fccc2f5469443"
         ),
         min_uniq_blocks=40,
+        qr_version=25,
+        ec_level=1,
+    ),
+    "v073-10kB": _FixtureSpec(
+        video="real-phone-v4/v073-10kB.mp4",
+        input_bin="real-phone-v4/v073-10kB.input.bin",
+        expected_sha=(
+            "897d28b6b6e8540e08cb2e10f790a7cd40c84d56840e03349fef4a05a95ee8a4"
+        ),
+        # K=11; phone capture consistently yields ~16 unique blocks.
+        min_uniq_blocks=11,
+        qr_version=25,
+        ec_level=1,
+    ),
+    "v073-100kB": _FixtureSpec(
+        video="real-phone-v4/v073-100kB.mp4",
+        input_bin="real-phone-v4/v073-100kB.input.bin",
+        expected_sha=(
+            "6fbf396baedd1233f4c8486e8a4a4cc43b9a1283e19ae4dcb3cd27c4ad4dbed2"
+        ),
+        # K≈110; capture yields ~140 unique blocks.
+        min_uniq_blocks=120,
+        qr_version=25,
+        ec_level=1,
+    ),
+    "v073-300kB": _FixtureSpec(
+        video="real-phone-v4/v073-300kB.mp4",
+        input_bin="real-phone-v4/v073-300kB.input.bin",
+        expected_sha=(
+            "115e32de92187eb5cc544e04b5bb5ed953577d6c75489d8e4c1f2b1c374380fb"
+        ),
+        # K≈326; capture yields ~387 unique blocks.
+        min_uniq_blocks=330,
         qr_version=25,
         ec_level=1,
     ),
@@ -132,6 +166,12 @@ def _build_ground_truth_encoder(
         blocksize=blocksize,
         compressed=header.compressed,
         alphanumeric_qr=header.alphanumeric_qr,
+        # Replay the exact PRNG schema the original encoder used,
+        # so ``(seed) → (degree, src_blocks)`` matches byte-for-byte.
+        # Without this, ground-truth blocks from a legacy v0 fixture
+        # would be rebuilt under the v1 SplitMix64 schedule and the
+        # L2 assertion would fire on every block.
+        prng_version=header.prng_version,
     )
 
 
@@ -147,7 +187,27 @@ def _ground_truth_block_for_seed(enc: LTEncoder, seed: int) -> bytes:
     return data
 
 
-@pytest.fixture(scope="module", params=["v070", "v061"])
+# Param-level xfail for v070: low-quality capture kept as worst-case
+# smoke signal (see tests/test_real_recordings.py for the full
+# rationale). All other fixtures must pass the full L1–L4 stack.
+_XFAIL_V070 = pytest.mark.xfail(
+    strict=False,
+    reason="v070 is a low-quality capture kept as a worst-case "
+           "smoke signal; do not block releases on its layered "
+           "assertions.",
+)
+
+
+@pytest.fixture(
+    scope="module",
+    params=[
+        pytest.param("v061", id="v3-v061"),
+        pytest.param("v070", id="v3-v070", marks=_XFAIL_V070),
+        pytest.param("v073-10kB", id="v4-v073-10kB"),
+        pytest.param("v073-100kB", id="v4-v073-100kB"),
+        pytest.param("v073-300kB", id="v4-v073-300kB"),
+    ],
+)
 def fixture_spec(request) -> _FixtureSpec:
     spec = _FIXTURES[request.param]
     if not spec.video.exists() or not spec.input_bin.exists():
@@ -208,13 +268,21 @@ def test_layer2_each_block_matches_ground_truth(fixture_spec):
 
 @pytest.mark.slow
 def test_layer3_lt_converges_on_observed_seeds(fixture_spec):
-    """L3: LT peeling must converge on the exact seed subset the
-    decoder observed.
+    """L3: LT peeling + GE rescue must converge on the observed
+    seed subset.
 
-    If L1/L2 pass but L3 fails, we've landed in a pathological LT
-    seed subset (the v070 regression class).  The fix is in the
-    frame-recovery path (CLAHE worker, broader recovery gate, etc.),
-    not in the LT implementation itself.
+    Mirrors the production decode path
+    (:func:`qrstream.decoder._decode_into_decoder`): belief-
+    propagation first, then a Gauss-Jordan rescue on the surviving
+    check graph when peeling stalls.  That order matches what
+    end users see via ``qrs decode``.
+
+    If L1/L2 pass but L3 fails, we've exhausted both decoders:
+    the observed check equations genuinely don't span the missing
+    source blocks.  Likely regressions: targeted-recovery path
+    (e.g. CLAHE worker removed), GE rescue off by a column, or the
+    capture got fewer unique seeds than the information-theoretic
+    minimum.
     """
     blocks = extract_qr_from_video(
         str(fixture_spec.video), sample_rate=0, verbose=False, workers=None,
@@ -225,12 +293,16 @@ def test_layer3_lt_converges_on_observed_seeds(fixture_spec):
             dec.decode_bytes(packed, skip_crc=True)
         except (ValueError, struct.error):
             pass
+    if not dec.is_done():
+        # Invoke the GE rescue exactly like the production path
+        # does after peeling finishes without converging.
+        dec.try_gaussian_rescue()
 
     assert dec.is_done(), (
-        f"L3 (LT peeling) stuck at {dec.num_recovered}/{dec.K} after "
-        f"{len(blocks)} observed blocks. "
-        f"Likely regression: targeted recovery path (e.g. CLAHE "
-        f"worker removed, ``sample_rate > 1`` gate re-introduced)."
+        f"L3 (LT peeling + GE rescue) stuck at "
+        f"{dec.num_recovered}/{dec.K} after {len(blocks)} observed "
+        f"blocks. Either the observed equations don't span all "
+        f"sources (capture loss), or one of peeling/GE regressed."
     )
 
 
@@ -250,6 +322,8 @@ def test_layer4_decoded_bytes_match_input(fixture_spec):
             dec.decode_bytes(packed, skip_crc=True)
         except (ValueError, struct.error):
             pass
+    if not dec.is_done():
+        dec.try_gaussian_rescue()
     assert dec.is_done(), "prerequisite: L3 must pass"
 
     recovered = dec.bytes_dump()

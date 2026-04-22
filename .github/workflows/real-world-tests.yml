@@ -1,0 +1,92 @@
+name: real-world-tests
+
+# End-to-end smoke layer: decode the real phone-recorded QR videos
+# in ``tests/fixtures/`` and verify byte-exact recovery of the
+# source files.
+#
+# Why this is a separate workflow from ``test.yml``:
+#   * Each case takes multiple seconds (OpenCV + WeChatQRCode
+#     actually walking frames of a real capture), so running it in
+#     the per-(os × python-version) unit-test matrix would multiply
+#     CI time for coverage we don't need — these tests exercise
+#     OpenCV, not Python-version-specific code.
+#   * Splitting it out lets us trigger it on a narrower schedule
+#     (push to main + weekly cron) without throttling the fast
+#     feedback loop of the unit-test workflow.
+#
+# Gating vs. non-gating:
+#   * Most real-phone-v3 and all real-phone-v4 cases are gating:
+#     any failure fails this job.
+#   * ``v070`` is marked ``xfail(strict=False)`` in
+#     ``tests/test_real_recordings.py`` so its occasional
+#     misdetection on specific ffmpeg builds shows up as XFAIL /
+#     XPASS in the report but never blocks a release.
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - 'dev/*'
+    paths:
+      # Only re-run when something that could actually affect the
+      # end-to-end decode path changes.
+      - 'src/qrstream/**'
+      - 'tests/test_real_recordings.py'
+      - 'tests/fixtures/**'
+      - '.github/workflows/real-world-tests.yml'
+      - 'pyproject.toml'
+      - 'uv.lock'
+  pull_request:
+    branches:
+      - main
+      - dev
+      - 'dev/*'
+    paths:
+      - 'src/qrstream/**'
+      - 'tests/test_real_recordings.py'
+      - 'tests/fixtures/**'
+      - '.github/workflows/real-world-tests.yml'
+      - 'pyproject.toml'
+      - 'uv.lock'
+  schedule:
+    # Mondays 06:00 UTC: catch silent upstream regressions
+    # (OpenCV / opencv-contrib / ffmpeg build matrices change
+    # over time even without our code moving).
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-world:
+    name: real-world (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest       # x86_64 / amd64
+          - ubuntu-24.04-arm    # aarch64 / arm64
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run end-to-end phone-recording tests
+        # ``-m slow`` opts into the marker the default pytest run
+        # filters out (see pyproject.toml addopts).
+        run: uv run pytest -m slow -v

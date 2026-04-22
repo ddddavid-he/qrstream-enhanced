@@ -64,16 +64,12 @@ jobs:
         run: uv sync --dev
 
       - name: Run unit tests
+        # Unit tests only — the slow real-world phone-recording
+        # layer lives in a separate workflow
+        # (.github/workflows/real-world-tests.yml) so that
+        # ~15-60 s of OpenCV/WeChatQRCode work doesn't run once
+        # per (os × python-version) matrix cell.
         run: uv run pytest tests/ -v
-
-      - name: Run end-to-end phone-recording tests
-        # Only on 3.13 — the E2E recordings exercise OpenCV /
-        # WeChatQRCode, not Python-version-specific code, so running
-        # them once per architecture across the matrix is enough.
-        # They take ~15–60 s total (per arch) because they actually
-        # decode real phone videos from tests/fixtures/.
-        if: matrix.python-version == '3.13'
-        run: uv run pytest -m slow -v
 
       - name: Build distributions
         # One build per architecture is intentional: we verify the
@@ -92,7 +88,7 @@ jobs:
 
   # ── Informational probe ────────────────────────────────────────
   # This job runs the decoder with the multiprocessing start method
-  # flipped back to ``fork`` and checks whether testcase-v070 still
+  # flipped back to ``fork`` and checks whether v070 still
   # decodes byte-exactly.  It is intentionally **not** a release
   # gate — neither ``release.yml`` nor ``publish.yml`` list it in
   # their ``needs:`` — and ``continue-on-error: true`` means a red
@@ -133,7 +129,7 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
-      - name: Run fork-safety probe on testcase-v070
+      - name: Run fork-safety probe on v070
         # -W default::DeprecationWarning makes sure Python surfaces
         # the 'fork() in multi-threaded parent' warning in the
         # stderr tail, even though the probe itself also captures
