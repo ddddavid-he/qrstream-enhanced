@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from qrstream.encoder import encode_to_video, LTEncoder
 from qrstream.decoder import decode_blocks, LTDecoder
 from qrstream.lt_codec import PRNG, BlockGraph, xor_bytes
-from qrstream.protocol import pack_v2, auto_blocksize
+from qrstream.protocol import auto_blocksize
 from qrstream.qr_utils import generate_qr_image
 
 
@@ -137,7 +137,8 @@ def benchmark_encode_to_video(file_size_kb: int = 10, iterations: int = 2):
         f.write(test_data)
         input_path = f.name
 
-    output_path = tempfile.mktemp(suffix='.mp4')
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as f:
+        output_path = f.name
 
     times = []
     for _ in range(iterations):

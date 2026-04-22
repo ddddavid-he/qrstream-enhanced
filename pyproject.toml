@@ -59,11 +59,6 @@ source = "vcs"
 [tool.hatch.build.hooks.vcs]
 version-file = "src/qrstream/_version.py"
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=9.0.2",
-]
-
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",

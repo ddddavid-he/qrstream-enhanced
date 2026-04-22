@@ -153,6 +153,15 @@ def _render_qr(payload: bytes, ec_level: int, box_size: int,
 # It is faster, more robust, and handles phone-captured screens
 # significantly better than OpenCV's built-in QRCodeDetector.
 
+# Per-process lazy singleton for the WeChatQRCode detector.
+# In multiprocessing ``spawn`` mode each worker gets its own copy of
+# module globals, so the detector is initialised once per OS process
+# on first call to :func:`try_decode_qr`.  Using a sentinel object
+# instead of ``None`` lets us distinguish "not yet initialised" from
+# "initialisation failed (cv2.error / OSError)".
+_WECHAT_UNINIT = object()
+_wechat_detector: object = _WECHAT_UNINIT
+
 
 def try_decode_qr(frame: np.ndarray, qr_detector=None) -> str | None:
     """Decode a QR code from a frame using WeChatQRCode.
@@ -162,16 +171,18 @@ def try_decode_qr(frame: np.ndarray, qr_detector=None) -> str | None:
     raise UnicodeDecodeError; we swallow that and return None so
     the caller can try alternative detectors if it wants.
     """
-    # Lazy-init WeChatQRCode detector (per-process, for multiprocessing)
-    if not hasattr(try_decode_qr, '_wechat'):
-        try:
-            try_decode_qr._wechat = cv2.wechat_qrcode_WeChatQRCode()
-        except (cv2.error, OSError):
-            try_decode_qr._wechat = None
+    global _wechat_detector
 
-    if try_decode_qr._wechat is not None:
+    # Lazy-init WeChatQRCode detector (per-process, for multiprocessing)
+    if _wechat_detector is _WECHAT_UNINIT:
         try:
-            results, _ = try_decode_qr._wechat.detectAndDecode(frame)
+            _wechat_detector = cv2.wechat_qrcode_WeChatQRCode()
+        except (cv2.error, OSError):
+            _wechat_detector = None
+
+    if _wechat_detector is not None:
+        try:
+            results, _ = _wechat_detector.detectAndDecode(frame)
         except UnicodeDecodeError:
             return None
         if results:
@@ -184,5 +195,5 @@ def try_decode_qr(frame: np.ndarray, qr_detector=None) -> str | None:
 
 def reset_strategy_stats():
     """Reset detector state (useful for testing)."""
-    if hasattr(try_decode_qr, '_wechat'):
-        del try_decode_qr._wechat
+    global _wechat_detector
+    _wechat_detector = _WECHAT_UNINIT

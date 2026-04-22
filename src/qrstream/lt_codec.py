@@ -148,7 +148,7 @@ class PRNG:
 
     def get_src_blocks(self, seed=None):
         """Return (blockseed, degree, src_block_indices) for a given seed."""
-        if seed:
+        if seed is not None:
             self.state = seed
         blockseed = self.state
         if self.prng_version == 0:
