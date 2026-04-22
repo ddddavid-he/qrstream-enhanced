@@ -49,8 +49,17 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
-      - name: Run tests
+      - name: Run unit tests
         run: uv run pytest tests/ -v
+
+      - name: Run end-to-end phone-recording tests
+        # Only on 3.13 — the E2E recordings exercise OpenCV /
+        # WeChatQRCode, not Python-version-specific code, so running
+        # them once across the matrix is enough.  They take ~15 s
+        # total because they actually decode real phone videos from
+        # tests/fixtures/.
+        if: matrix.python-version == '3.13'
+        run: uv run pytest -m slow -v
 
       - name: Build distributions
         if: matrix.python-version == '3.13'

@@ -71,3 +71,9 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Exclude slow end-to-end tests from the default run; opt in with
+# `pytest -m slow` or `pytest tests/test_real_recordings.py`.
+addopts = "-m 'not slow'"
+markers = [
+    "slow: end-to-end tests against real phone-recorded fixtures (seconds each)",
+]
