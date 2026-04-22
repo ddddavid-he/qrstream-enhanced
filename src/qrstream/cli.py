@@ -45,7 +45,6 @@ def cmd_encode(args):
         use_legacy_qr=args.legacy_qr,
         codec=args.codec,
         alphanumeric_qr=alphanumeric_qr,
-        protocol_version=2 if args.protocol == 'v2' else 3,
         force_compress=args.force_compress,
     )
 
@@ -101,9 +100,9 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                      help='Frames per second in output video (default: 10)')
     enc.add_argument('--ec-level', type=int, default=1, choices=[0, 1, 2, 3],
                      help='QR error correction: 0=L, 1=M (default), 2=Q, 3=H')
-    enc.add_argument('--qr-version', type=int, default=20,
+    enc.add_argument('--qr-version', type=int, default=25,
                      choices=range(1, 41), metavar='N',
-                     help='QR code version 1-40, controls density (default: 20)')
+                     help='QR code version 1-40, controls density (default: 25)')
     enc.add_argument('--border', type=float, default=None,
                      help='Quiet-zone width as a percentage of QR content width (default: standard 4-module quiet zone; use 0 to disable)')
     enc.add_argument('--lead-in-seconds', type=float, default=0.0,
@@ -122,8 +121,6 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                           'or base64 (standard, QR byte mode).')
     enc.add_argument('--codec', choices=['mp4v', 'mjpeg'], default='mp4v',
                      help='Video codec: mp4v (default) or mjpeg (faster, larger)')
-    enc.add_argument('--protocol', choices=['v2', 'v3'], default='v3',
-                     help='Protocol version for encoding (default: v3)')
     enc.add_argument('-w', '--workers', type=int, default=None,
                      help='Parallel workers for QR generation (default: CPU count)')
     enc.add_argument('-v', '--verbose', action='store_true',

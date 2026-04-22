@@ -4,9 +4,7 @@ import os
 import zlib
 from math import ceil
 
-import pytest
-
-from qrstream.protocol import V2Header, V3Header, auto_blocksize, unpack
+from qrstream.protocol import V3Header, auto_blocksize, unpack
 from qrstream.encoder import LTEncoder, MmapDataSource, _load_payload
 from qrstream.decoder import LTDecoder
 
@@ -15,7 +13,7 @@ class TestDataRoundtrip:
     """Test encoding and decoding without video — pure LT fountain code roundtrip."""
 
     def _roundtrip(self, data: bytes, overhead: float = 3.0,
-                   compress: bool = False, protocol_version: int = 3):
+                   compress: bool = False):
         if compress:
             payload = zlib.compress(data)
         else:
@@ -30,7 +28,6 @@ class TestDataRoundtrip:
             payload,
             blocksize,
             compressed=compress,
-            protocol_version=protocol_version,
         )
         decoder = LTDecoder()
 
@@ -71,11 +68,6 @@ class TestDataRoundtrip:
         result = self._roundtrip(data)
         assert result == data
 
-    def test_v2_roundtrip_still_supported(self):
-        data = b'legacy-v2-data' * 20
-        result = self._roundtrip(data, protocol_version=2)
-        assert result == data
-
 
 class TestProtocolVersions:
     def test_encoder_produces_valid_v3_by_default(self):
@@ -87,20 +79,6 @@ class TestProtocolVersions:
             header, block_data = unpack(packed)
             assert isinstance(header, V3Header)
             assert header.version == 0x03
-            assert header.blocksize == blocksize
-            assert header.seed == seed
-            assert header.block_seq == seq
-            assert len(block_data) == blocksize
-
-    def test_encoder_can_still_produce_v2(self):
-        data = b"test data for protocol"
-        blocksize = 32
-        encoder = LTEncoder(data, blocksize, protocol_version=2)
-
-        for packed, seed, seq in encoder.generate_blocks(5):
-            header, block_data = unpack(packed)
-            assert isinstance(header, V2Header)
-            assert header.version == 0x02
             assert header.blocksize == blocksize
             assert header.seed == seed
             assert header.block_seq == seq
@@ -141,7 +119,6 @@ class TestStreamingPaths:
         payload, compressed, used_mmap, raw_size = _load_payload(
             str(input_path),
             compress=False,
-            protocol_version=3,
             verbose=False,
         )
         try:
@@ -153,14 +130,13 @@ class TestStreamingPaths:
         finally:
             payload.close()
 
-    def test_load_payload_disables_compression_for_large_v3_input(self, tmp_path):
+    def test_load_payload_disables_compression_for_large_input(self, tmp_path):
         input_path = tmp_path / "large.bin"
         input_path.write_bytes(b'B' * (10 * 1024 * 1024 + 1))
 
         payload, compressed, used_mmap, _ = _load_payload(
             str(input_path),
             compress=True,
-            protocol_version=3,
             verbose=False,
         )
         try:

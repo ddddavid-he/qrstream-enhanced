@@ -10,7 +10,7 @@ from qrstream.lt_codec import (
     BlockGraph, xor_bytes, _to_np, _xor_np, _xor_np_inplace,
 )
 from qrstream.protocol import (
-    pack_v2, unpack, V2_HEADER_SIZE,
+    pack_v3, unpack,
     cobs_encode, cobs_decode,
     base45_encode, base45_decode,
 )
@@ -79,7 +79,7 @@ class TestQrGeneration:
     """Test QR code generation paths."""
 
     def test_alphanumeric_qr_generation(self):
-        data = pack_v2(filesize=100, blocksize=64, block_count=2,
+        data = pack_v3(filesize=100, blocksize=64, block_count=2,
                        seed=1, block_seq=0, data=b'\xAA' * 64,
                        alphanumeric_qr=True)
         img = generate_qr_image(data, ec_level=1, version=20,
@@ -88,7 +88,7 @@ class TestQrGeneration:
         assert img.shape[2] == 3
 
     def test_base64_qr_generation(self):
-        data = pack_v2(filesize=100, blocksize=64, block_count=2,
+        data = pack_v3(filesize=100, blocksize=64, block_count=2,
                        seed=1, block_seq=0, data=b'\xAA' * 64)
         img = generate_qr_image(data, ec_level=1, version=20,
                                 alphanumeric=False)
@@ -97,7 +97,7 @@ class TestQrGeneration:
 
     def test_legacy_binary_mode_alias(self):
         """The deprecated ``binary_mode`` kwarg still works."""
-        data = pack_v2(filesize=100, blocksize=64, block_count=2,
+        data = pack_v3(filesize=100, blocksize=64, block_count=2,
                        seed=1, block_seq=0, data=b'\xAA' * 64,
                        binary_qr=True)
         img = generate_qr_image(data, ec_level=1, version=20,
@@ -140,24 +140,24 @@ class TestWeChatDetector:
         reset_strategy_stats()
 
     def test_wechat_detects_base64_qr(self):
-        import base64, zlib
+        import base64
         data = os.urandom(64)
-        packed = pack_v2(filesize=100, blocksize=64, block_count=2,
+        packed = pack_v3(filesize=100, blocksize=64, block_count=2,
                          seed=42, block_seq=0, data=data)
         img = generate_qr_image(packed, ec_level=1, version=20,
                                 alphanumeric=False)
         result = try_decode_qr(img)
         assert result is not None
         block = base64.b64decode(result)
-        stored = int.from_bytes(block[16:20], 'big')
-        computed = zlib.crc32(block[:16] + block[20:]) & 0xFFFFFFFF
-        assert stored == computed
+        # CRC integrity: unpack validates CRC and raises on mismatch.
+        header, recovered = unpack(block)
+        assert header.seed == 42
+        assert recovered == data
 
     def test_wechat_detects_alphanumeric_qr(self):
         """New default: base45 payload in QR alphanumeric mode."""
-        import zlib
         data = os.urandom(64)
-        packed = pack_v2(filesize=100, blocksize=64, block_count=2,
+        packed = pack_v3(filesize=100, blocksize=64, block_count=2,
                          seed=99, block_seq=0, data=data,
                          alphanumeric_qr=True)
         img = generate_qr_image(packed, ec_level=1, version=20,
@@ -165,14 +165,15 @@ class TestWeChatDetector:
         result = try_decode_qr(img)
         assert result is not None
         block = base45_decode(result)
-        stored = int.from_bytes(block[16:20], 'big')
-        computed = zlib.crc32(block[:16] + block[20:]) & 0xFFFFFFFF
-        assert stored == computed
+        header, recovered = unpack(block)
+        assert header.seed == 99
+        assert header.alphanumeric_qr is True
+        assert recovered == data
 
     def test_wechat_alphanumeric_qr_with_null_heavy_data(self):
         """base45 happily carries all-zero payloads (0x00 is legal)."""
         data = b'\x00' * 64
-        packed = pack_v2(filesize=64, blocksize=64, block_count=1,
+        packed = pack_v3(filesize=64, blocksize=64, block_count=1,
                          seed=7, block_seq=0, data=data,
                          alphanumeric_qr=True)
         img = generate_qr_image(packed, ec_level=1, version=20,
@@ -188,7 +189,7 @@ class TestWeChatDetector:
         # Use deterministic mixed bytes to avoid flaky CI failures from
         # unlucky random payloads that occasionally reduce detector stability.
         block_data = bytes((i * 37 + 11) % 256 for i in range(64))
-        packed = pack_v2(filesize=100, blocksize=64, block_count=2,
+        packed = pack_v3(filesize=100, blocksize=64, block_count=2,
                          seed=1, block_seq=0, data=block_data,
                          alphanumeric_qr=True)
         img = generate_qr_image(packed, ec_level=1, version=20,
@@ -211,7 +212,7 @@ class TestWeChatDetector:
         from qrcode.constants import ERROR_CORRECT_M
 
         block_data = bytes((i * 13 + 5) % 256 for i in range(64))
-        packed = pack_v2(filesize=64, blocksize=64, block_count=1,
+        packed = pack_v3(filesize=64, blocksize=64, block_count=1,
                          seed=200, block_seq=0, data=block_data,
                          alphanumeric_qr=True)
         # Legacy encoder path: cobs → latin-1 string → qrcode.add_data(str)
@@ -230,7 +231,7 @@ class TestWeChatDetector:
 
 
 class TestCobs:
-    """Test COBS encode/decode correctness."""
+    """Test COBS encode/decode correctness (legacy decoder support)."""
 
     def test_roundtrip_simple(self):
         assert cobs_decode(cobs_encode(b'Hello, World!')) == b'Hello, World!'
@@ -280,10 +281,13 @@ class TestCobs:
         overhead = len(encoded) - len(data)
         assert overhead <= ceil(len(data) / 254) + 1
 
-    def test_v2_block_roundtrip_with_cobs(self):
+    def test_v3_block_roundtrip_with_cobs(self):
+        """COBS is no longer emitted by the encoder but must still
+        survive a roundtrip for legacy-video decoding."""
         block_data = os.urandom(64)
-        packed = pack_v2(filesize=64, blocksize=64, block_count=1,
-                         seed=42, block_seq=0, data=block_data, binary_qr=True)
+        packed = pack_v3(filesize=64, blocksize=64, block_count=1,
+                         seed=42, block_seq=0, data=block_data,
+                         alphanumeric_qr=True)
         encoded = cobs_encode(packed)
         assert b'\x00' not in encoded
         decoded = cobs_decode(encoded)

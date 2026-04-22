@@ -17,11 +17,8 @@ from tqdm import tqdm
 
 from .lt_codec import PRNG, DEFAULT_C, DEFAULT_DELTA, xor_bytes
 from .protocol import (
-    V2_VERSION,
-    V3_VERSION,
     _resolve_alphanumeric_flag,
     auto_blocksize,
-    pack_v2,
     pack_v3,
 )
 from .qr_utils import generate_qr_image
@@ -61,7 +58,6 @@ class LTEncoder:
                  compressed: bool = False,
                  binary_qr: bool = False,
                  alphanumeric_qr: bool | None = None,
-                 protocol_version: int = V3_VERSION,
                  c: float = DEFAULT_C, delta: float = DEFAULT_DELTA):
         self.data = data
         self.filesize = len(data)
@@ -71,7 +67,6 @@ class LTEncoder:
         # header flag bit (0x02); prefer the alphanumeric_qr name.
         self.alphanumeric_qr = _resolve_alphanumeric_flag(
             binary_qr, alphanumeric_qr)
-        self.protocol_version = protocol_version
         self.K = ceil(self.filesize / blocksize)
         self.prng = PRNG(self.K, delta=delta, c=c)
         self._seq = 0
@@ -118,13 +113,11 @@ class LTEncoder:
 
     def generate_blocks(self, count: int):
         """Generate `count` encoded blocks as packed byte strings."""
-        pack_fn = pack_v3 if self.protocol_version == V3_VERSION else pack_v2
-
         for i in range(count):
             seed = i + 1
             self.prng.set_seed(seed)
             block_data, seq = self.generate_block(seed)
-            packed = pack_fn(
+            packed = pack_v3(
                 filesize=self.filesize,
                 blocksize=self.blocksize,
                 block_count=self.K,
@@ -143,7 +136,6 @@ def _read_file_bytes(input_path: str) -> bytes:
 
 
 def _load_payload(input_path: str, compress: bool,
-                  protocol_version: int,
                   force_compress: bool = False,
                   verbose: bool = False):
     """Load the LT source payload with a low-memory path when possible.
@@ -153,10 +145,9 @@ def _load_payload(input_path: str, compress: bool,
     raw_size = os.path.getsize(input_path)
 
     if compress:
-        if (protocol_version == V3_VERSION and raw_size > _MMAP_THRESHOLD
-                and not force_compress):
+        if raw_size > _MMAP_THRESHOLD and not force_compress:
             if verbose:
-                print("Compression disabled for large V3 input to keep memory usage low.")
+                print("Compression disabled for large input to keep memory usage low.")
             compress = False
         else:
             raw_data = _read_file_bytes(input_path)
@@ -186,7 +177,7 @@ def encode_to_video(input_path: str, output_path: str,
                     overhead: float = 2.0,
                     fps: int = 10,
                     ec_level: int = 1,
-                    qr_version: int = 20,
+                    qr_version: int = 25,
                     border: float | None = None,
                     lead_in_seconds: float = 0.0,
                     compress: bool = True,
@@ -196,7 +187,6 @@ def encode_to_video(input_path: str, output_path: str,
                     codec: str = 'mp4v',
                     binary_qr: bool = True,
                     alphanumeric_qr: bool | None = None,
-                    protocol_version: int = V3_VERSION,
                     force_compress: bool = False):
     """Encode a file to a QR-code video using LT fountain codes.
 
@@ -213,7 +203,6 @@ def encode_to_video(input_path: str, output_path: str,
         payload, compress, used_mmap, raw_size = _load_payload(
             input_path,
             compress=compress,
-            protocol_version=protocol_version,
             force_compress=force_compress,
             verbose=verbose,
         )
@@ -231,7 +220,6 @@ def encode_to_video(input_path: str, output_path: str,
             ec_level,
             qr_version,
             alphanumeric_qr=high_density,
-            protocol_version=protocol_version,
         )
         border_modules = _resolve_border_modules(qr_version, border)
         K = ceil(payload_size / blocksize)
@@ -241,16 +229,14 @@ def encode_to_video(input_path: str, output_path: str,
 
         if verbose:
             mode_str = "alphanumeric/base45" if high_density else "base64"
-            protocol_str = f"V{protocol_version}"
             print(f"Blocks: K={K}, blocksize={blocksize}, total={num_blocks} "
-                  f"(overhead={overhead}x, {mode_str}, {protocol_str})")
+                  f"(overhead={overhead}x, {mode_str})")
 
         encoder = LTEncoder(
             payload,
             blocksize,
             compressed=compress,
             alphanumeric_qr=high_density,
-            protocol_version=protocol_version,
         )
 
         first_packed, _, _ = next(encoder.generate_blocks(1))

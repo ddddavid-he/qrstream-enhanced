@@ -1,10 +1,7 @@
 """
 Protocol serialization helpers for QRStream.
 
-V2 block layout (20 bytes overhead):
-    16-byte fixed header + 4-byte CRC32 + data
-
-V3 block layout (28 bytes overhead):
+Block layout (V3, 28 bytes overhead):
     24-byte fixed header + data + 4-byte trailing CRC32
 
 QR-encoding flag (flag bit 0x02 in the header):
@@ -16,10 +13,14 @@ QR-encoding flag (flag bit 0x02 in the header):
 
 The flag only tells the decoder which decoders to try first for the
 on-wire QR payload. It does NOT change the LT/CRC layout at all.
+
+Compatibility:
+    The V2 protocol (0x02 version byte) was only ever produced by the
+    pre-v0.4.0 internal releases. From v0.4.0 onwards every published
+    qrstream built V3 blocks by default. V2 support has been dropped.
 """
 
 import struct
-import warnings
 import zlib
 from dataclasses import dataclass
 from math import ceil
@@ -165,14 +166,9 @@ def base45_decode(data) -> bytes:
     return bytes(out)
 
 
-# ── Header constants ──────────────────────────────────────────────
+# ── V3 block layout ──────────────────────────────────────────────
 
-V2_VERSION = 0x02
 V3_VERSION = 0x03
-
-V2_HEADER_NO_CRC_SIZE = 16
-V2_HEADER_SIZE = 20
-V2_BLOCK_OVERHEAD = 20
 
 V3_HEADER_SIZE = 24
 V3_TRAILING_CRC_SIZE = 4
@@ -276,7 +272,7 @@ _QR_CAPACITY_ALPHANUMERIC_V40 = {0: 4296, 1: 3391, 2: 2420, 3: 1852}
 
 
 @dataclass
-class V2Header:
+class V3Header:
     version: int
     compressed: bool
     filesize: int
@@ -288,25 +284,7 @@ class V2Header:
     # Flag bit 0x02: set when the on-wire QR payload is encoded in a
     # high-density mode (base45 today, historically COBS).  Kept under
     # the legacy ``binary_qr`` name so existing API consumers don't
-    # break; use the ``alphanumeric_qr`` alias property for new code.
-    binary_qr: bool = False
-
-    @property
-    def alphanumeric_qr(self) -> bool:
-        """Alias for the high-density flag (base45 / legacy COBS)."""
-        return self.binary_qr
-
-
-@dataclass
-class V3Header:
-    version: int
-    compressed: bool
-    filesize: int
-    blocksize: int
-    block_count: int
-    seed: int
-    block_seq: int
-    crc32: int
+    # break; use the ``alphanumeric_qr`` alias for new code.
     binary_qr: bool = False
     reserved: int = 0
 
@@ -322,41 +300,6 @@ def _resolve_alphanumeric_flag(binary_qr: bool,
     if alphanumeric_qr is None:
         return binary_qr
     return alphanumeric_qr
-
-
-def pack_v2(filesize: int, blocksize: int, block_count: int,
-            seed: int, block_seq: int, data: bytes,
-            compressed: bool = False,
-            binary_qr: bool = False,
-            alphanumeric_qr: bool | None = None) -> bytes:
-    """Serialize a V2 block (header + data) to bytes.
-
-    ``binary_qr`` and ``alphanumeric_qr`` are aliases for the
-    high-density flag bit (0x02). Prefer ``alphanumeric_qr`` in new code.
-    """
-    high_density = _resolve_alphanumeric_flag(binary_qr, alphanumeric_qr)
-    if filesize > 0xFFFFFFFF:
-        raise ValueError("V2 filesize exceeds uint32 limit; use V3")
-    if block_count > 0xFFFF:
-        raise ValueError("V2 block_count exceeds uint16 limit; use V3")
-    if blocksize > 0xFFFF:
-        raise ValueError("V2 blocksize exceeds uint16 limit")
-    if len(data) > blocksize:
-        raise ValueError("Block data longer than blocksize")
-
-    flags = 0x00
-    if compressed:
-        flags |= 0x01
-    if high_density:
-        flags |= 0x02
-    header_no_crc = struct.pack(
-        '>BBIHHIH',
-        V2_VERSION, flags, filesize,
-        blocksize, block_count,
-        seed, block_seq,
-    )
-    crc = zlib.crc32(header_no_crc + data) & 0xFFFFFFFF
-    return header_no_crc + struct.pack('>I', crc) + data
 
 
 def pack_v3(filesize: int, blocksize: int, block_count: int,
@@ -400,44 +343,6 @@ def pack_v3(filesize: int, blocksize: int, block_count: int,
     return header + data + struct.pack('>I', crc)
 
 
-def unpack_v2(raw: bytes, skip_crc: bool = False) -> tuple[V2Header, bytes]:
-    """Unpack a V2 block."""
-    if len(raw) < V2_HEADER_SIZE:
-        raise ValueError(f"Block too short: {len(raw)} bytes")
-    if raw[0] != V2_VERSION:
-        raise ValueError(f"Not a V2 block: version byte 0x{raw[0]:02X}")
-
-    (version, flags, filesize, blocksize, block_count,
-     seed, block_seq) = struct.unpack('>BBIHHIH', raw[:V2_HEADER_NO_CRC_SIZE])
-
-    stored_crc = struct.unpack('>I', raw[16:20])[0]
-    data = raw[V2_HEADER_SIZE:]
-
-    if len(data) != blocksize:
-        raise ValueError(
-            f"V2 data length mismatch: expected {blocksize}, got {len(data)}")
-
-    if not skip_crc:
-        computed_crc = zlib.crc32(raw[:V2_HEADER_NO_CRC_SIZE] + data) & 0xFFFFFFFF
-        if computed_crc != stored_crc:
-            raise ValueError(
-                f"CRC32 mismatch: stored=0x{stored_crc:08X}, "
-                f"computed=0x{computed_crc:08X}")
-
-    header = V2Header(
-        version=version,
-        compressed=bool(flags & 0x01),
-        filesize=filesize,
-        blocksize=blocksize,
-        block_count=block_count,
-        seed=seed,
-        block_seq=block_seq,
-        crc32=stored_crc,
-        binary_qr=bool(flags & 0x02),
-    )
-    return header, data
-
-
 def unpack_v3(raw: bytes, skip_crc: bool = False) -> tuple[V3Header, bytes]:
     """Unpack a V3 block."""
     if len(raw) < V3_BLOCK_OVERHEAD:
@@ -478,22 +383,17 @@ def unpack_v3(raw: bytes, skip_crc: bool = False) -> tuple[V3Header, bytes]:
 
 
 def unpack(raw: bytes, skip_crc: bool = False):
-    """Unpack a V2 or V3 block based on the version byte."""
+    """Unpack a V3 block based on the version byte.
+
+    V2 support was dropped in qrstream 0.6 — the V2 layout was only
+    ever produced by pre-v0.4.0 internal builds (no public release
+    shipped V2 as default).
+    """
     if not raw:
         raise ValueError("Block too short: 0 bytes")
-    if raw[0] == V2_VERSION:
-        return unpack_v2(raw, skip_crc=skip_crc)
     if raw[0] == V3_VERSION:
         return unpack_v3(raw, skip_crc=skip_crc)
     raise ValueError(f"Unsupported block version: 0x{raw[0]:02X}")
-
-
-def _block_overhead(protocol_version: int) -> int:
-    if protocol_version == V2_VERSION:
-        return V2_BLOCK_OVERHEAD
-    if protocol_version == V3_VERSION:
-        return V3_BLOCK_OVERHEAD
-    raise ValueError(f"Unsupported protocol version: {protocol_version}")
 
 
 def _alphanumeric_byte_capacity(qr_version: int, ec_level: int) -> int:
@@ -516,10 +416,9 @@ def _alphanumeric_byte_capacity(qr_version: int, ec_level: int) -> int:
 
 
 def auto_blocksize(filesize: int, ec_level: int = 1,
-                   qr_version: int = 20,
+                   qr_version: int = 25,
                    binary_qr: bool = True,
-                   alphanumeric_qr: bool | None = None,
-                   protocol_version: int = V3_VERSION) -> int:
+                   alphanumeric_qr: bool | None = None) -> int:
     """Choose an optimal blocksize for the given QR parameters.
 
     When the high-density flag is set, blocksize accounts for base45
@@ -546,31 +445,17 @@ def auto_blocksize(filesize: int, ec_level: int = 1,
         # base64: ceil(N/3)*4 <= qr_capacity  =>  N = floor(qr_capacity/4)*3
         max_usable = (qr_capacity // 4) * 3
 
-    overhead = _block_overhead(protocol_version)
     # Leave a 1-byte margin; qrcode occasionally refuses payloads
     # exactly at the alphanumeric boundary for some byte values.
-    max_blocksize = max(max_usable - overhead - 1, 64)
-    blocksize = max(min(max_blocksize, filesize), 64)
-
-    if protocol_version == V2_VERSION and ceil(filesize / blocksize) > 65535:
-        required = ceil(filesize / 65535)
-        if required > max_blocksize:
-            raise ValueError(
-                "File too large for V2 with current QR settings; use V3 or a larger QR version")
-        blocksize = required
-
-    return blocksize
+    max_blocksize = max(max_usable - V3_BLOCK_OVERHEAD - 1, 64)
+    return max(min(max_blocksize, filesize), 64)
 
 
-# Deprecation warning once at import for code that relied on the
-# internal capacity table being the *byte-mode* one unconditionally.
-# We don't expose the warning unless someone imports private symbols.
 __all__ = [
-    "V2_VERSION", "V3_VERSION",
-    "V2_HEADER_SIZE", "V2_BLOCK_OVERHEAD",
+    "V3_VERSION",
     "V3_HEADER_SIZE", "V3_TRAILING_CRC_SIZE", "V3_BLOCK_OVERHEAD",
-    "V2Header", "V3Header",
-    "pack_v2", "pack_v3", "unpack", "unpack_v2", "unpack_v3",
+    "V3Header",
+    "pack_v3", "unpack", "unpack_v3",
     "auto_blocksize",
     "cobs_encode", "cobs_decode",
     "base45_encode", "base45_decode",
