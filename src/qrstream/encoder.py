@@ -71,6 +71,10 @@ class LTEncoder:
         # PRNG schema version. 1 = SplitMix64 (default, qrstream ≥
         # 0.8); 0 = legacy LCG warmup (kept so tests / tooling can
         # reproduce old fixtures on demand).
+        #
+        # TODO(v0.10.0): remove the prng_version kwarg entirely
+        # once legacy v0 encode support is dropped. See
+        # ``protocol.py`` for the full removal checklist.
         if prng_version not in (0, 1):
             raise ValueError(f"Unsupported prng_version: {prng_version}")
         self.prng_version = prng_version

@@ -1090,6 +1090,13 @@ def _decode_into_decoder(blocks, verbose=False) -> LTDecoder | None:
     # collectively span the missing source blocks, we still get a
     # perfect reconstruction.  This path is only entered on peeling
     # failure, so it costs nothing in the healthy case.
+    #
+    # TODO(v0.10.0): the main reason peeling fails on a post-0.8
+    # stream is legacy prng_version=0 encoding. Once v0 support is
+    # dropped (see ``protocol.py``), revisit whether the rescue is
+    # still worth carrying — native v1 streams converge above the
+    # CLI's ``_MIN_OVERHEAD`` floor, so GE would only help
+    # overhead-below-floor edge cases.
     if decoder.initialized and not decoder.done:
         rescued = decoder.try_gaussian_rescue()
         if rescued:

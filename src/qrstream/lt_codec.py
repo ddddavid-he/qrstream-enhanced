@@ -156,6 +156,10 @@ class PRNG:
             # sequential seeds don't all land in the same CDF bucket.
             # Insufficient to fully decorrelate; see the module-level
             # rationale for ``splitmix64_mix``.
+            #
+            # TODO(v0.10.0): drop this branch together with the
+            # prng_version=0 support. See ``protocol.py`` for the
+            # full removal checklist.
             for _ in range(PRNG_WARMUP_ROUNDS):
                 self._get_next()
         else:

@@ -174,6 +174,39 @@ V3_HEADER_SIZE = 24
 V3_TRAILING_CRC_SIZE = 4
 V3_BLOCK_OVERHEAD = V3_HEADER_SIZE + V3_TRAILING_CRC_SIZE
 
+
+# TODO(v0.10.0): drop legacy prng_version=0 support.
+#
+# The LCG-warmup PRNG schedule (flag bit 0x04 cleared) was the
+# default through qrstream ≤ 0.7 and is retained in v0.8+ only so
+# videos captured with older encoders keep decoding.  When v0.10.0
+# ships:
+#
+#   * remove the ``prng_version`` parameter from ``pack_v3`` and
+#     treat flag bit 0x04 as "must be 1"; reject blocks with it
+#     cleared as an unsupported legacy protocol (similar to how V2
+#     was dropped in v0.6 — see commit 1a60f48).
+#   * delete the ``prng_version == 0`` branch in
+#     :class:`qrstream.lt_codec.PRNG` (the legacy warmup loop) and
+#     the ``prng_version`` constructor arg on :class:`LTEncoder`
+#     and :class:`LTDecoder`.
+#   * delete :data:`qrstream.lt_codec.PRNG_WARMUP_ROUNDS` and the
+#     docstring comments that contrast v0 vs v1 behaviour.
+#   * update :func:`qrstream.decoder._decode_into_decoder` to skip
+#     the Gauss-Jordan rescue pass for native v1 streams (peeling
+#     always converges above the ``_MIN_OVERHEAD`` CLI floor); keep
+#     the GE pass only if we still want a safety net for
+#     overhead-below-floor edge cases.
+#   * drop ``tests/test_prng_v2.py::test_legacy_prng_v0_blocks_still_decode``
+#     and the legacy halves of the other parametrized tests;
+#     rewrite :mod:`tests.test_gaussian_rescue` fixtures to produce
+#     a pathological v1 stall synthetically instead of relying on
+#     v0 encoders.
+#
+# Two-minor-version deprecation window (v0.8 introduces v1,
+# v0.10 removes v0) gives users two releases' notice to re-encode
+# any long-lived v0 videos they care about.
+
 # QR byte-mode capacity (ISO/IEC 18004), keyed by (version, ec_level).
 # ec_level: 0=L, 1=M, 2=Q, 3=H.
 _QR_CAPACITY = {
