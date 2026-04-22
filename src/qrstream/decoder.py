@@ -15,6 +15,26 @@ from threading import Thread
 from concurrent.futures import ProcessPoolExecutor, as_completed, FIRST_COMPLETED, wait as _futures_wait
 import multiprocessing
 
+
+# Force "spawn" start method for worker processes.
+#
+# v0.7 introduced a background reader thread (``_prefetch_iter``) that
+# runs while the main thread is about to fork workers via
+# ``ProcessPoolExecutor``.  On Linux the default start method is
+# ``fork``, and forking a multi-threaded parent is unsafe: child
+# processes inherit a snapshot of the parent that contains at most the
+# calling thread, but locks/other state from the reader thread can end
+# up in an indeterminate state inside the child.  Python 3.12+ even
+# emits ``DeprecationWarning: This process (...) is multi-threaded,
+# use of fork() may lead to deadlocks in the child.``
+#
+# In practice this manifested on CI: ~75% of decoded blocks returned
+# from workers were corrupt (failed LT peeling), while macOS (which
+# defaults to ``spawn`` since 3.8) was fine.  Using a ``spawn`` context
+# explicitly costs ~1-3 s of cold-start per scan but is correct
+# everywhere.
+_MP_SPAWN_CTX = multiprocessing.get_context("spawn")
+
 import cv2
 import numpy as np
 from tqdm import tqdm
@@ -223,14 +243,20 @@ def _downscale_frame(frame: np.ndarray) -> np.ndarray:
 def _worker_detect_qr(frame_data):
     """Worker function for multiprocessing QR detection.
 
-    Takes (frame_idx, jpeg_bytes).
+    Takes (frame_idx, frame_ndarray).
     Returns (frame_idx, block_bytes_or_None, seed_or_None).
+
+    The frame is a ``numpy.ndarray`` (BGR uint8, already downscaled
+    to ``_MAX_DETECT_DIM``) sent directly over multiprocessing IPC.
+    Python's default pickle protocol for spawn workers (protocol 5
+    on 3.8+) forwards the buffer out-of-band, so there is no extra
+    copy and no lossy imencode/imdecode roundtrip — which both
+    slows us down and (on at least some libjpeg builds) perturbs
+    edge pixels enough to hurt WeChatQRCode detection margin.
     """
     from .protocol import base45_decode, cobs_decode
 
-    frame_idx, jpeg_bytes = frame_data
-    frame = cv2.imdecode(
-        np.frombuffer(jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+    frame_idx, frame = frame_data
     if frame is None:
         return (frame_idx, None, None)
 
@@ -297,8 +323,12 @@ def _try_cobs(qr_data: str, cobs_decode_fn) -> bytes | None:
 def _read_frames(video_path, sample_rate, total_frames, start_frame=0):
     """Generator that reads frames from video.
 
-    Yields (frame_idx, jpeg_bytes) tuples. Frames are downscaled to
-    _MAX_DETECT_DIM before JPEG encoding to reduce IPC payload size.
+    Yields ``(frame_idx, frame_ndarray)`` tuples. Frames are
+    downscaled to ``_MAX_DETECT_DIM`` and passed as BGR uint8
+    ndarrays directly — multiprocessing (spawn + pickle protocol 5)
+    forwards the buffer out-of-band, avoiding the previous
+    imencode('.jpg')/imdecode roundtrip (which was both slow and
+    lossy).
     """
     cap = cv2.VideoCapture(video_path)
     if start_frame > 0:
@@ -309,11 +339,10 @@ def _read_frames(video_path, sample_rate, total_frames, start_frame=0):
         if not ret:
             break
         if (frame_idx - start_frame) % sample_rate == 0:
-            # Downscale before encoding to reduce JPEG payload
             frame = _downscale_frame(frame)
-            _, jpeg_bytes = cv2.imencode(
-                '.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-            yield (frame_idx, jpeg_bytes.tobytes())
+            if not frame.flags['C_CONTIGUOUS']:
+                frame = np.ascontiguousarray(frame)
+            yield (frame_idx, frame)
         frame_idx += 1
     cap.release()
 
@@ -324,7 +353,9 @@ def _read_frame_ranges(video_path, frame_ranges):
     Args:
         frame_ranges: list of (start_frame, end_frame) tuples (inclusive).
 
-    Yields (frame_idx, jpeg_bytes) tuples for all frames within ranges.
+    Yields ``(frame_idx, frame_ndarray)`` tuples for all frames
+    within ranges. See ``_read_frames`` for the rationale behind
+    the ndarray (rather than encoded-bytes) payload.
     """
     if not frame_ranges:
         return
@@ -336,9 +367,9 @@ def _read_frame_ranges(video_path, frame_ranges):
             if not ret:
                 break
             frame = _downscale_frame(frame)
-            _, jpeg_bytes = cv2.imencode(
-                '.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-            yield (fidx, jpeg_bytes.tobytes())
+            if not frame.flags['C_CONTIGUOUS']:
+                frame = np.ascontiguousarray(frame)
+            yield (fidx, frame)
     cap.release()
 
 
@@ -467,7 +498,8 @@ def _probe_sample_rate(video_path: str, workers: int,
     pbar = tqdm(total=probe_count, desc="Probe",
                 unit="f", dynamic_ncols=True,
                 mininterval=0, miniters=1)
-    with ProcessPoolExecutor(max_workers=workers) as executor:
+    with ProcessPoolExecutor(max_workers=workers,
+                             mp_context=_MP_SPAWN_CTX) as executor:
         futures = {executor.submit(_worker_detect_qr, fd): fd[0]
                    for fd in probe_frames}
         for future in as_completed(futures):
@@ -624,7 +656,8 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
         if remaining > 0:
             pbar.update(remaining)
 
-    with ProcessPoolExecutor(max_workers=workers) as executor:
+    with ProcessPoolExecutor(max_workers=workers,
+                             mp_context=_MP_SPAWN_CTX) as executor:
         decoded_count, no_detect_count, early_done = _stream_scan(
             executor, _tracking_frame_iter(),
             seen_seeds, unique_blocks,
@@ -738,7 +771,8 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:3.0f}%]")
 
     early_done = False
-    with ProcessPoolExecutor(max_workers=workers) as executor:
+    with ProcessPoolExecutor(max_workers=workers,
+                             mp_context=_MP_SPAWN_CTX) as executor:
         decoded_count, no_detect_count, early_done = _stream_scan(
             executor,
             _read_frame_ranges(video_path, frame_ranges),
@@ -774,11 +808,11 @@ def _merge_ranges(ranges):
 def _prefetch_iter(source_iter, capacity: int = _READER_QUEUE_CAPACITY):
     """Run ``source_iter`` in a background thread, yielding items in order.
 
-    This lets frame read + downscale + JPEG-encode (baseline: 64% of
-    decode wall-time) overlap with worker-pool detection on the main
-    thread, instead of the pre-v0.7 "read a batch -> submit -> wait
-    -> next batch" cycle.  Order is preserved because there is a
-    single producer and a single consumer on a FIFO Queue.
+    This lets frame read + downscale overlap with worker-pool
+    detection on the main thread, instead of the pre-v0.7 "read a
+    batch -> submit -> wait -> next batch" cycle.  Order is
+    preserved because there is a single producer and a single
+    consumer on a FIFO Queue.
 
     If the consumer bails out early (via generator .close() /
     GeneratorExit), the producer is notified via ``stop_event`` and

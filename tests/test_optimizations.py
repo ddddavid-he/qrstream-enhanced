@@ -204,8 +204,10 @@ class TestWeChatDetector:
         from qrstream.decoder import _worker_detect_qr
         # Simulate a pre-0.6 video frame: cobs-encoded payload embedded
         # as latin-1 string. We skip the QR image round-trip since
-        # generate_qr_image no longer emits COBS; instead we build a
-        # JPEG of a synthetic QR directly via qrcode lib.
+        # generate_qr_image no longer emits COBS; instead we build the
+        # QR image directly via qrcode lib and hand the ndarray to
+        # the worker (which now takes frames as ndarrays since the
+        # imdecode step was removed from the IPC path).
         import cv2
         import numpy as np
         import qrcode
@@ -224,8 +226,7 @@ class TestWeChatDetector:
         pil = q.make_image(fill_color='black', back_color='white')
         img = cv2.cvtColor(np.array(pil.convert('RGB')), cv2.COLOR_RGB2BGR)
 
-        _, jpeg = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 95])
-        frame_idx, candidate, seed = _worker_detect_qr((0, jpeg.tobytes()))
+        frame_idx, candidate, seed = _worker_detect_qr((0, img))
         assert candidate is not None, "legacy COBS path should still decode"
         assert seed == 200
 
