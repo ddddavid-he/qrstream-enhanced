@@ -198,6 +198,8 @@ def encode_to_video(input_path: str, output_path: str,
     high_density = _resolve_alphanumeric_flag(binary_qr, alphanumeric_qr)
     payload = None
     writer = None
+    writer_thread = None
+    writer_queue: Queue | None = None
 
     try:
         payload, compress, used_mmap, raw_size = _load_payload(
@@ -268,10 +270,31 @@ def encode_to_video(input_path: str, output_path: str,
         if not writer.isOpened():
             raise RuntimeError(f"Cannot open video writer for {output_path}")
 
+        # ── VideoWriter runs on its own thread ──────────────────────
+        # Measured baseline (v0.6.1, 10 MB input, 14 workers):
+        #   VideoWriter.write was 54% of encode wall-time, blocking
+        #   the main thread between batches. Moving the write loop
+        #   to a dedicated thread lets pool.map() keep the workers
+        #   busy while the previous batch is being muxed.
+        writer_queue: Queue = Queue(maxsize=max(workers * 8, 128))
+
+        def _writer_loop():
+            while True:
+                frame = writer_queue.get()
+                if frame is None:
+                    return
+                if frame.shape[:2] != (h, w):
+                    frame = cv2.resize(frame, (w, h),
+                                       interpolation=cv2.INTER_NEAREST)
+                writer.write(frame)
+
+        writer_thread = Thread(target=_writer_loop, daemon=False)
+        writer_thread.start()
+
         if lead_in_frames:
             blank_frame = np.full((h, w, 3), 255, dtype=first_qr.dtype)
             for _ in range(lead_in_frames):
-                writer.write(blank_frame)
+                writer_queue.put(blank_frame)
 
         batch_size = max(workers * 4, 64)
         progress = tqdm(total=num_blocks, desc="Encode", unit="f",
@@ -311,10 +334,7 @@ def encode_to_video(input_path: str, output_path: str,
                         repeat(None), repeat(high_density),
                     ))
                     for qr_img in qr_imgs:
-                        if qr_img.shape[:2] != (h, w):
-                            qr_img = cv2.resize(qr_img, (w, h),
-                                                interpolation=cv2.INTER_NEAREST)
-                        writer.write(qr_img)
+                        writer_queue.put(qr_img)
                     progress.update(len(batch))
 
             producer.join(timeout=5)
@@ -330,14 +350,23 @@ def encode_to_video(input_path: str, output_path: str,
                     use_legacy=use_legacy_qr,
                     alphanumeric=high_density,
                 )
-                if qr_img.shape[:2] != (h, w):
-                    qr_img = cv2.resize(qr_img, (w, h),
-                                        interpolation=cv2.INTER_NEAREST)
-                writer.write(qr_img)
+                writer_queue.put(qr_img)
                 progress.update(1)
 
         progress.close()
+
+        # Flush writer: signal sentinel and wait for disk writes to drain
+        writer_queue.put(None)
+        writer_thread.join()
+        writer_thread = None
     finally:
+        # On the exception path, make sure we don't leave the writer
+        # thread blocked on an empty queue (daemon=False would keep the
+        # process alive after an error).
+        if writer_thread is not None and writer_thread.is_alive():
+            if writer_queue is not None:
+                writer_queue.put(None)
+            writer_thread.join(timeout=5)
         if writer is not None:
             writer.release()
         if payload is not None:
