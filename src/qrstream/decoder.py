@@ -69,6 +69,7 @@ class LTDecoder:
         self.done = False
         self.compressed = False
         self.protocol_version = None
+        self.prng_version = None  # set from the first block's header
         self.block_graph = None
         self.prng = None
         self.initialized = False
@@ -110,12 +111,14 @@ class LTDecoder:
 
         if not self.initialized:
             self.protocol_version = header.version
+            self.prng_version = header.prng_version
             self.filesize = filesize
             self.blocksize = blocksize
             self.K = block_count
             self.compressed = compressed
             self.block_graph = BlockGraph(self.K)
-            self.prng = PRNG(self.K, delta=self.delta, c=self.c)
+            self.prng = PRNG(self.K, delta=self.delta, c=self.c,
+                             prng_version=self.prng_version)
             self.initialized = True
         else:
             if header.version != self.protocol_version:
@@ -130,6 +133,15 @@ class LTDecoder:
             if compressed != self.compressed:
                 raise ValueError(
                     f"compressed flag mismatch: {compressed} != {self.compressed}")
+            if header.prng_version != self.prng_version:
+                # Mixing prng_version=0 and =1 blocks in the same
+                # session is unsolvable: the two PRNG schedules
+                # produce entirely different (degree, src_blocks)
+                # tuples for the same seed. A well-formed video
+                # always has a consistent flag bit across frames.
+                raise ValueError(
+                    f"prng_version mismatch: {header.prng_version} "
+                    f"!= {self.prng_version}")
 
         _, _, src_blocks = self.prng.get_src_blocks(seed=seed)
 
@@ -140,6 +152,27 @@ class LTDecoder:
 
         self.done = self.block_graph.add_block(src_blocks, data)
         return self.done, self.compressed
+
+    def try_gaussian_rescue(self) -> bool:
+        """Opt-in GF(2) Gauss-Jordan pass over the current check-node
+        graph.
+
+        Call this *after* all available blocks have been fed and
+        :meth:`is_done` still returns False.  When the surviving
+        check equations together span the missing source blocks,
+        this recovers the whole file without needing any more
+        encoded frames.  Safe no-op when peeling already converged.
+
+        Returns True iff every source block is now recovered.
+        """
+        if not self.initialized or self.block_graph is None:
+            return False
+        if self.done:
+            return True
+        recovered = self.block_graph.try_gaussian_rescue()
+        if recovered:
+            self.done = True
+        return recovered
 
     def decode_bytes(self, block_bytes: bytes, skip_crc: bool = False) -> tuple[bool, bool]:
         """Decode a raw protocol block from bytes.
@@ -1050,6 +1083,27 @@ def _decode_into_decoder(blocks, verbose=False) -> LTDecoder | None:
     finally:
         if pbar is not None:
             pbar.close()
+
+    # Peeling (belief-propagation) exhausted all blocks without
+    # converging. Attempt a GF(2) Gauss-Jordan rescue pass over the
+    # accumulated check-node graph: if the surviving equations
+    # collectively span the missing source blocks, we still get a
+    # perfect reconstruction.  This path is only entered on peeling
+    # failure, so it costs nothing in the healthy case.
+    if decoder.initialized and not decoder.done:
+        rescued = decoder.try_gaussian_rescue()
+        if rescued:
+            if verbose:
+                print(f"  GE rescue recovered all "
+                      f"{decoder.num_recovered}/{decoder.K} blocks "
+                      f"after peeling stalled.")
+            else:
+                print(f"  GE rescue recovered "
+                      f"{decoder.num_recovered}/{decoder.K} source blocks.")
+            return decoder
+        elif verbose:
+            print(f"  GE rescue attempted, still "
+                  f"{decoder.num_recovered}/{decoder.K} recovered.")
 
     n_recovered = decoder.num_recovered
     k = decoder.K if decoder.K else '?'

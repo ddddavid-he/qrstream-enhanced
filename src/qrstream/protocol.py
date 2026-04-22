@@ -286,6 +286,12 @@ class V3Header:
     # the legacy ``binary_qr`` name so existing API consumers don't
     # break; use the ``alphanumeric_qr`` alias for new code.
     binary_qr: bool = False
+    # Flag bit 0x04: PRNG schema version.
+    #   0 — legacy LCG with 5 warmup rounds (qrstream ≤ 0.7)
+    #   1 — SplitMix64 seed-mixer then same LCG output stream
+    # Written by encoders v0.8+, defaults to 0 when parsing older
+    # videos so legacy fixtures keep decoding.
+    prng_version: int = 0
     reserved: int = 0
 
     @property
@@ -306,11 +312,16 @@ def pack_v3(filesize: int, blocksize: int, block_count: int,
             seed: int, block_seq: int, data: bytes,
             compressed: bool = False,
             binary_qr: bool = False,
-            alphanumeric_qr: bool | None = None) -> bytes:
+            alphanumeric_qr: bool | None = None,
+            prng_version: int = 0) -> bytes:
     """Serialize a V3 block (header + data + trailing CRC32) to bytes.
 
     ``binary_qr`` and ``alphanumeric_qr`` are aliases for the
     high-density flag bit (0x02). Prefer ``alphanumeric_qr`` in new code.
+
+    ``prng_version`` selects the seed → PRNG-state mapping used by
+    the LT codec. 0 = legacy LCG warmup, 1 = SplitMix64 mixer
+    (default in qrstream 0.8+). Written as flag bit 0x04.
     """
     high_density = _resolve_alphanumeric_flag(binary_qr, alphanumeric_qr)
     if filesize > 0xFFFFFFFFFFFFFFFF:
@@ -321,12 +332,16 @@ def pack_v3(filesize: int, blocksize: int, block_count: int,
         raise ValueError("V3 blocksize exceeds uint16 limit")
     if len(data) > blocksize:
         raise ValueError("Block data longer than blocksize")
+    if prng_version not in (0, 1):
+        raise ValueError(f"Unsupported prng_version: {prng_version}")
 
     flags = 0x00
     if compressed:
         flags |= 0x01
     if high_density:
         flags |= 0x02
+    if prng_version == 1:
+        flags |= 0x04
 
     header = struct.pack(
         '>BBQHIIHH',
@@ -377,6 +392,7 @@ def unpack_v3(raw: bytes, skip_crc: bool = False) -> tuple[V3Header, bytes]:
         block_seq=block_seq,
         crc32=stored_crc,
         binary_qr=bool(flags & 0x02),
+        prng_version=1 if (flags & 0x04) else 0,
         reserved=reserved,
     )
     return header, data

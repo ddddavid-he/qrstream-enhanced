@@ -58,7 +58,8 @@ class LTEncoder:
                  compressed: bool = False,
                  binary_qr: bool = False,
                  alphanumeric_qr: bool | None = None,
-                 c: float = DEFAULT_C, delta: float = DEFAULT_DELTA):
+                 c: float = DEFAULT_C, delta: float = DEFAULT_DELTA,
+                 prng_version: int = 1):
         self.data = data
         self.filesize = len(data)
         self.blocksize = blocksize
@@ -67,8 +68,15 @@ class LTEncoder:
         # header flag bit (0x02); prefer the alphanumeric_qr name.
         self.alphanumeric_qr = _resolve_alphanumeric_flag(
             binary_qr, alphanumeric_qr)
+        # PRNG schema version. 1 = SplitMix64 (default, qrstream ≥
+        # 0.8); 0 = legacy LCG warmup (kept so tests / tooling can
+        # reproduce old fixtures on demand).
+        if prng_version not in (0, 1):
+            raise ValueError(f"Unsupported prng_version: {prng_version}")
+        self.prng_version = prng_version
         self.K = ceil(self.filesize / blocksize)
-        self.prng = PRNG(self.K, delta=delta, c=c)
+        self.prng = PRNG(self.K, delta=delta, c=c,
+                         prng_version=prng_version)
         self._seq = 0
         self._cached_last_block = None
 
@@ -126,6 +134,7 @@ class LTEncoder:
                 data=block_data,
                 compressed=self.compressed,
                 alphanumeric_qr=self.alphanumeric_qr,
+                prng_version=self.prng_version,
             )
             yield packed, seed, seq
 

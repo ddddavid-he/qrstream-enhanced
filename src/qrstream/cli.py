@@ -14,6 +14,21 @@ import argparse
 from .__init__ import __version__
 
 
+# Minimum overhead the default LT codec (SplitMix64 PRNG mixer,
+# qrstream ≥ 0.8) needs to converge on sequential seeds across all
+# K we've benchmarked (328..4096).  The empirical worst case is
+# K=328 at 1.19×; we round up to 1.20× as the hard floor and
+# recommend ≥1.50× for real captures where frame loss / detector
+# misses eat into the margin.
+#
+# Anything below the floor indicates either a misunderstanding of
+# the codec (LT can't converge below its PRNG-dependent threshold,
+# period) or a test/benchmark use case — those can bypass via the
+# LTEncoder API directly.
+_MIN_OVERHEAD = 1.20
+_RECOMMENDED_OVERHEAD = 1.50
+
+
 def cmd_encode(args):
     """Handle the 'encode' subcommand."""
     from .encoder import encode_to_video
@@ -21,6 +36,22 @@ def cmd_encode(args):
     if not os.path.exists(args.file):
         print(f"Error: File not found: {args.file}")
         sys.exit(1)
+
+    if args.overhead < _MIN_OVERHEAD:
+        print(
+            f"Error: --overhead {args.overhead} is below the LT codec's "
+            f"convergence floor ({_MIN_OVERHEAD}×). Decoding would fail "
+            f"even on a perfect capture. Use --overhead {_RECOMMENDED_OVERHEAD} "
+            f"or higher for reliable real-world recording."
+        )
+        sys.exit(2)
+    if args.overhead < _RECOMMENDED_OVERHEAD:
+        print(
+            f"Warning: --overhead {args.overhead} is near the LT convergence "
+            f"floor. Recommended: ≥{_RECOMMENDED_OVERHEAD} so camera frame "
+            f"loss and QR detector misses don't push decoding below the "
+            f"threshold."
+        )
 
     output = args.output
     if output is None:
@@ -95,7 +126,9 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
     enc.add_argument('-o', '--output', default=None,
                      help='Output video path (default: <filename>.mp4)')
     enc.add_argument('--overhead', type=float, default=2.0,
-                     help='Ratio of encoded blocks to source blocks (default: 2.0)')
+                     help=f'Ratio of encoded blocks to source blocks '
+                          f'(default: 2.0, minimum: {_MIN_OVERHEAD}, '
+                          f'recommended: ≥{_RECOMMENDED_OVERHEAD})')
     enc.add_argument('--fps', type=int, default=10,
                      help='Frames per second in output video (default: 10)')
     enc.add_argument('--ec-level', type=int, default=1, choices=[0, 1, 2, 3],
