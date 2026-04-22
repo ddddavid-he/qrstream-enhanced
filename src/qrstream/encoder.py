@@ -19,6 +19,7 @@ from .lt_codec import PRNG, DEFAULT_C, DEFAULT_DELTA, xor_bytes
 from .protocol import (
     V2_VERSION,
     V3_VERSION,
+    _resolve_alphanumeric_flag,
     auto_blocksize,
     pack_v2,
     pack_v3,
@@ -59,18 +60,28 @@ class LTEncoder:
     def __init__(self, data, blocksize: int,
                  compressed: bool = False,
                  binary_qr: bool = False,
+                 alphanumeric_qr: bool | None = None,
                  protocol_version: int = V3_VERSION,
                  c: float = DEFAULT_C, delta: float = DEFAULT_DELTA):
         self.data = data
         self.filesize = len(data)
         self.blocksize = blocksize
         self.compressed = compressed
-        self.binary_qr = binary_qr
+        # ``binary_qr`` and ``alphanumeric_qr`` both map to the same
+        # header flag bit (0x02); prefer the alphanumeric_qr name.
+        self.alphanumeric_qr = _resolve_alphanumeric_flag(
+            binary_qr, alphanumeric_qr)
         self.protocol_version = protocol_version
         self.K = ceil(self.filesize / blocksize)
         self.prng = PRNG(self.K, delta=delta, c=c)
         self._seq = 0
         self._cached_last_block = None
+
+    # Keep ``binary_qr`` as a read-only attribute alias so code that
+    # inspects the encoder state (older tests, scripts) keeps working.
+    @property
+    def binary_qr(self) -> bool:
+        return self.alphanumeric_qr
 
     def _get_block(self, index: int) -> bytes:
         """Get the i-th source block (zero-padded if last block is short)."""
@@ -121,7 +132,7 @@ class LTEncoder:
                 block_seq=seq,
                 data=block_data,
                 compressed=self.compressed,
-                binary_qr=self.binary_qr,
+                alphanumeric_qr=self.alphanumeric_qr,
             )
             yield packed, seed, seq
 
@@ -184,9 +195,17 @@ def encode_to_video(input_path: str, output_path: str,
                     use_legacy_qr: bool = False,
                     codec: str = 'mp4v',
                     binary_qr: bool = True,
+                    alphanumeric_qr: bool | None = None,
                     protocol_version: int = V3_VERSION,
                     force_compress: bool = False):
-    """Encode a file to a QR-code video using LT fountain codes."""
+    """Encode a file to a QR-code video using LT fountain codes.
+
+    ``binary_qr`` and ``alphanumeric_qr`` are aliases for the
+    high-density QR mode flag; prefer ``alphanumeric_qr`` in new code.
+    When enabled (default), frames are encoded via base45 into QR
+    alphanumeric mode, carrying ~29% more payload per frame than base64.
+    """
+    high_density = _resolve_alphanumeric_flag(binary_qr, alphanumeric_qr)
     payload = None
     writer = None
 
@@ -211,7 +230,7 @@ def encode_to_video(input_path: str, output_path: str,
             payload_size,
             ec_level,
             qr_version,
-            binary_qr=binary_qr,
+            alphanumeric_qr=high_density,
             protocol_version=protocol_version,
         )
         border_modules = _resolve_border_modules(qr_version, border)
@@ -221,7 +240,7 @@ def encode_to_video(input_path: str, output_path: str,
         total_frames = num_blocks + lead_in_frames
 
         if verbose:
-            mode_str = "binary" if binary_qr else "base64"
+            mode_str = "alphanumeric/base45" if high_density else "base64"
             protocol_str = f"V{protocol_version}"
             print(f"Blocks: K={K}, blocksize={blocksize}, total={num_blocks} "
                   f"(overhead={overhead}x, {mode_str}, {protocol_str})")
@@ -230,7 +249,7 @@ def encode_to_video(input_path: str, output_path: str,
             payload,
             blocksize,
             compressed=compress,
-            binary_qr=binary_qr,
+            alphanumeric_qr=high_density,
             protocol_version=protocol_version,
         )
 
@@ -242,7 +261,7 @@ def encode_to_video(input_path: str, output_path: str,
             border=border_modules,
             version=qr_version,
             use_legacy=use_legacy_qr,
-            binary_mode=binary_qr,
+            alphanumeric=high_density,
         )
         h, w = first_qr.shape[:2]
 
@@ -295,11 +314,14 @@ def encode_to_video(input_path: str, output_path: str,
                         batch.append(item)
                     if not batch:
                         break
+                    # generate_qr_image signature:
+                    #   (data, ec_level, box_size, border, version,
+                    #    use_legacy, binary_mode, alphanumeric)
                     qr_imgs = list(pool.map(
                         generate_qr_image, batch,
                         repeat(ec_level), repeat(10), repeat(border_modules),
                         repeat(qr_version), repeat(use_legacy_qr),
-                        repeat(binary_qr),
+                        repeat(None), repeat(high_density),
                     ))
                     for qr_img in qr_imgs:
                         if qr_img.shape[:2] != (h, w):
@@ -319,7 +341,7 @@ def encode_to_video(input_path: str, output_path: str,
                     border=border_modules,
                     version=qr_version,
                     use_legacy=use_legacy_qr,
-                    binary_mode=binary_qr,
+                    alphanumeric=high_density,
                 )
                 if qr_img.shape[:2] != (h, w):
                     qr_img = cv2.resize(qr_img, (w, h),

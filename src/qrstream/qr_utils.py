@@ -1,12 +1,36 @@
 """
 QR code generation and detection utilities.
 
-- generate_qr_image(): uses OpenCV QRCodeEncoder by default for speed,
-  falls back to `qrcode` library for legacy compatibility
-- try_decode_qr(): uses WeChatQRCode for robust detection (from opencv-contrib)
+- :func:`generate_qr_image` produces a BGR QR image from bytes. It
+  supports two payload encodings:
+
+  * base64 (default ``alphanumeric=False``) — output is 7-bit ASCII,
+    embedded in QR byte mode.
+  * base45 (default ``alphanumeric=True``) — output is the 45-char
+    QR alphanumeric alphabet, embedded in QR alphanumeric mode, which
+    gives ~29% more payload per frame at the same QR version.
+
+- :func:`try_decode_qr` uses WeChatQRCode for robust detection.
+
+History note — OpenCV QRCodeEncoder is not used
+    OpenCV 4.13's Python-binding QRCodeEncoder has byte-mode capacity
+    ~68% of the ISO table, so any auto-sized payload triggered a
+    silent fallback to the `qrcode` library. Micro-benchmarks showed
+    the OpenCV path was not actually faster either (both ~40 ms/frame
+    at V20). Removing the OpenCV path eliminates the silent fallback
+    and keeps the requested QR version stable.
+
+History note — why we no longer emit COBS payloads
+    The pre-0.6 "binary_qr" mode passed ``cobs(data).decode('latin-1')``
+    as a Python string to ``qrcode.add_data``. The `qrcode` library
+    internally UTF-8-encodes strings, which doubles every byte >= 0x80,
+    overflowing the requested QR version and silently upgrading it
+    (e.g. V20 -> V25). base45 avoids this by producing pure ASCII and
+    using QR alphanumeric mode directly. The decoder still recognises
+    legacy COBS payloads for backward compatibility.
 """
 
-import base64
+import base64 as _b64lib
 
 import cv2
 import numpy as np
@@ -23,8 +47,8 @@ try:
 except ImportError:
     HAS_QRCODE = False
 
-# Map ec_level int to qrcode constants
-_EC_MAP = {}
+# Map ec_level int to qrcode library constants.
+_EC_MAP: dict[int, int] = {}
 if HAS_QRCODE:
     _EC_MAP = {
         0: ERROR_CORRECT_L,
@@ -33,14 +57,6 @@ if HAS_QRCODE:
         3: ERROR_CORRECT_H,
     }
 
-# Map ec_level int to OpenCV correction level constants
-_OPENCV_EC_MAP = {
-    0: cv2.QRCODE_ENCODER_CORRECT_LEVEL_L,
-    1: cv2.QRCODE_ENCODER_CORRECT_LEVEL_M,
-    2: cv2.QRCODE_ENCODER_CORRECT_LEVEL_Q,
-    3: cv2.QRCODE_ENCODER_CORRECT_LEVEL_H,
-}
-
 
 # ── QR Generation ────────────────────────────────────────────────
 
@@ -48,152 +64,88 @@ def generate_qr_image(data: bytes, ec_level: int = 1,
                       box_size: int = 10, border: float = 4,
                       version: int | None = None,
                       use_legacy: bool = False,
-                      binary_mode: bool = False) -> np.ndarray:
+                      binary_mode: bool | None = None,
+                      alphanumeric: bool | None = None) -> np.ndarray:
     """Generate a QR code image from binary data.
 
-    By default, data is base64-encoded before embedding in the QR code.
-    When binary_mode=True, COBS encoding is used (33% more capacity).
-
-    Returns a BGR numpy array suitable for OpenCV.
-
-    By default uses OpenCV QRCodeEncoder for speed. Set use_legacy=True
-    to use the `qrcode` library (slower but offers finer control).
-
     Args:
-        data: Raw bytes to encode
-        ec_level: Error correction level (0=L, 1=M, 2=Q, 3=H)
-        box_size: Pixel size of each QR module
-        border: Quiet-zone border width in QR modules
-        version: QR code version 1-40 (None = auto-fit smallest)
-        use_legacy: Force use of qrcode library instead of OpenCV
-        binary_mode: Use COBS encoding (skip base64), requires qrcode lib
+        data: Raw bytes to encode (a packed protocol block).
+        ec_level: Error correction level (0=L, 1=M, 2=Q, 3=H).
+        box_size: Pixel size of each QR module.
+        border: Quiet-zone border width in QR modules.
+        version: QR code version 1-40. If the encoded payload does not
+            fit at the requested version, the underlying ``qrcode``
+            library raises ``qrcode.exceptions.DataOverflowError``.
+            Pass ``None`` to let the library choose.
+        use_legacy: Accepted for backward compatibility; ignored.
+        binary_mode: Deprecated alias for ``alphanumeric``. If both
+            are supplied, ``alphanumeric`` wins.
+        alphanumeric: When True (default), encode via base45 into QR
+            alphanumeric mode (higher density). When False, encode via
+            base64 into QR byte mode.
+
+    Returns:
+        BGR numpy array suitable for OpenCV.
     """
-    if binary_mode:
-        return _generate_qr_binary(data, ec_level, box_size, border, version)
+    del use_legacy  # legacy parameter kept for API stability
 
-    b64 = base64.b64encode(data).decode('ascii')
+    if not HAS_QRCODE:
+        raise RuntimeError(
+            "qrcode library is required for QR generation; "
+            "install with `pip install qrcode[pil]`"
+        )
 
-    if use_legacy and HAS_QRCODE:
-        return _generate_qr_legacy(b64, ec_level, box_size, border, version)
-
-    # Default: OpenCV QRCodeEncoder (much faster)
-    try:
-        return _generate_qr_opencv(b64, ec_level, box_size, border, version)
-    except (RuntimeError, cv2.error):
-        # Fall back to qrcode library if OpenCV encoder fails
-        if HAS_QRCODE:
-            return _generate_qr_legacy(b64, ec_level, box_size, border, version)
-        raise
-
-
-def _generate_qr_opencv(b64: str, ec_level: int, box_size: int,
-                         border: float, version: int | None) -> np.ndarray:
-    """Generate QR using OpenCV QRCodeEncoder (fast path)."""
-    params = cv2.QRCodeEncoder_Params()
-    params.correction_level = _OPENCV_EC_MAP.get(
-        ec_level, cv2.QRCODE_ENCODER_CORRECT_LEVEL_M)
-    if version is not None:
-        params.version = version
-    params.mode = cv2.QRCODE_ENCODER_MODE_AUTO
-
-    encoder = cv2.QRCodeEncoder.create(params)
-    img = encoder.encode(b64)
-    if img is None:
-        raise RuntimeError("OpenCV QR encoder returned None")
-
-    # OpenCV QR images have 1px per module. Scale to match expected size.
-    h, w = img.shape[:2]
-    scale = box_size
-
-    # Add border by padding
-    if border > 0:
-        border_px = round(border * scale)
-        img_scaled = cv2.resize(img, (w * scale, h * scale),
-                                interpolation=cv2.INTER_NEAREST)
-        padded = cv2.copyMakeBorder(img_scaled,
-                                    border_px, border_px, border_px, border_px,
-                                    cv2.BORDER_CONSTANT, value=255)
+    # Resolve alphanumeric/binary_mode aliases. Default: alphanumeric.
+    if alphanumeric is None:
+        if binary_mode is None:
+            use_alphanumeric = True
+        else:
+            use_alphanumeric = bool(binary_mode)
     else:
-        padded = cv2.resize(img, (w * scale, h * scale),
-                            interpolation=cv2.INTER_NEAREST)
+        use_alphanumeric = bool(alphanumeric)
 
-    # Convert to BGR
-    if len(padded.shape) == 2:
-        return cv2.cvtColor(padded, cv2.COLOR_GRAY2BGR)
-    return padded
+    if use_alphanumeric:
+        # Import lazily so tests that stub protocol still work.
+        from .protocol import base45_encode
+        payload = base45_encode(data)
+    else:
+        payload = _b64lib.b64encode(data)
+
+    return _render_qr(payload, ec_level, box_size, border, version,
+                      use_alphanumeric)
 
 
-def _generate_qr_legacy(b64: str, ec_level: int, box_size: int,
-                         border: float, version: int | None) -> np.ndarray:
-    """Generate QR using qrcode library (legacy path, more control)."""
+def _render_qr(payload: bytes, ec_level: int, box_size: int,
+               border: float, version: int | None,
+               alphanumeric: bool) -> np.ndarray:
+    """Render an ASCII payload to a BGR numpy array via ``qrcode``.
+
+    ``payload`` must be bytes of pure ASCII (each char < 0x80).  For
+    the alphanumeric path we pass it as ``str`` so that the ``qrcode``
+    library can pick its alphanumeric encoding mode (mode=2).  For the
+    byte-mode path we keep it as ``bytes`` to match the documented
+    behaviour of ``qrcode``.
+    """
+    if alphanumeric:
+        qr_input: object = payload.decode("ascii")
+    else:
+        qr_input = payload
+
     qr = qrcode.QRCode(
         version=version,
         error_correction=_EC_MAP.get(ec_level, ERROR_CORRECT_M),
         box_size=box_size,
         border=round(border),
     )
-    qr.add_data(b64)
+    qr.add_data(qr_input)
+    # fit=True is required so that ``qrcode`` validates the payload
+    # against the selected version; it raises DataOverflowError on
+    # overflow rather than producing a corrupt code.
     qr.make(fit=True)
+
     pil_img = qr.make_image(fill_color="black", back_color="white")
     img_array = np.array(pil_img.convert('RGB'))
     return cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-
-
-def _generate_qr_binary(data: bytes, ec_level: int, box_size: int,
-                          border: float, version: int | None) -> np.ndarray:
-    """Generate QR with COBS-encoded binary data. ~33% more capacity than base64.
-
-    Pipeline: raw bytes -> COBS encode (eliminates \\x00) -> latin-1 string -> QR.
-    """
-    from .protocol import cobs_encode
-
-    cobs_data = cobs_encode(data)
-    payload = cobs_data.decode('latin-1')
-
-    # Use OpenCV encoder for speed (COBS data is null-free, safe for OpenCV)
-    try:
-        params = cv2.QRCodeEncoder_Params()
-        params.correction_level = _OPENCV_EC_MAP.get(
-            ec_level, cv2.QRCODE_ENCODER_CORRECT_LEVEL_M)
-        if version is not None:
-            params.version = version
-        params.mode = cv2.QRCODE_ENCODER_MODE_BYTE
-
-        encoder = cv2.QRCodeEncoder.create(params)
-        img = encoder.encode(payload)
-        if img is None:
-            raise RuntimeError("OpenCV QR encoder returned None")
-
-        h, w = img.shape[:2]
-        scale = box_size
-        if border > 0:
-            border_px = round(border * scale)
-            img_scaled = cv2.resize(img, (w * scale, h * scale),
-                                    interpolation=cv2.INTER_NEAREST)
-            padded = cv2.copyMakeBorder(img_scaled,
-                                        border_px, border_px, border_px, border_px,
-                                        cv2.BORDER_CONSTANT, value=255)
-        else:
-            padded = cv2.resize(img, (w * scale, h * scale),
-                                interpolation=cv2.INTER_NEAREST)
-
-        if len(padded.shape) == 2:
-            return cv2.cvtColor(padded, cv2.COLOR_GRAY2BGR)
-        return padded
-    except (RuntimeError, cv2.error):
-        if not HAS_QRCODE:
-            raise
-        qr = qrcode.QRCode(
-            version=version,
-            error_correction=_EC_MAP.get(ec_level, ERROR_CORRECT_M),
-            box_size=box_size,
-            border=round(border),
-        )
-        qr.add_data(payload)
-        qr.make(fit=True)
-        pil_img = qr.make_image(fill_color="black", back_color="white")
-        img_array = np.array(pil_img.convert('RGB'))
-        return cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
 
 
 # ── QR Detection ─────────────────────────────────────────────────
@@ -205,7 +157,10 @@ def _generate_qr_binary(data: bytes, ec_level: int, box_size: int,
 def try_decode_qr(frame: np.ndarray, qr_detector=None) -> str | None:
     """Decode a QR code from a frame using WeChatQRCode.
 
-    Returns the decoded string or None.
+    Returns the decoded string or None.  Non-UTF-8 payloads (e.g.
+    raw-bytes COBS output from some detectors) cause WeChatQR to
+    raise UnicodeDecodeError; we swallow that and return None so
+    the caller can try alternative detectors if it wants.
     """
     # Lazy-init WeChatQRCode detector (per-process, for multiprocessing)
     if not hasattr(try_decode_qr, '_wechat'):
@@ -215,7 +170,10 @@ def try_decode_qr(frame: np.ndarray, qr_detector=None) -> str | None:
             try_decode_qr._wechat = None
 
     if try_decode_qr._wechat is not None:
-        results, _ = try_decode_qr._wechat.detectAndDecode(frame)
+        try:
+            results, _ = try_decode_qr._wechat.detectAndDecode(frame)
+        except UnicodeDecodeError:
+            return None
         if results:
             for r in results:
                 if r:

@@ -6,22 +6,36 @@ V2 block layout (20 bytes overhead):
 
 V3 block layout (28 bytes overhead):
     24-byte fixed header + data + 4-byte trailing CRC32
+
+QR-encoding flag (flag bit 0x02 in the header):
+    - 0: base64 (standard mode, ASCII, pure byte-mode QR)
+    - 1: high-density mode. Currently implemented with base45
+      (QR alphanumeric mode). Older videos produced by qrstream <= 0.5
+      used COBS+latin-1 here; the decoder's multi-strategy try chain
+      keeps those playable.
+
+The flag only tells the decoder which decoders to try first for the
+on-wire QR payload. It does NOT change the LT/CRC layout at all.
 """
 
 import struct
+import warnings
 import zlib
 from dataclasses import dataclass
 from math import ceil
 
-# ── COBS (Consistent Overhead Byte Stuffing) ─────────────────────
-# Eliminates all \x00 bytes from data with ~0.4% overhead.
-# This allows binary data to survive QR decoders that use C strings.
 
+# ── COBS (legacy decoder support only) ───────────────────────────
+# COBS was the pre-0.6 high-density encoding. It is retained so that
+# videos produced by older versions can still be decoded.  New
+# encoders no longer emit COBS payloads.
 
 def cobs_encode(data: bytes) -> bytes:
     """COBS-encode data: output contains no \x00 bytes.
 
     Overhead is at most 1 byte per 254 input bytes (~0.4%).
+    Still exported for backward-compatible test fixtures; new code
+    should use :func:`base45_encode` instead.
     """
     output = bytearray()
     idx = 0
@@ -47,7 +61,11 @@ def cobs_encode(data: bytes) -> bytes:
 
 
 def cobs_decode(data: bytes) -> bytes:
-    """Decode COBS-encoded data back to original bytes."""
+    """Decode COBS-encoded data back to original bytes.
+
+    Used by the decoder when the incoming video was produced by a
+    pre-0.6 qrstream version.
+    """
     output = bytearray()
     idx = 0
     length = len(data)
@@ -66,6 +84,87 @@ def cobs_decode(data: bytes) -> bytes:
     return bytes(output)
 
 
+# ── Base45 (RFC 9285, QR alphanumeric mode) ──────────────────────
+# 2 raw bytes -> 3 ASCII chars from the 45-char QR alphanumeric
+# alphabet.  The output string fits natively in QR's alphanumeric
+# mode which packs every 2 chars into 11 bits, so the physical
+# capacity at V20/M jumps from 499 B (base64) to 646 B.
+
+_B45_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:"
+assert len(_B45_ALPHABET) == 45
+_B45_BYTES = _B45_ALPHABET.encode("ascii")
+_B45_INDEX = {c: i for i, c in enumerate(_B45_ALPHABET)}
+
+
+def base45_encode(data: bytes) -> bytes:
+    """Encode bytes as a base45 ASCII string (RFC 9285).
+
+    Returns bytes (ASCII-safe) for API consistency with
+    :func:`base64.b64encode`.
+    """
+    out = bytearray()
+    i = 0
+    length = len(data)
+    while i + 2 <= length:
+        n = (data[i] << 8) | data[i + 1]
+        c = n // 2025
+        n -= c * 2025
+        b = n // 45
+        a = n - b * 45
+        out.append(_B45_BYTES[a])
+        out.append(_B45_BYTES[b])
+        out.append(_B45_BYTES[c])
+        i += 2
+    if i < length:
+        n = data[i]
+        b = n // 45
+        a = n - b * 45
+        out.append(_B45_BYTES[a])
+        out.append(_B45_BYTES[b])
+    return bytes(out)
+
+
+def base45_decode(data) -> bytes:
+    """Decode a base45 string (bytes or str) back to raw bytes."""
+    if isinstance(data, bytes):
+        try:
+            s = data.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ValueError("base45 input is not ASCII") from exc
+    else:
+        s = data
+    out = bytearray()
+    length = len(s)
+    i = 0
+    while i + 3 <= length:
+        try:
+            a = _B45_INDEX[s[i]]
+            b = _B45_INDEX[s[i + 1]]
+            c = _B45_INDEX[s[i + 2]]
+        except KeyError as exc:
+            raise ValueError(f"invalid base45 character: {exc}") from exc
+        n = a + b * 45 + c * 2025
+        if n > 0xFFFF:
+            raise ValueError("invalid base45 triplet")
+        out.append((n >> 8) & 0xFF)
+        out.append(n & 0xFF)
+        i += 3
+    remaining = length - i
+    if remaining == 2:
+        try:
+            a = _B45_INDEX[s[i]]
+            b = _B45_INDEX[s[i + 1]]
+        except KeyError as exc:
+            raise ValueError(f"invalid base45 character: {exc}") from exc
+        n = a + b * 45
+        if n > 0xFF:
+            raise ValueError("invalid base45 tail")
+        out.append(n)
+    elif remaining != 0:
+        raise ValueError(f"invalid base45 length (remainder {remaining})")
+    return bytes(out)
+
+
 # ── Header constants ──────────────────────────────────────────────
 
 V2_VERSION = 0x02
@@ -79,9 +178,8 @@ V3_HEADER_SIZE = 24
 V3_TRAILING_CRC_SIZE = 4
 V3_BLOCK_OVERHEAD = V3_HEADER_SIZE + V3_TRAILING_CRC_SIZE
 
-# QR capacity table (byte mode, per version and ECC level)
-# Source: ISO/IEC 18004
-# Key: (version, ec_level) -> max bytes.  ec_level: 0=L, 1=M, 2=Q, 3=H
+# QR byte-mode capacity (ISO/IEC 18004), keyed by (version, ec_level).
+# ec_level: 0=L, 1=M, 2=Q, 3=H.
 _QR_CAPACITY = {
     (1, 0): 17,   (1, 1): 14,   (1, 2): 11,   (1, 3): 7,
     (2, 0): 34,   (2, 1): 26,   (2, 2): 20,   (2, 3): 14,
@@ -125,8 +223,56 @@ _QR_CAPACITY = {
     (40, 0): 2953, (40, 1): 2331, (40, 2): 1663, (40, 3): 1273,
 }
 
-# Fallback: Version 40 capacities by ec_level
+# Fallback: Version 40 capacities by ec_level.
 _QR_CAPACITY_V40 = {0: 2953, 1: 2331, 2: 1663, 3: 1273}
+
+# QR alphanumeric-mode capacity (ISO/IEC 18004), keyed by (version,
+# ec_level).  Each char occupies 5.5 bits (11 bits per 2-char group),
+# so the alphanumeric capacity is about 1.37x the byte-mode capacity.
+_QR_CAPACITY_ALPHANUMERIC = {
+    (1, 0): 25,    (1, 1): 20,    (1, 2): 16,    (1, 3): 10,
+    (2, 0): 47,    (2, 1): 38,    (2, 2): 29,    (2, 3): 20,
+    (3, 0): 77,    (3, 1): 61,    (3, 2): 47,    (3, 3): 35,
+    (4, 0): 114,   (4, 1): 90,    (4, 2): 67,    (4, 3): 50,
+    (5, 0): 154,   (5, 1): 122,   (5, 2): 87,    (5, 3): 64,
+    (6, 0): 195,   (6, 1): 154,   (6, 2): 108,   (6, 3): 84,
+    (7, 0): 224,   (7, 1): 178,   (7, 2): 125,   (7, 3): 93,
+    (8, 0): 279,   (8, 1): 221,   (8, 2): 157,   (8, 3): 122,
+    (9, 0): 335,   (9, 1): 262,   (9, 2): 189,   (9, 3): 143,
+    (10, 0): 395,  (10, 1): 311,  (10, 2): 221,  (10, 3): 174,
+    (11, 0): 468,  (11, 1): 366,  (11, 2): 259,  (11, 3): 200,
+    (12, 0): 535,  (12, 1): 419,  (12, 2): 296,  (12, 3): 227,
+    (13, 0): 619,  (13, 1): 483,  (13, 2): 352,  (13, 3): 259,
+    (14, 0): 667,  (14, 1): 528,  (14, 2): 376,  (14, 3): 283,
+    (15, 0): 758,  (15, 1): 600,  (15, 2): 426,  (15, 3): 321,
+    (16, 0): 854,  (16, 1): 656,  (16, 2): 470,  (16, 3): 365,
+    (17, 0): 938,  (17, 1): 734,  (17, 2): 531,  (17, 3): 408,
+    (18, 0): 1046, (18, 1): 816,  (18, 2): 574,  (18, 3): 452,
+    (19, 0): 1153, (19, 1): 909,  (19, 2): 644,  (19, 3): 493,
+    (20, 0): 1249, (20, 1): 970,  (20, 2): 702,  (20, 3): 557,
+    (21, 0): 1352, (21, 1): 1035, (21, 2): 742,  (21, 3): 587,
+    (22, 0): 1460, (22, 1): 1134, (22, 2): 823,  (22, 3): 640,
+    (23, 0): 1588, (23, 1): 1248, (23, 2): 890,  (23, 3): 672,
+    (24, 0): 1704, (24, 1): 1326, (24, 2): 963,  (24, 3): 744,
+    (25, 0): 1853, (25, 1): 1451, (25, 2): 1041, (25, 3): 779,
+    (26, 0): 1990, (26, 1): 1542, (26, 2): 1094, (26, 3): 864,
+    (27, 0): 2132, (27, 1): 1637, (27, 2): 1172, (27, 3): 910,
+    (28, 0): 2223, (28, 1): 1732, (28, 2): 1263, (28, 3): 958,
+    (29, 0): 2369, (29, 1): 1839, (29, 2): 1322, (29, 3): 1016,
+    (30, 0): 2520, (30, 1): 1994, (30, 2): 1429, (30, 3): 1080,
+    (31, 0): 2677, (31, 1): 2113, (31, 2): 1499, (31, 3): 1150,
+    (32, 0): 2840, (32, 1): 2238, (32, 2): 1618, (32, 3): 1226,
+    (33, 0): 3009, (33, 1): 2369, (33, 2): 1700, (33, 3): 1307,
+    (34, 0): 3183, (34, 1): 2506, (34, 2): 1787, (34, 3): 1394,
+    (35, 0): 3351, (35, 1): 2632, (35, 2): 1867, (35, 3): 1431,
+    (36, 0): 3537, (36, 1): 2780, (36, 2): 1966, (36, 3): 1530,
+    (37, 0): 3729, (37, 1): 2894, (37, 2): 2071, (37, 3): 1591,
+    (38, 0): 3927, (38, 1): 3054, (38, 2): 2181, (38, 3): 1658,
+    (39, 0): 4087, (39, 1): 3220, (39, 2): 2298, (39, 3): 1774,
+    (40, 0): 4296, (40, 1): 3391, (40, 2): 2420, (40, 3): 1852,
+}
+
+_QR_CAPACITY_ALPHANUMERIC_V40 = {0: 4296, 1: 3391, 2: 2420, 3: 1852}
 
 
 @dataclass
@@ -139,7 +285,16 @@ class V2Header:
     seed: int
     block_seq: int
     crc32: int
+    # Flag bit 0x02: set when the on-wire QR payload is encoded in a
+    # high-density mode (base45 today, historically COBS).  Kept under
+    # the legacy ``binary_qr`` name so existing API consumers don't
+    # break; use the ``alphanumeric_qr`` alias property for new code.
     binary_qr: bool = False
+
+    @property
+    def alphanumeric_qr(self) -> bool:
+        """Alias for the high-density flag (base45 / legacy COBS)."""
+        return self.binary_qr
 
 
 @dataclass
@@ -155,12 +310,31 @@ class V3Header:
     binary_qr: bool = False
     reserved: int = 0
 
+    @property
+    def alphanumeric_qr(self) -> bool:
+        """Alias for the high-density flag (base45 / legacy COBS)."""
+        return self.binary_qr
+
+
+def _resolve_alphanumeric_flag(binary_qr: bool,
+                                alphanumeric_qr: bool | None) -> bool:
+    """Reconcile the legacy ``binary_qr`` kw with the new alias."""
+    if alphanumeric_qr is None:
+        return binary_qr
+    return alphanumeric_qr
+
 
 def pack_v2(filesize: int, blocksize: int, block_count: int,
             seed: int, block_seq: int, data: bytes,
             compressed: bool = False,
-            binary_qr: bool = False) -> bytes:
-    """Serialize a V2 block (header + data) to bytes."""
+            binary_qr: bool = False,
+            alphanumeric_qr: bool | None = None) -> bytes:
+    """Serialize a V2 block (header + data) to bytes.
+
+    ``binary_qr`` and ``alphanumeric_qr`` are aliases for the
+    high-density flag bit (0x02). Prefer ``alphanumeric_qr`` in new code.
+    """
+    high_density = _resolve_alphanumeric_flag(binary_qr, alphanumeric_qr)
     if filesize > 0xFFFFFFFF:
         raise ValueError("V2 filesize exceeds uint32 limit; use V3")
     if block_count > 0xFFFF:
@@ -173,7 +347,7 @@ def pack_v2(filesize: int, blocksize: int, block_count: int,
     flags = 0x00
     if compressed:
         flags |= 0x01
-    if binary_qr:
+    if high_density:
         flags |= 0x02
     header_no_crc = struct.pack(
         '>BBIHHIH',
@@ -188,8 +362,14 @@ def pack_v2(filesize: int, blocksize: int, block_count: int,
 def pack_v3(filesize: int, blocksize: int, block_count: int,
             seed: int, block_seq: int, data: bytes,
             compressed: bool = False,
-            binary_qr: bool = False) -> bytes:
-    """Serialize a V3 block (header + data + trailing CRC32) to bytes."""
+            binary_qr: bool = False,
+            alphanumeric_qr: bool | None = None) -> bytes:
+    """Serialize a V3 block (header + data + trailing CRC32) to bytes.
+
+    ``binary_qr`` and ``alphanumeric_qr`` are aliases for the
+    high-density flag bit (0x02). Prefer ``alphanumeric_qr`` in new code.
+    """
+    high_density = _resolve_alphanumeric_flag(binary_qr, alphanumeric_qr)
     if filesize > 0xFFFFFFFFFFFFFFFF:
         raise ValueError("V3 filesize exceeds uint64 limit")
     if block_count > 0xFFFFFFFF:
@@ -202,7 +382,7 @@ def pack_v3(filesize: int, blocksize: int, block_count: int,
     flags = 0x00
     if compressed:
         flags |= 0x01
-    if binary_qr:
+    if high_density:
         flags |= 0x02
 
     header = struct.pack(
@@ -316,35 +496,60 @@ def _block_overhead(protocol_version: int) -> int:
     raise ValueError(f"Unsupported protocol version: {protocol_version}")
 
 
+def _alphanumeric_byte_capacity(qr_version: int, ec_level: int) -> int:
+    """Max raw bytes that fit when encoded via base45 in the given QR.
+
+    base45 output size = ceil(N/2) * 3 characters when N is even; for
+    odd N the tail is 2 chars (1 byte).  Given C alphanumeric chars of
+    capacity, each full triplet carries 2 bytes and a 2-char tail can
+    hold 1 byte.
+    """
+    cap = _QR_CAPACITY_ALPHANUMERIC.get(
+        (qr_version, ec_level),
+        _QR_CAPACITY_ALPHANUMERIC_V40.get(ec_level, 3391),
+    )
+    triplets = cap // 3
+    usable = triplets * 2
+    if cap % 3 >= 2:
+        usable += 1
+    return usable
+
+
 def auto_blocksize(filesize: int, ec_level: int = 1,
                    qr_version: int = 20,
                    binary_qr: bool = True,
+                   alphanumeric_qr: bool | None = None,
                    protocol_version: int = V3_VERSION) -> int:
     """Choose an optimal blocksize for the given QR parameters.
 
-    When binary_qr=True, accounts for COBS overhead.
-    When binary_qr=False, accounts for base64 overhead.
-    The returned blocksize respects the selected protocol overhead.
+    When the high-density flag is set, blocksize accounts for base45
+    inflation and QR alphanumeric-mode capacity.  When it is cleared,
+    blocksize accounts for base64 inflation and QR byte-mode capacity.
+
+    ``binary_qr`` and ``alphanumeric_qr`` are aliases; prefer the
+    latter in new code.
     """
     if ec_level not in (0, 1, 2, 3):
         raise ValueError(f"ec_level must be 0-3, got {ec_level}")
     if not 1 <= qr_version <= 40:
         raise ValueError(f"qr_version must be 1-40, got {qr_version}")
 
-    qr_capacity = _QR_CAPACITY.get(
-        (qr_version, ec_level),
-        _QR_CAPACITY_V40.get(ec_level, 2331),
-    )
+    high_density = _resolve_alphanumeric_flag(binary_qr, alphanumeric_qr)
 
-    if binary_qr:
-        # COBS: N + ceil(N/254) <= qr_capacity => N <= qr_capacity * 254/255
-        max_usable = (qr_capacity * 254) // 255
+    if high_density:
+        max_usable = _alphanumeric_byte_capacity(qr_version, ec_level)
     else:
-        # base64: ceil(N/3)*4 <= qr_capacity => N = floor(qr_capacity/4)*3
+        qr_capacity = _QR_CAPACITY.get(
+            (qr_version, ec_level),
+            _QR_CAPACITY_V40.get(ec_level, 2331),
+        )
+        # base64: ceil(N/3)*4 <= qr_capacity  =>  N = floor(qr_capacity/4)*3
         max_usable = (qr_capacity // 4) * 3
 
     overhead = _block_overhead(protocol_version)
-    max_blocksize = max(max_usable - overhead, 64)
+    # Leave a 1-byte margin; qrcode occasionally refuses payloads
+    # exactly at the alphanumeric boundary for some byte values.
+    max_blocksize = max(max_usable - overhead - 1, 64)
     blocksize = max(min(max_blocksize, filesize), 64)
 
     if protocol_version == V2_VERSION and ceil(filesize / blocksize) > 65535:
@@ -355,3 +560,18 @@ def auto_blocksize(filesize: int, ec_level: int = 1,
         blocksize = required
 
     return blocksize
+
+
+# Deprecation warning once at import for code that relied on the
+# internal capacity table being the *byte-mode* one unconditionally.
+# We don't expose the warning unless someone imports private symbols.
+__all__ = [
+    "V2_VERSION", "V3_VERSION",
+    "V2_HEADER_SIZE", "V2_BLOCK_OVERHEAD",
+    "V3_HEADER_SIZE", "V3_TRAILING_CRC_SIZE", "V3_BLOCK_OVERHEAD",
+    "V2Header", "V3Header",
+    "pack_v2", "pack_v3", "unpack", "unpack_v2", "unpack_v3",
+    "auto_blocksize",
+    "cobs_encode", "cobs_decode",
+    "base45_encode", "base45_decode",
+]

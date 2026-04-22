@@ -218,7 +218,7 @@ def _worker_detect_qr(frame_data):
     Takes (frame_idx, jpeg_bytes).
     Returns (frame_idx, block_bytes_or_None, seed_or_None).
     """
-    from .protocol import cobs_decode
+    from .protocol import base45_decode, cobs_decode
 
     frame_idx, jpeg_bytes = frame_data
     frame = cv2.imdecode(
@@ -231,10 +231,20 @@ def _worker_detect_qr(frame_data):
     if qr_data is None:
         return (frame_idx, None, None)
 
-    # Try decoding the QR payload via multiple strategies:
-    # 1) base64 (standard mode)
-    # 2) latin-1 → COBS decode (binary_qr mode)
-    for decode_fn in (_try_base64, lambda d: _try_cobs(d, cobs_decode)):
+    # Try decoding the QR payload via multiple strategies.  The flag
+    # bit 0x02 in the packed header tells us whether the payload is
+    # high-density encoded; however we don't have the header yet here
+    # (it lives inside the payload), so we try all strategies in
+    # order.  Strategies are cheap: each failed attempt is a single
+    # ASCII lookup + a constant-time rejection.
+    #   1) base45  (current default for high-density mode)
+    #   2) base64  (standard mode)
+    #   3) COBS/latin-1  (legacy pre-0.6 high-density mode)
+    for decode_fn in (
+        lambda d: _try_base45(d, base45_decode),
+        _try_base64,
+        lambda d: _try_cobs(d, cobs_decode),
+    ):
         candidate = decode_fn(qr_data)
         if candidate is None:
             continue
@@ -247,6 +257,14 @@ def _worker_detect_qr(frame_data):
     return (frame_idx, None, None)
 
 
+def _try_base45(qr_data: str, base45_decode_fn) -> bytes | None:
+    """Try to decode QR payload as a base45 (alphanumeric-mode) string."""
+    try:
+        return base45_decode_fn(qr_data)
+    except (ValueError, KeyError):
+        return None
+
+
 def _try_base64(qr_data: str) -> bytes | None:
     """Try to decode QR payload as base64."""
     try:
@@ -256,7 +274,11 @@ def _try_base64(qr_data: str) -> bytes | None:
 
 
 def _try_cobs(qr_data: str, cobs_decode_fn) -> bytes | None:
-    """Try to decode QR payload as COBS-encoded binary (latin-1 → COBS decode)."""
+    """Try to decode QR payload as COBS-encoded binary (latin-1 → COBS decode).
+
+    Retained for backward compatibility with videos produced by
+    pre-0.6 qrstream releases.
+    """
     try:
         raw = qr_data.encode('latin-1')
         return cobs_decode_fn(raw)

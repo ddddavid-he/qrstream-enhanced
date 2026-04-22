@@ -12,6 +12,7 @@ from qrstream.lt_codec import (
 from qrstream.protocol import (
     pack_v2, unpack, V2_HEADER_SIZE,
     cobs_encode, cobs_decode,
+    base45_encode, base45_decode,
 )
 from qrstream import __version__
 from qrstream.cli import build_parser
@@ -77,24 +78,30 @@ class TestBatchXor:
 class TestQrGeneration:
     """Test QR code generation paths."""
 
-    def test_opencv_qr_generation(self):
+    def test_alphanumeric_qr_generation(self):
         data = pack_v2(filesize=100, blocksize=64, block_count=2,
-                       seed=1, block_seq=0, data=b'\xAA' * 64)
-        img = generate_qr_image(data, ec_level=1, version=20, use_legacy=False)
+                       seed=1, block_seq=0, data=b'\xAA' * 64,
+                       alphanumeric_qr=True)
+        img = generate_qr_image(data, ec_level=1, version=20,
+                                alphanumeric=True)
         assert img is not None
         assert img.shape[2] == 3
 
-    def test_legacy_qr_generation(self):
+    def test_base64_qr_generation(self):
         data = pack_v2(filesize=100, blocksize=64, block_count=2,
                        seed=1, block_seq=0, data=b'\xAA' * 64)
-        img = generate_qr_image(data, ec_level=1, version=20, use_legacy=True)
+        img = generate_qr_image(data, ec_level=1, version=20,
+                                alphanumeric=False)
         assert img is not None
         assert img.shape[2] == 3
 
-    def test_binary_qr_generation(self):
+    def test_legacy_binary_mode_alias(self):
+        """The deprecated ``binary_mode`` kwarg still works."""
         data = pack_v2(filesize=100, blocksize=64, block_count=2,
-                       seed=1, block_seq=0, data=b'\xAA' * 64, binary_qr=True)
-        img = generate_qr_image(data, ec_level=1, version=20, binary_mode=True)
+                       seed=1, block_seq=0, data=b'\xAA' * 64,
+                       binary_qr=True)
+        img = generate_qr_image(data, ec_level=1, version=20,
+                                binary_mode=True)
         assert img is not None
         assert img.shape[2] == 3
 
@@ -137,7 +144,8 @@ class TestWeChatDetector:
         data = os.urandom(64)
         packed = pack_v2(filesize=100, blocksize=64, block_count=2,
                          seed=42, block_seq=0, data=data)
-        img = generate_qr_image(packed, ec_level=1, version=20)
+        img = generate_qr_image(packed, ec_level=1, version=20,
+                                alphanumeric=False)
         result = try_decode_qr(img)
         assert result is not None
         block = base64.b64decode(result)
@@ -145,42 +153,80 @@ class TestWeChatDetector:
         computed = zlib.crc32(block[:16] + block[20:]) & 0xFFFFFFFF
         assert stored == computed
 
-    def test_wechat_detects_cobs_binary_qr(self):
+    def test_wechat_detects_alphanumeric_qr(self):
+        """New default: base45 payload in QR alphanumeric mode."""
         import zlib
         data = os.urandom(64)
         packed = pack_v2(filesize=100, blocksize=64, block_count=2,
-                         seed=99, block_seq=0, data=data, binary_qr=True)
-        img = generate_qr_image(packed, ec_level=1, version=20, binary_mode=True)
+                         seed=99, block_seq=0, data=data,
+                         alphanumeric_qr=True)
+        img = generate_qr_image(packed, ec_level=1, version=20,
+                                alphanumeric=True)
         result = try_decode_qr(img)
         assert result is not None
-        block = cobs_decode(result.encode('latin-1'))
+        block = base45_decode(result)
         stored = int.from_bytes(block[16:20], 'big')
         computed = zlib.crc32(block[:16] + block[20:]) & 0xFFFFFFFF
         assert stored == computed
 
-    def test_wechat_binary_qr_with_null_heavy_data(self):
+    def test_wechat_alphanumeric_qr_with_null_heavy_data(self):
+        """base45 happily carries all-zero payloads (0x00 is legal)."""
         data = b'\x00' * 64
         packed = pack_v2(filesize=64, blocksize=64, block_count=1,
-                         seed=7, block_seq=0, data=data, binary_qr=True)
-        img = generate_qr_image(packed, ec_level=1, version=20, binary_mode=True)
+                         seed=7, block_seq=0, data=data,
+                         alphanumeric_qr=True)
+        img = generate_qr_image(packed, ec_level=1, version=20,
+                                alphanumeric=True)
         result = try_decode_qr(img)
         assert result is not None
-        block = cobs_decode(result.encode('latin-1'))
+        block = base45_decode(result)
         assert block == packed
 
-    def test_binary_qr_full_roundtrip(self):
-        """Binary QR: encode image -> WeChatQRCode detect -> COBS decode -> unpack."""
+    def test_alphanumeric_qr_full_roundtrip(self):
+        """base45 QR: encode image -> WeChatQRCode detect -> base45 decode -> unpack."""
         reset_strategy_stats()
         # Use deterministic mixed bytes to avoid flaky CI failures from
         # unlucky random payloads that occasionally reduce detector stability.
         block_data = bytes((i * 37 + 11) % 256 for i in range(64))
         packed = pack_v2(filesize=100, blocksize=64, block_count=2,
-                         seed=1, block_seq=0, data=block_data, binary_qr=True)
-        img = generate_qr_image(packed, ec_level=1, version=20, binary_mode=True)
+                         seed=1, block_seq=0, data=block_data,
+                         alphanumeric_qr=True)
+        img = generate_qr_image(packed, ec_level=1, version=20,
+                                alphanumeric=True)
         qr_str = try_decode_qr(img)
         assert qr_str is not None
-        recovered = cobs_decode(qr_str.encode('latin-1'))
+        recovered = base45_decode(qr_str)
         assert recovered == packed
+
+    def test_legacy_cobs_video_decoder_fallback(self):
+        """Decoder worker still accepts COBS/latin-1 payloads (legacy videos)."""
+        from qrstream.decoder import _worker_detect_qr
+        # Simulate a pre-0.6 video frame: cobs-encoded payload embedded
+        # as latin-1 string. We skip the QR image round-trip since
+        # generate_qr_image no longer emits COBS; instead we build a
+        # JPEG of a synthetic QR directly via qrcode lib.
+        import cv2
+        import numpy as np
+        import qrcode
+        from qrcode.constants import ERROR_CORRECT_M
+
+        block_data = bytes((i * 13 + 5) % 256 for i in range(64))
+        packed = pack_v2(filesize=64, blocksize=64, block_count=1,
+                         seed=200, block_seq=0, data=block_data,
+                         alphanumeric_qr=True)
+        # Legacy encoder path: cobs → latin-1 string → qrcode.add_data(str)
+        cobs_payload = cobs_encode(packed).decode('latin-1')
+        q = qrcode.QRCode(version=None, error_correction=ERROR_CORRECT_M,
+                          box_size=10, border=4)
+        q.add_data(cobs_payload)
+        q.make(fit=True)
+        pil = q.make_image(fill_color='black', back_color='white')
+        img = cv2.cvtColor(np.array(pil.convert('RGB')), cv2.COLOR_RGB2BGR)
+
+        _, jpeg = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        frame_idx, candidate, seed = _worker_detect_qr((0, jpeg.tobytes()))
+        assert candidate is not None, "legacy COBS path should still decode"
+        assert seed == 200
 
 
 class TestCobs:

@@ -28,6 +28,8 @@ def cmd_encode(args):
         ext = '.avi' if args.codec == 'mjpeg' else '.mp4'
         output = f"{base}{ext}"
 
+    alphanumeric_qr = (args.qr_mode == 'alphanumeric')
+
     encode_to_video(
         input_path=args.file,
         output_path=output,
@@ -42,7 +44,7 @@ def cmd_encode(args):
         workers=args.workers,
         use_legacy_qr=args.legacy_qr,
         codec=args.codec,
-        binary_qr=not args.base64_qr,
+        alphanumeric_qr=alphanumeric_qr,
         protocol_version=2 if args.protocol == 'v2' else 3,
         force_compress=args.force_compress,
     )
@@ -112,9 +114,12 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
     enc.add_argument('--force-compress', action='store_true',
                      help='Force compression even for large V3 inputs (uses more memory)')
     enc.add_argument('--legacy-qr', action='store_true',
-                     help='Use qrcode library instead of OpenCV for QR generation')
-    enc.add_argument('--base64-qr', action='store_true',
-                     help='Use base64 encoding instead of COBS binary (less capacity)')
+                     help='Accepted for backward compatibility; ignored.')
+    enc.add_argument('--qr-mode', choices=['alphanumeric', 'base64'],
+                     default='alphanumeric',
+                     help='QR payload encoding: alphanumeric (default, base45 '
+                          'into QR alphanumeric mode, ~29%% more capacity) '
+                          'or base64 (standard, QR byte mode).')
     enc.add_argument('--codec', choices=['mp4v', 'mjpeg'], default='mp4v',
                      help='Video codec: mp4v (default) or mjpeg (faster, larger)')
     enc.add_argument('--protocol', choices=['v2', 'v3'], default='v3',
