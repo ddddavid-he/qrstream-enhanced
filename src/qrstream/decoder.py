@@ -771,50 +771,6 @@ def _merge_ranges(ranges):
     return merged
 
 
-def _process_batch(executor, batch, seen_seeds, unique_blocks,
-                   decoded_count, no_detect_count, lt_decoder, pbar, verbose,
-                   seed_frame_map: dict[int, int] | None = None):
-    """Submit a batch to the pool and collect results.
-
-    Retained for callers that still pre-accumulate frames (e.g. the
-    probe phase).  The main scan and targeted recovery now use
-    ``_stream_scan`` which pipelines reads and worker submissions.
-    """
-    early_done = False
-    futures = {executor.submit(_worker_detect_qr, fd): fd[0] for fd in batch}
-    for future in as_completed(futures):
-        fidx, block_bytes, seed = future.result()
-        pbar.update(1)
-        if block_bytes is not None and seed is not None:
-            if seed_frame_map is not None and seed not in seed_frame_map:
-                seed_frame_map[seed] = fidx
-            if seed not in seen_seeds:
-                seen_seeds.add(seed)
-                unique_blocks.append(block_bytes)
-                decoded_count += 1
-
-                try:
-                    # Workers already validated CRC, skip re-validation
-                    done, _ = lt_decoder.decode_bytes(block_bytes, skip_crc=True)
-                    if done:
-                        early_done = True
-                except (ValueError, struct.error):
-                    pass
-
-                if verbose:
-                    pct = lt_decoder.progress * 100
-                    tqdm.write(
-                        f"  Frame {fidx}: seed={seed}, "
-                        f"uniq={decoded_count}, "
-                        f"progress={pct:.1f}%")
-        else:
-            no_detect_count += 1
-        total_seen = decoded_count + no_detect_count
-        hit_pct = (decoded_count * 100 // total_seen) if total_seen else 0
-        pbar.set_postfix_str(f"hit={hit_pct}%, uniq={decoded_count}")
-    return decoded_count, no_detect_count, early_done
-
-
 def _prefetch_iter(source_iter, capacity: int = _READER_QUEUE_CAPACITY):
     """Run ``source_iter`` in a background thread, yielding items in order.
 
