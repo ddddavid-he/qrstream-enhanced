@@ -9,7 +9,18 @@ permissions:
   contents: write
 
 jobs:
+  # Gate release on the full test matrix — unit tests + slow E2E
+  # phone-recording tests on Python 3.13, across BOTH x86_64 and
+  # arm64 public runners — passing first.  A failing decode on
+  # either architecture must block the release so we never ship a
+  # wheel that silently regresses on one platform.
+  test:
+    uses: ./.github/workflows/test.yml
+    permissions:
+      contents: read
+
   release:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Check out code

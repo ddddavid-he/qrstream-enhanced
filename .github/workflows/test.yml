@@ -12,16 +12,30 @@ on:
       - dev
       - 'dev/*'
   workflow_dispatch:
+  # Allow release.yml / publish.yml to reuse this workflow as a gate
+  # before tagging a new version.  When called this way, a failing
+  # test run blocks the release.
+  workflow_call:
 
 permissions:
   contents: read
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Run the full suite on both x86_64 and arm64 public runners.
+    # Both architectures must pass before a release / PyPI publish
+    # is allowed — see release.yml / publish.yml which `needs: test`.
+    #
+    # GitHub-hosted arm64 Linux runners became free for public
+    # repositories in 2024; we pin the concrete label instead of a
+    # generic `linux-arm64` alias for reproducibility.
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os:
+          - ubuntu-latest       # x86_64 / amd64
+          - ubuntu-24.04-arm    # aarch64 / arm64
         python-version:
           - '3.10'
           - '3.11'
@@ -55,19 +69,23 @@ jobs:
       - name: Run end-to-end phone-recording tests
         # Only on 3.13 — the E2E recordings exercise OpenCV /
         # WeChatQRCode, not Python-version-specific code, so running
-        # them once across the matrix is enough.  They take ~15 s
-        # total because they actually decode real phone videos from
-        # tests/fixtures/.
+        # them once per architecture across the matrix is enough.
+        # They take ~15–60 s total (per arch) because they actually
+        # decode real phone videos from tests/fixtures/.
         if: matrix.python-version == '3.13'
         run: uv run pytest -m slow -v
 
       - name: Build distributions
+        # One build per architecture is intentional: we verify the
+        # sdist + wheel actually build on both hosts, but we only
+        # upload the amd64-built artifact since the wheel is pure
+        # Python (arch-independent) and PyPI only needs one copy.
         if: matrix.python-version == '3.13'
         run: uv build
 
       - name: Upload built distributions
-        if: matrix.python-version == '3.13'
-        uses: actions/upload-artifact@v5
+        if: matrix.python-version == '3.13' && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v6
         with:
           name: python-package-distributions
           path: dist/

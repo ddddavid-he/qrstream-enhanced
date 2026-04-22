@@ -10,7 +10,17 @@ permissions:
   id-token: write
 
 jobs:
+  # Gate PyPI publish on the full test matrix — unit tests + slow
+  # E2E phone-recording tests on Python 3.13, across BOTH x86_64
+  # and arm64 public runners — passing first.  We never want to
+  # push a wheel to PyPI that regressed on one architecture.
+  test:
+    uses: ./.github/workflows/test.yml
+    permissions:
+      contents: read
+
   publish:
+    needs: test
     runs-on: ubuntu-latest
     environment:
       name: pypi
