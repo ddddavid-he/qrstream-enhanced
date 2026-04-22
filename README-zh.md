@@ -10,15 +10,15 @@
 编码端                                    解码端
 ┌──────────┐   LT 喷泉码    ┌──────────┐   录屏/拍摄   ┌──────────┐   QR 识别    ┌──────────┐
 │ 原始文件  │ ──────────── → │ QR 码视频 │ ──────────→ │ 视频文件  │ ──────────→ │ 还原文件  │
-└──────────┘   zlib + COBS  └──────────┘              └──────────┘   LT 解码    └──────────┘
+└──────────┘   zlib + base45 └──────────┘              └──────────┘   LT 解码   └──────────┘
 ```
 
-1. **编码**：将文件（可选 zlib 压缩）分块，通过 LT 喷泉码生成冗余编码块，每块序列化为 V3 协议帧，经 COBS 编码后嵌入 QR 码，最终输出 MP4 视频。
-2. **解码**：使用 WeChatQRCode 从视频中高鲁棒性地提取 QR 码，COBS 解码后 CRC32 校验去除损坏帧，喂入 LT 解码器进行信念传播（peeling），恢复所有源块后重建原始文件。解码端会自动兼容 V2/V3 协议。
+1. **编码**：将文件（可选 zlib 压缩）分块，通过 LT 喷泉码生成冗余编码块，每块序列化为 V3 协议帧，经 base45 编码后嵌入 QR 码的 alphanumeric 模式，最终输出 MP4 视频。
+2. **解码**：使用 WeChatQRCode 从视频中高鲁棒性地提取 QR 码，base45 解码后 CRC32 校验去除损坏帧，喂入 LT 解码器进行信念传播（peeling），恢复所有源块后重建原始文件。旧版 base64/COBS 视频（v0.6 之前）会走 fallback 路径继续兼容。
 
 **核心优势**：
 - **LT 喷泉码**：无码率纠删码，天然容忍帧丢失、模糊、遮挡
-- **COBS 编码**：仅 0.4% overhead，比 base64 节省 33% 容量
+- **Base45 + QR Alphanumeric 模式**：RFC 9285 base45 让数据落到 QR 的 alphanumeric 模式（每字符 5.5 bit，byte 模式 8 bit），在同一 QR version 下比 base64 更密、视频更小、编解码更快
 - **WeChatQRCode 检测器**：对手机拍摄场景（透视、摩尔纹、光照）鲁棒性远超标准 QR 检测器
 - **自适应采样率**：根据检测率和帧重复数自动选择最优采样策略
 - **定向恢复**：首轮扫描后针对缺失块的时间位置精准补扫
@@ -98,14 +98,14 @@ qrstream encode <file> -o output.mp4 [options]
 | `--overhead` | `2.0` | 编码冗余倍率（源块数的倍数） |
 | `--fps` | `10` | 输出视频帧率 |
 | `--ec-level` | `1` | QR 纠错等级：0=L(7%), 1=M(15%), 2=Q(25%), 3=H(30%) |
-| `--qr-version` | `20` | QR 码版本 1-40（越大密度越高） |
+| `--qr-version` | `25` | QR 码版本 1-40（越大密度越高） |
 | `--border` | 标准 4 模块静区 | 静区宽度，按 QR 内容宽度百分比计算（`--border 10` = 10%，`--border 0` 可关闭） |
+| `--lead-in-seconds` | `0.0` | 在首个 QR 帧前插入白色引导帧，便于开始录屏 |
 | `--no-compress` | - | 禁用 zlib 压缩 |
 | `--force-compress` | - | 对大文件的 V3 编码强制整体压缩（会占用更多内存） |
-| `--base64-qr` | - | 使用 base64 编码代替 COBS（兼容性更好但容量少 33%） |
-| `--legacy-qr` | - | 使用 qrcode 库生成 QR（更慢但参数控制更精细） |
+| `--qr-mode` | `alphanumeric` | QR 载荷编码：`alphanumeric`（base45，默认，更密）或 `base64`（byte 模式，fallback） |
+| `--legacy-qr` | - | 仅作 CLI 向后兼容保留，不再影响行为 |
 | `--codec` | `mp4v` | 视频编码器：`mp4v` 或 `mjpeg`（更快但文件更大） |
-| `--protocol` | `v3` | 编码协议版本：`v3`（默认）或 `v2` |
 | `-w, --workers` | CPU 核心数 | 并行 QR 生成的工作进程数 |
 | `-v, --verbose` | - | 输出额外详细信息（进度条始终显示） |
 
@@ -126,7 +126,7 @@ qrstream decode <video> -o output_file [options]
 ### 示例
 
 ```bash
-# 编码 PDF 文件（默认 COBS 二进制模式，2 倍冗余）
+# 编码 PDF 文件（默认 base45 alphanumeric 模式，2 倍冗余）
 qrstream encode report.pdf -o report.mp4 --overhead 2.0 -v
 
 # 解码视频（自适应采样率 + 定向恢复）
@@ -134,6 +134,9 @@ qrstream decode report.mp4 -o report_recovered.pdf -v
 
 # 编码时使用高纠错等级（适合手机拍屏场景）
 qrstream encode data.bin -o data.mp4 --ec-level 3 --qr-version 15
+
+# 录屏场景：加大静区 + 预留白屏起录
+qrstream encode slides.zip -o slides.mp4 --border 10 --lead-in-seconds 1.5
 ```
 
 ### 编程接口
@@ -142,8 +145,11 @@ qrstream encode data.bin -o data.mp4 --ec-level 3 --qr-version 15
 from qrstream.encoder import encode_to_video
 from qrstream.decoder import extract_qr_from_video, decode_blocks, decode_blocks_to_file
 
-# 编码（默认使用 COBS 二进制模式）
+# 编码（默认使用 base45 alphanumeric 模式）
 encode_to_video("input.bin", "output.mp4", overhead=2.0, verbose=True)
+
+# 录屏场景：加大静区 + 白屏引导
+encode_to_video("input.bin", "output.mp4", border=10.0, lead_in_seconds=1.5)
 
 # 解码到内存
 blocks = extract_qr_from_video("output.mp4", verbose=True)
@@ -164,13 +170,13 @@ project-root/
 │   ├── encoder.py             # LT 编码 → QR 帧生成 → MP4 视频写入
 │   ├── decoder.py             # 视频帧提取 → QR 检测 → LT 解码 → 文件重建
 │   ├── lt_codec.py            # LT 喷泉码原语（PRNG、RSD、BlockGraph）
-│   ├── protocol.py            # V2/V3 协议序列化 + COBS 编解码
+│   ├── protocol.py            # V3 协议序列化 + base45 编解码（解码端兼容旧版 base64/COBS）
 │   └── qr_utils.py            # QR 生成（OpenCV）+ 检测（WeChatQRCode）
 ├── tests/
 │   ├── test_lt_codec.py       # LT 编解码器单元测试
-│   ├── test_protocol.py       # V2/V3 协议 + COBS 测试
+│   ├── test_protocol.py       # V3 协议 + base45 测试
 │   ├── test_roundtrip.py      # 端到端回环测试
-│   └── test_optimizations.py  # 性能优化 + WeChatQR + COBS 测试
+│   └── test_optimizations.py  # 性能优化 + WeChatQR + legacy fallback 测试
 └── benchmarks/
     └── benchmark.py           # 性能基准测试
 ```
@@ -182,7 +188,7 @@ project-root/
 ```
 Offset  Size  Field
   0      1    version      0x03
-  1      1    flags        bit0=zlib 压缩, bit1=COBS 二进制模式
+  1      1    flags        bit0=zlib 压缩, bit1=高密度模式（base45 alphanumeric）
   2      8    filesize     uint64 BE（编码载荷大小；压缩时为压缩后大小）
  10      2    blocksize    uint16 BE
  12      4    block_count  uint32 BE  K = ceil(filesize / blocksize)
@@ -193,18 +199,19 @@ Offset  Size  Field
  ...     4    crc32        CRC32（header[0:24] + data）
 ```
 
-- 默认编码使用 **V3**。
-- 解码器会自动兼容 **V2** 和 **V3**。
+- 默认编码使用 **V3 + base45 alphanumeric QR**。
+- 解码端按 base45 → base64 → COBS 顺序尝试，保留对 v0.6 之前老视频的兼容。
 - V3 将 `filesize` 扩展为 `uint64`，`block_count` 扩展为 `uint32`，适合更大的文件和块数。
 
 ### 编码模式
 
-| 模式 | QR 内容 | 容量开销 | 默认 |
-|------|---------|----------|------|
-| COBS 二进制 | raw bytes → COBS → latin-1 string | ~0.4% | 是 |
-| Base64 | raw bytes → base64 string | ~33% | 否（`--base64-qr`） |
+| 模式 | QR 内容 | QR 模式 | 字符开销 | 默认 |
+|------|---------|---------|----------|------|
+| Base45 alphanumeric | raw bytes → base45 → `0-9A-Z $%*+-./:` | Alphanumeric（5.5 bit/字符） | ~67%（但落在更密的 QR 模式 → **净密度更高**） | 是 |
+| Base64 | raw bytes → base64 string | Byte（8 bit/字符） | ~33% | 否（`--qr-mode base64`） |
+| COBS（legacy） | raw bytes → COBS → latin-1 string | Byte | ~0.4% | **v0.6 起移除编码路径**，仅解码端保留以兼容旧视频 |
 
-COBS（Consistent Overhead Byte Stuffing）消除所有 `\x00` 字节，使数据可安全通过 QR 字符串接口传递。
+Base45（RFC 9285）成为默认是因为 QR 的 alphanumeric 模式每字符承载的 bit 比 byte 模式更多——V25/M 下 base45 的单帧载荷比 base64 大约 30%，实测视频小 20~25%、编解码快 10~20%。
 
 ### 大文件与低内存路径
 

@@ -31,3 +31,6 @@ skills/
 .pytest_cache/
 *.egg
 uv.lock
+
+# Performance profiling outputs (local only, not versioned)
+dev/perf-profile/results/

@@ -18,7 +18,7 @@
 - `profile_decode.py` — 解码路径详细 profile（单进程 cProfile + 多进程分阶段插桩）
 - `profile_hotpaths.py` — 对可疑热点（`generate_qr_image`、`generate_block`、`imencode`、`BlockGraph.add_block`、`try_decode_qr` 等）做独立 micro-benchmark
 - `run_all.py` — 一键跑完整套，生成 `results/` 报告
-- `results/` — 运行输出（`.txt` 与 `.prof` 文件，`.prof` 可用 `snakeviz` 可视化）
+- `results/` — 本地运行输出（`.txt` 与 `.prof`），**不入库**（已在根 `.gitignore` 中排除）；`.prof` 可用 `snakeviz` 可视化
 
 ## 使用方式
 
@@ -38,7 +38,7 @@ snakeviz dev/perf-profile/results/encode_single_100kb.prof
 ## 目标场景
 
 - 文件大小：1KB、10KB、100KB、1MB、5MB、10MB
-- 参数：默认 overhead=2.0, fps=10, ec_level=1, qr_version=20, binary_qr=True, protocol=V3
+- 参数：默认 overhead=2.0, fps=10, ec_level=1, qr_version=25, qr_mode=alphanumeric（base45），V3 协议
 - 超过 10MB 的文件不在本次 profile 范围（按用户说法时间已难以接受，
   若有优化价值会单独立项）
 
