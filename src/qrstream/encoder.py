@@ -274,7 +274,8 @@ def encode_to_video(input_path: str, output_path: str,
                 writer.write(blank_frame)
 
         batch_size = max(workers * 4, 64)
-        progress = tqdm(total=num_blocks, desc="Encoding frames")
+        progress = tqdm(total=num_blocks, desc="Encode", unit="f",
+                        dynamic_ncols=True)
 
         if workers > 1:
             block_queue = Queue(maxsize=batch_size * 2)

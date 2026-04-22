@@ -154,8 +154,8 @@ class LTDecoder:
         written = 0
         pbar = None
         if show_progress:
-            pbar = tqdm(total=self.K, desc="Writing output",
-                        unit="block", dynamic_ncols=True,
+            pbar = tqdm(total=self.K, desc="Write",
+                        unit="blk", dynamic_ncols=True,
                         mininterval=0.1)
 
         try:
@@ -456,8 +456,8 @@ def _probe_sample_rate(video_path: str, workers: int,
     # The probe is short, so force tqdm to refresh every update instead of
     # waiting for the default refresh interval and only rendering at the end.
     probe_results = []
-    pbar = tqdm(total=probe_count, desc="Probing sample rate",
-                unit="frame", dynamic_ncols=True,
+    pbar = tqdm(total=probe_count, desc="Probe",
+                unit="f", dynamic_ncols=True,
                 mininterval=0, miniters=1)
     with ProcessPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_worker_detect_qr, fd): fd[0]
@@ -591,8 +591,8 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
 
     # ── Main scan (remaining frames) ─────────────────────────────
     BATCH_SIZE = workers * 4
-    pbar = tqdm(total=total_frames, desc="Scanning frames",
-                unit="frame", dynamic_ncols=True)
+    pbar = tqdm(total=total_frames, desc="Scan",
+                unit="f", dynamic_ncols=True)
 
     if leading_frames_probed > 0:
         pbar.update(leading_frames_probed)
@@ -734,8 +734,8 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
     # Force frequent refreshes and explicitly include percent so the progress
     # bar remains informative even for short targeted scans.
     BATCH_SIZE = workers * 4
-    pbar = tqdm(total=target_frames, desc="Targeted recovery",
-                unit="frame", dynamic_ncols=True,
+    pbar = tqdm(total=target_frames, desc="Recover",
+                unit="f", dynamic_ncols=True,
                 mininterval=0, miniters=1,
                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:3.0f}%]")
 
@@ -812,11 +812,13 @@ def _process_batch(executor, batch, seen_seeds, unique_blocks,
                     pct = lt_decoder.progress * 100
                     tqdm.write(
                         f"  Frame {fidx}: seed={seed}, "
-                        f"unique={decoded_count}, "
+                        f"uniq={decoded_count}, "
                         f"progress={pct:.1f}%")
         else:
             no_detect_count += 1
-        pbar.set_postfix(unique=decoded_count, missed=no_detect_count)
+        total_seen = decoded_count + no_detect_count
+        hit_pct = (decoded_count * 100 // total_seen) if total_seen else 0
+        pbar.set_postfix_str(f"hit={hit_pct}%, uniq={decoded_count}")
     return decoded_count, no_detect_count, early_done
 
 
@@ -829,8 +831,8 @@ def _decode_into_decoder(blocks, verbose=False) -> LTDecoder | None:
     show_progress = verbose or len(blocks) >= _PROGRESS_BAR_THRESHOLD
     pbar = None
     if show_progress:
-        pbar = tqdm(total=len(blocks), desc="Decoding LT blocks",
-                    unit="block", dynamic_ncols=True,
+        pbar = tqdm(total=len(blocks), desc="LT decode",
+                    unit="blk", dynamic_ncols=True,
                     mininterval=0.1)
 
     try:
@@ -840,7 +842,8 @@ def _decode_into_decoder(blocks, verbose=False) -> LTDecoder | None:
                 if pbar is not None:
                     pbar.update(1)
                     if decoder.initialized:
-                        pbar.set_postfix(recovered=decoder.num_recovered, total=decoder.K)
+                        pbar.set_postfix_str(
+                            f"got={decoder.num_recovered}/{decoder.K}")
                 if done:
                     if verbose:
                         print(f"  Decoded after {i + 1}/{len(blocks)} blocks "
@@ -851,14 +854,16 @@ def _decode_into_decoder(blocks, verbose=False) -> LTDecoder | None:
                 if pbar is not None:
                     pbar.update(1)
                     if decoder.initialized:
-                        pbar.set_postfix(recovered=decoder.num_recovered, total=decoder.K)
+                        pbar.set_postfix_str(
+                            f"got={decoder.num_recovered}/{decoder.K}")
                 if verbose:
                     print(f"  Block {i} error, skipping: {e}")
             except Exception as e:
                 if pbar is not None:
                     pbar.update(1)
                     if decoder.initialized:
-                        pbar.set_postfix(recovered=decoder.num_recovered, total=decoder.K)
+                        pbar.set_postfix_str(
+                            f"got={decoder.num_recovered}/{decoder.K}")
                 if verbose:
                     print(f"  Block {i} error: {e}")
     finally:
