@@ -37,7 +37,7 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
 from qrstream.encoder import LTEncoder, encode_to_video, _load_payload  # noqa: E402
-from qrstream.protocol import V3_VERSION, auto_blocksize  # noqa: E402
+from qrstream.protocol import auto_blocksize  # noqa: E402
 from qrstream.qr_utils import generate_qr_image  # noqa: E402
 
 
@@ -133,28 +133,28 @@ def staged_encode_timing(input_path: str, workers: int) -> dict:
 
     # Setup (mimicking encode_to_video)
     payload, compress, used_mmap, raw_size = _load_payload(
-        input_path, compress=True, protocol_version=V3_VERSION,
+        input_path, compress=True,
         force_compress=False, verbose=False,
     )
     payload_size = len(payload)
 
-    ec_level, qr_version, binary_qr = 1, 20, True
+    # v0.6.0 defaults: V25, base45 alphanumeric QR
+    ec_level, qr_version, alphanumeric_qr = 1, 25, True
     overhead, fps = 2.0, 10
     blocksize = auto_blocksize(payload_size, ec_level, qr_version,
-                               binary_qr=binary_qr,
-                               protocol_version=V3_VERSION)
+                               alphanumeric_qr=alphanumeric_qr)
     K = ceil(payload_size / blocksize)
     num_blocks = int(K * overhead)
 
     encoder = LTEncoder(payload, blocksize, compressed=compress,
-                        binary_qr=binary_qr, protocol_version=V3_VERSION)
+                        alphanumeric_qr=alphanumeric_qr)
 
     # Size probe
     first_packed, _, _ = next(encoder.generate_blocks(1))
     first_qr = generate_qr_image(first_packed, ec_level=ec_level,
                                  box_size=10, border=4.0,
                                  version=qr_version, use_legacy=False,
-                                 binary_mode=binary_qr)
+                                 alphanumeric=alphanumeric_qr)
     h, w = first_qr.shape[:2]
 
     output_path = tempfile.mktemp(suffix=".mp4")
@@ -200,10 +200,14 @@ def staged_encode_timing(input_path: str, workers: int) -> dict:
                 break
 
             t_pool = time.perf_counter()
+            # Positional args order of generate_qr_image:
+            #   (data, ec_level, box_size, border, version,
+            #    use_legacy, binary_mode, alphanumeric)
             qr_imgs = list(pool.map(
                 generate_qr_image, batch,
                 repeat(ec_level), repeat(10), repeat(4.0),
-                repeat(qr_version), repeat(False), repeat(binary_qr),
+                repeat(qr_version), repeat(False),
+                repeat(None), repeat(alphanumeric_qr),
             ))
             time_qr_pool += time.perf_counter() - t_pool
 

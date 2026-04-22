@@ -6,7 +6,7 @@ with cProfile (single-process) and staged timing (multi-process).
 
 Staged timing breaks decode wall time into:
   - frame read + JPEG encode (producer side)
-  - QR detect + COBS/base64 + unpack (worker pool)
+  - QR detect + base45/base64/COBS + unpack (worker pool)
   - LT belief propagation (main thread: LTDecoder.decode_bytes)
   - probe phase (separate)
 

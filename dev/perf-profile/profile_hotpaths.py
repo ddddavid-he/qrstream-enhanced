@@ -36,7 +36,7 @@ import numpy as np  # noqa: E402
 from qrstream.encoder import LTEncoder  # noqa: E402
 from qrstream.lt_codec import BlockGraph, PRNG  # noqa: E402
 from qrstream.protocol import (  # noqa: E402
-    V3_VERSION, auto_blocksize, cobs_decode, cobs_encode,
+    auto_blocksize, base45_decode, base45_encode, cobs_decode, cobs_encode,
     pack_v3, unpack,
 )
 from qrstream.qr_utils import generate_qr_image, try_decode_qr  # noqa: E402
@@ -77,32 +77,26 @@ def _format_row(name: str, stats: dict, extra: str = "") -> str:
 def bench_generate_qr_image() -> list[str]:
     """Test generate_qr_image with realistic packed blocks per QR version.
 
-    We use LTEncoder to produce packed bytes.  blocksize is set to
-    auto_blocksize minus a safety margin so COBS worst-case + OpenCV
-    byte-mode encoding stays within QR capacity.
+    Uses v0.6.0 default path (base45 + QR alphanumeric mode).
     """
-    out = ["\n--- generate_qr_image (encode hot path) ---"]
+    out = ["\n--- generate_qr_image (encode hot path, base45/alphanumeric) ---"]
     for version in (20, 25, 40):
         auto_bs = auto_blocksize(
             10 * 1024 * 1024, ec_level=1, qr_version=version,
-            binary_qr=True, protocol_version=V3_VERSION)
-        # Use a very conservative blocksize. OpenCV 4.x QR encoder
-        # auto-upgrades the version when data doesn't fit at the
-        # requested version, so high-entropy random data near auto_bs
-        # may overflow past v40. We stay well below.
+            alphanumeric_qr=True)
+        # Use a conservative blocksize well below auto_bs.
         blocksize = max(64, int(auto_bs * 0.5))
         dummy_data = os.urandom(blocksize * 4)
         encoder = LTEncoder(dummy_data, blocksize,
-                            protocol_version=V3_VERSION,
-                            binary_qr=True)
+                            alphanumeric_qr=True)
         packed, _, _ = next(encoder.generate_blocks(1))
         # warm-up
         generate_qr_image(packed, ec_level=1, version=version,
-                          box_size=10, border=4.0, binary_mode=True)
+                          box_size=10, border=4.0, alphanumeric=True)
         stats = _timed_loop(
             lambda p=packed, v=version: generate_qr_image(
                 p, ec_level=1, version=v, box_size=10, border=4.0,
-                binary_mode=True),
+                alphanumeric=True),
             iterations=30,
         )
         out.append(_format_row(
@@ -117,7 +111,7 @@ def bench_lt_generate_block() -> list[str]:
     for K in [10, 100, 1000, 10000]:
         blocksize = 666
         data = os.urandom(K * blocksize)
-        encoder = LTEncoder(data, blocksize, protocol_version=V3_VERSION)
+        encoder = LTEncoder(data, blocksize)
         # warm
         encoder.generate_block(1)
         seed_counter = [1]
@@ -173,21 +167,20 @@ def bench_downscale_frame() -> list[str]:
 
 
 def bench_try_decode_qr() -> list[str]:
-    """Detect a real QR code (most realistic)."""
+    """Detect a real QR code (most realistic). Uses v0.6.0 default path."""
     out = ["\n--- try_decode_qr (decode worker hot path) ---"]
     for version in (20, 25, 40):
         auto_bs = auto_blocksize(
             10 * 1024 * 1024, ec_level=1, qr_version=version,
-            binary_qr=True, protocol_version=V3_VERSION)
+            alphanumeric_qr=True)
         blocksize = max(64, int(auto_bs * 0.5))
         dummy_data = os.urandom(blocksize * 4)
         encoder = LTEncoder(dummy_data, blocksize,
-                            protocol_version=V3_VERSION,
-                            binary_qr=True)
+                            alphanumeric_qr=True)
         packed, _, _ = next(encoder.generate_blocks(1))
         qr_bgr = generate_qr_image(packed, ec_level=1, version=version,
                                     box_size=10, border=4.0,
-                                    binary_mode=True)
+                                    alphanumeric=True)
         # warm-up (WeChatQR model load)
         try_decode_qr(qr_bgr)
         stats = _timed_loop(
@@ -198,16 +191,37 @@ def bench_try_decode_qr() -> list[str]:
     return out
 
 
+def bench_base45() -> list[str]:
+    """base45 encode/decode — new default encoding layer (replaces COBS)."""
+    out = ["\n--- base45_encode / base45_decode (new default) ---"]
+    for size in [100, 500, 1000, 2000]:
+        data = os.urandom(size)
+        encoded = base45_encode(data)
+        enc_stats = _timed_loop(
+            lambda d=data: base45_encode(d), iterations=500)
+        dec_stats = _timed_loop(
+            lambda e=encoded: base45_decode(e), iterations=500)
+        out.append(_format_row(
+            f"base45_encode {size}B", enc_stats, f"→ {len(encoded)}B"))
+        out.append(_format_row(
+            f"base45_decode {size}B", dec_stats))
+    return out
+
+
 def bench_cobs() -> list[str]:
-    out = ["\n--- cobs_encode / cobs_decode ---"]
+    """Kept for reference; COBS is now decode-only legacy fallback."""
+    out = ["\n--- cobs_encode / cobs_decode (legacy fallback) ---"]
     for size in [100, 500, 1000, 2000]:
         data = os.urandom(size)
         encoded = cobs_encode(data)
-        enc_stats = _timed_loop(lambda: cobs_encode(data), iterations=500)
-        dec_stats = _timed_loop(lambda: cobs_decode(encoded), iterations=500)
-        out.append(_format_row(f"cobs_encode {size}B", enc_stats,
-                               f"→ {len(encoded)}B"))
-        out.append(_format_row(f"cobs_decode {size}B", dec_stats))
+        enc_stats = _timed_loop(
+            lambda d=data: cobs_encode(d), iterations=500)
+        dec_stats = _timed_loop(
+            lambda e=encoded: cobs_decode(e), iterations=500)
+        out.append(_format_row(
+            f"cobs_encode {size}B", enc_stats, f"→ {len(encoded)}B"))
+        out.append(_format_row(
+            f"cobs_decode {size}B", dec_stats))
     return out
 
 
@@ -216,11 +230,13 @@ def bench_unpack() -> list[str]:
     blocksize = 666
     K = 1000
     data = os.urandom(K * blocksize)
-    encoder = LTEncoder(data, blocksize, protocol_version=V3_VERSION)
+    encoder = LTEncoder(data, blocksize)
     packed, _, _ = next(encoder.generate_blocks(1))
-    stats = _timed_loop(lambda: unpack(packed), iterations=2000)
+    stats = _timed_loop(
+        lambda p=packed: unpack(p), iterations=2000)
     out.append(_format_row("unpack V3", stats, f"payload={len(packed)}B"))
-    stats = _timed_loop(lambda: unpack(packed, skip_crc=True), iterations=2000)
+    stats = _timed_loop(
+        lambda p=packed: unpack(p, skip_crc=True), iterations=2000)
     out.append(_format_row("unpack V3 (skip_crc)", stats))
     return out
 
@@ -230,7 +246,7 @@ def bench_blockgraph_add_block() -> list[str]:
     for K in [100, 1000, 5000]:
         blocksize = 666
         data = os.urandom(K * blocksize)
-        encoder = LTEncoder(data, blocksize, protocol_version=V3_VERSION)
+        encoder = LTEncoder(data, blocksize)
         # Pre-generate packed blocks (enough for decode).
         packed_blocks = []
         for packed, _, _ in encoder.generate_blocks(int(K * 2.0)):
@@ -282,10 +298,10 @@ def bench_prng_get_src_blocks() -> list[str]:
 
 def bench_video_writer() -> list[str]:
     out = ["\n--- cv2.VideoWriter.write (encode muxing) ---"]
-    # Use a representative QR frame.
+    # Use a representative QR frame at v0.6.0 default (V25, base45).
     data = os.urandom(666)
-    qr_bgr = generate_qr_image(data, ec_level=1, version=20, box_size=10,
-                                border=4.0, binary_mode=True)
+    qr_bgr = generate_qr_image(data, ec_level=1, version=25, box_size=10,
+                                border=4.0, alphanumeric=True)
     h, w = qr_bgr.shape[:2]
     for codec_name, fourcc_str in [("mp4v", "mp4v"), ("mjpeg", "MJPG")]:
         output_path = tempfile.mktemp(suffix=".mp4" if codec_name == "mp4v" else ".avi")
@@ -296,7 +312,7 @@ def bench_video_writer() -> list[str]:
             continue
         # warm-up
         writer.write(qr_bgr)
-        stats = _timed_loop(lambda: writer.write(qr_bgr), iterations=200)
+        stats = _timed_loop(lambda w_=writer, q=qr_bgr: w_.write(q), iterations=200)
         writer.release()
         if os.path.exists(output_path):
             os.remove(output_path)
@@ -315,6 +331,7 @@ def main() -> None:
     all_lines.extend(bench_imencode_imdecode())
     all_lines.extend(bench_downscale_frame())
     all_lines.extend(bench_try_decode_qr())
+    all_lines.extend(bench_base45())
     all_lines.extend(bench_cobs())
     all_lines.extend(bench_unpack())
     all_lines.extend(bench_blockgraph_add_block())
