@@ -34,3 +34,15 @@ uv.lock
 
 # Performance profiling outputs (local only, not versioned)
 dev/perf-profile/results/
+
+# Diagnostic / benchmark data products (local only, reproducible
+# by re-running dev/diag-*.py and dev/bench-*.py).  The scripts
+# themselves are versioned; their outputs are not.
+dev/diag.*.jsonl
+dev/replay.*.jsonl
+dev/jpegs.*.bin
+dev/bench-*.json
+
+# QEMU core dumps (produced by `uv python install` segfaulting
+# under linux/amd64 emulation — see dev/ci-local.sh notes)
+qemu_*.core

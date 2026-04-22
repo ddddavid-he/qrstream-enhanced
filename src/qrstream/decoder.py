@@ -291,6 +291,63 @@ def _worker_detect_qr(frame_data):
     return (frame_idx, None, None)
 
 
+def _worker_detect_qr_clahe(frame_data):
+    """Recovery worker: run WeChat on a CLAHE-boosted copy of the frame.
+
+    Used by ``_targeted_recovery`` after the main scan failed to
+    deliver enough unique seeds for LT peeling to converge.  CLAHE
+    (Contrast Limited Adaptive Histogram Equalisation) is a purely
+    scalar, per-tile operation — it does not depend on OpenCV's
+    INTER_AREA SIMD dispatch, which is the root cause of why
+    ``ubuntu-latest`` amd64 and ``ubuntu-24.04-arm`` disagree about
+    which phone-captured frames are "detectable".  By boosting local
+    contrast on the QR modules we lift edge frames that got pushed
+    just below the WeChatQRCode classifier threshold back above it,
+    which is enough to pull the observed seed subset out of LT's
+    (rare, ~3%) pathological region.
+
+    Takes ``(frame_idx, frame_ndarray)``. Returns
+    ``(frame_idx, block_bytes_or_None, seed_or_None)``.
+    """
+    frame_idx, frame = frame_data
+    if frame is None:
+        return (frame_idx, None, None)
+
+    try:
+        ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
+        y = ycrcb[:, :, 0]
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        ycrcb[:, :, 0] = clahe.apply(y)
+        boosted = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
+    except cv2.error:
+        return (frame_idx, None, None)
+
+    if not boosted.flags['C_CONTIGUOUS']:
+        boosted = np.ascontiguousarray(boosted)
+
+    qr_data = try_decode_qr(boosted)
+    if qr_data is None:
+        return (frame_idx, None, None)
+
+    # Mirror the multi-strategy decode used by ``_worker_detect_qr``.
+    from .protocol import base45_decode, cobs_decode
+    for decode_fn in (
+        lambda d: _try_base45(d, base45_decode),
+        _try_base64,
+        lambda d: _try_cobs(d, cobs_decode),
+    ):
+        candidate = decode_fn(qr_data)
+        if candidate is None:
+            continue
+        try:
+            header, _ = unpack(candidate)
+            return (frame_idx, candidate, header.seed)
+        except (ValueError, struct.error):
+            continue
+
+    return (frame_idx, None, None)
+
+
 def _try_base45(qr_data: str, base45_decode_fn) -> bytes | None:
     """Try to decode QR payload as a base45 (alphanumeric-mode) string."""
     try:
@@ -677,8 +734,15 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
           f"{no_detect_count} missed")
 
     # ── Targeted recovery for missing seeds ───────────────────────
+    # Triggered whenever the main scan finished without LT converging,
+    # regardless of ``sample_rate``.  The previous ``sample_rate > 1``
+    # guard skipped recovery on videos where the probe decided to read
+    # every frame (sample_rate=1) — but such a video can still land on
+    # a pathological ~3% LT seed subset (see v070 amd64 regression)
+    # and recovery has a cheap CLAHE-boosted rescan to offer even when
+    # the main scan already visited every frame.
     if (not early_done and lt_decoder.initialized
-            and not lt_decoder.done and sample_rate > 1):
+            and not lt_decoder.done):
         unique_blocks, decoded_count, no_detect_count = _targeted_recovery(
             video_path, total_frames, src_fps, workers,
             seen_seeds, unique_blocks, decoded_count, no_detect_count,
@@ -778,7 +842,8 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
             _read_frame_ranges(video_path, frame_ranges),
             seen_seeds, unique_blocks,
             decoded_count, no_detect_count, lt_decoder, pbar, verbose,
-            seed_frame_map, workers)
+            seed_frame_map, workers,
+            worker_fn=_worker_detect_qr_clahe)
         if early_done and verbose:
             tqdm.write("  Targeted recovery: all blocks recovered!")
 
@@ -858,14 +923,23 @@ def _prefetch_iter(source_iter, capacity: int = _READER_QUEUE_CAPACITY):
 
 def _stream_scan(executor, frame_iter, seen_seeds, unique_blocks,
                  decoded_count, no_detect_count, lt_decoder, pbar, verbose,
-                 seed_frame_map, workers):
+                 seed_frame_map, workers, worker_fn=None):
     """Pipelined scan: keep ``workers*2`` detect tasks in flight at all times.
 
     Reads frames via ``_prefetch_iter`` (background thread) and feeds
     them to ``executor`` using a sliding window of pending futures.
     Each completed future updates ``pbar`` by 1, so progress visibly
     advances frame-by-frame instead of in batch-sized jumps.
+
+    ``worker_fn`` defaults to :func:`_worker_detect_qr` (plain WeChat
+    detection on the already-downscaled frame).  Targeted recovery
+    passes :func:`_worker_detect_qr_clahe` to rescue frames the main
+    scan missed by the ε-margin introduced by cross-architecture
+    ``cv2.resize(INTER_AREA)`` SIMD drift.
     """
+    if worker_fn is None:
+        worker_fn = _worker_detect_qr
+
     early_done = False
     IN_FLIGHT = max(workers * 2, 4)
 
@@ -878,7 +952,7 @@ def _stream_scan(executor, frame_iter, seen_seeds, unique_blocks,
             fd = next(prefetched)
         except StopIteration:
             return False
-        pending.add(executor.submit(_worker_detect_qr, fd))
+        pending.add(executor.submit(worker_fn, fd))
         return True
 
     # Prime the pool
