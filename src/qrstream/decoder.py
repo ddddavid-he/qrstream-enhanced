@@ -10,7 +10,9 @@ import struct
 import zlib
 import base64
 from math import ceil, log
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from queue import Queue
+from threading import Thread
+from concurrent.futures import ProcessPoolExecutor, as_completed, FIRST_COMPLETED, wait as _futures_wait
 import multiprocessing
 
 import cv2
@@ -23,6 +25,12 @@ from .qr_utils import try_decode_qr
 
 
 _PROGRESS_BAR_THRESHOLD = 512
+
+# Maximum frames the reader thread may prefetch ahead of the worker pool
+# for the main scan / targeted recovery.  Kept small so we don't balloon
+# memory usage when decode falls behind frame-read (e.g. on files where
+# no QR codes are detectable and the pool is idle anyway).
+_READER_QUEUE_CAPACITY = 64
 
 
 class LTDecoder:
@@ -590,51 +598,42 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
               f"progress={pct:.1f}%")
 
     # ── Main scan (remaining frames) ─────────────────────────────
-    BATCH_SIZE = workers * 4
     pbar = tqdm(total=total_frames, desc="Scan",
                 unit="f", dynamic_ncols=True)
 
     if leading_frames_probed > 0:
         pbar.update(leading_frames_probed)
 
-    last_reported_frame = leading_frames_probed - 1
     early_done = False
 
-    with ProcessPoolExecutor(max_workers=workers) as executor:
-        batch = []
-
-        for frame_data in _read_frames(video_path, sample_rate,
-                                        total_frames,
-                                        start_frame=leading_frames_probed):
-            batch.append(frame_data)
-
-            current_frame_idx = frame_data[0]
-            skipped = current_frame_idx - last_reported_frame - 1
+    # Wrap _read_frames so pbar updates reflect the current video
+    # position even when frames are skipped by sample_rate.
+    def _tracking_frame_iter():
+        last_reported = leading_frames_probed - 1
+        for frame_data in _read_frames(
+                video_path, sample_rate, total_frames,
+                start_frame=leading_frames_probed):
+            skipped = frame_data[0] - last_reported - 1
             if skipped > 0:
                 pbar.update(skipped)
-            last_reported_frame = current_frame_idx
+            last_reported = frame_data[0]
+            yield frame_data
+        # After iteration, advance pbar for any frames past the last
+        # sampled one (they were read but not yielded).
+        remaining = total_frames - (last_reported + 1)
+        if remaining > 0:
+            pbar.update(remaining)
 
-            if len(batch) >= BATCH_SIZE:
-                decoded_count, no_detect_count, early_done = _process_batch(
-                    executor, batch, seen_seeds, unique_blocks,
-                    decoded_count, no_detect_count, lt_decoder, pbar, verbose,
-                    seed_frame_map)
-                batch.clear()
-                if early_done:
-                    if verbose:
-                        tqdm.write(
-                            "  Early termination: all source blocks recovered!")
-                    break
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        decoded_count, no_detect_count, early_done = _stream_scan(
+            executor, _tracking_frame_iter(),
+            seen_seeds, unique_blocks,
+            decoded_count, no_detect_count, lt_decoder, pbar, verbose,
+            seed_frame_map, workers)
+        if early_done and verbose:
+            tqdm.write(
+                "  Early termination: all source blocks recovered!")
 
-        if batch and not early_done:
-            decoded_count, no_detect_count, early_done = _process_batch(
-                executor, batch, seen_seeds, unique_blocks,
-                decoded_count, no_detect_count, lt_decoder, pbar, verbose,
-                seed_frame_map)
-
-    remaining = total_frames - (last_reported_frame + 1)
-    if remaining > 0:
-        pbar.update(remaining)
     pbar.close()
 
     total_processed = decoded_count + no_detect_count
@@ -733,7 +732,6 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
     # Read and process targeted frames.
     # Force frequent refreshes and explicitly include percent so the progress
     # bar remains informative even for short targeted scans.
-    BATCH_SIZE = workers * 4
     pbar = tqdm(total=target_frames, desc="Recover",
                 unit="f", dynamic_ncols=True,
                 mininterval=0, miniters=1,
@@ -741,24 +739,14 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
 
     early_done = False
     with ProcessPoolExecutor(max_workers=workers) as executor:
-        batch = []
-        for frame_data in _read_frame_ranges(video_path, frame_ranges):
-            batch.append(frame_data)
-            if len(batch) >= BATCH_SIZE:
-                decoded_count, no_detect_count, early_done = _process_batch(
-                    executor, batch, seen_seeds, unique_blocks,
-                    decoded_count, no_detect_count, lt_decoder, pbar, verbose)
-                batch.clear()
-                if early_done:
-                    if verbose:
-                        tqdm.write(
-                            "  Targeted recovery: all blocks recovered!")
-                    break
-
-        if batch and not early_done:
-            decoded_count, no_detect_count, early_done = _process_batch(
-                executor, batch, seen_seeds, unique_blocks,
-                decoded_count, no_detect_count, lt_decoder, pbar, verbose)
+        decoded_count, no_detect_count, early_done = _stream_scan(
+            executor,
+            _read_frame_ranges(video_path, frame_ranges),
+            seen_seeds, unique_blocks,
+            decoded_count, no_detect_count, lt_decoder, pbar, verbose,
+            seed_frame_map, workers)
+        if early_done and verbose:
+            tqdm.write("  Targeted recovery: all blocks recovered!")
 
     pbar.close()
 
@@ -786,7 +774,12 @@ def _merge_ranges(ranges):
 def _process_batch(executor, batch, seen_seeds, unique_blocks,
                    decoded_count, no_detect_count, lt_decoder, pbar, verbose,
                    seed_frame_map: dict[int, int] | None = None):
-    """Submit a batch to the pool and collect results."""
+    """Submit a batch to the pool and collect results.
+
+    Retained for callers that still pre-accumulate frames (e.g. the
+    probe phase).  The main scan and targeted recovery now use
+    ``_stream_scan`` which pipelines reads and worker submissions.
+    """
     early_done = False
     futures = {executor.submit(_worker_detect_qr, fd): fd[0] for fd in batch}
     for future in as_completed(futures):
@@ -819,6 +812,130 @@ def _process_batch(executor, batch, seen_seeds, unique_blocks,
         total_seen = decoded_count + no_detect_count
         hit_pct = (decoded_count * 100 // total_seen) if total_seen else 0
         pbar.set_postfix_str(f"hit={hit_pct}%, uniq={decoded_count}")
+    return decoded_count, no_detect_count, early_done
+
+
+def _prefetch_iter(source_iter, capacity: int = _READER_QUEUE_CAPACITY):
+    """Run ``source_iter`` in a background thread, yielding items in order.
+
+    This lets frame read + downscale + JPEG-encode (baseline: 64% of
+    decode wall-time) overlap with worker-pool detection on the main
+    thread, instead of the pre-v0.7 "read a batch -> submit -> wait
+    -> next batch" cycle.  Order is preserved because there is a
+    single producer and a single consumer on a FIFO Queue.
+
+    If the consumer bails out early (via generator .close() /
+    GeneratorExit), the producer is notified via ``stop_event`` and
+    exits on the next queue put, so it does not keep reading the
+    entire video file for nothing.
+    """
+    from threading import Event
+
+    _SENTINEL = object()
+    q: Queue = Queue(maxsize=capacity)
+    stop_event = Event()
+
+    def _producer():
+        try:
+            for item in source_iter:
+                if stop_event.is_set():
+                    return
+                q.put(item)
+        finally:
+            q.put(_SENTINEL)
+
+    t = Thread(target=_producer, daemon=True)
+    t.start()
+    try:
+        while True:
+            item = q.get()
+            if item is _SENTINEL:
+                return
+            yield item
+    finally:
+        # Ask the producer to stop reading on the next iteration; then
+        # drain the queue so a put-blocked producer can unblock and
+        # see the flag.
+        stop_event.set()
+        while t.is_alive():
+            try:
+                item = q.get(timeout=0.1)
+                if item is _SENTINEL:
+                    break
+            except Exception:
+                break
+
+
+def _stream_scan(executor, frame_iter, seen_seeds, unique_blocks,
+                 decoded_count, no_detect_count, lt_decoder, pbar, verbose,
+                 seed_frame_map, workers):
+    """Pipelined scan: keep ``workers*2`` detect tasks in flight at all times.
+
+    Reads frames via ``_prefetch_iter`` (background thread) and feeds
+    them to ``executor`` using a sliding window of pending futures.
+    Each completed future updates ``pbar`` by 1, so progress visibly
+    advances frame-by-frame instead of in batch-sized jumps.
+    """
+    early_done = False
+    IN_FLIGHT = max(workers * 2, 4)
+
+    prefetched = _prefetch_iter(frame_iter)
+    pending: set = set()
+
+    def _submit_next() -> bool:
+        """Pull one frame and submit it. Return False when exhausted."""
+        try:
+            fd = next(prefetched)
+        except StopIteration:
+            return False
+        pending.add(executor.submit(_worker_detect_qr, fd))
+        return True
+
+    # Prime the pool
+    for _ in range(IN_FLIGHT):
+        if not _submit_next():
+            break
+
+    while pending and not early_done:
+        done_set, pending = _futures_wait(pending, return_when=FIRST_COMPLETED)
+        for fut in done_set:
+            fidx, block_bytes, seed = fut.result()
+            pbar.update(1)
+            if block_bytes is not None and seed is not None:
+                if seed_frame_map is not None and seed not in seed_frame_map:
+                    seed_frame_map[seed] = fidx
+                if seed not in seen_seeds:
+                    seen_seeds.add(seed)
+                    unique_blocks.append(block_bytes)
+                    decoded_count += 1
+                    try:
+                        done, _ = lt_decoder.decode_bytes(
+                            block_bytes, skip_crc=True)
+                        if done:
+                            early_done = True
+                    except (ValueError, struct.error):
+                        pass
+                    if verbose:
+                        pct = lt_decoder.progress * 100
+                        tqdm.write(
+                            f"  Frame {fidx}: seed={seed}, "
+                            f"uniq={decoded_count}, "
+                            f"progress={pct:.1f}%")
+            else:
+                no_detect_count += 1
+            total_seen = decoded_count + no_detect_count
+            hit_pct = (decoded_count * 100 // total_seen) if total_seen else 0
+            pbar.set_postfix_str(f"hit={hit_pct}%, uniq={decoded_count}")
+
+            # Keep the pool topped up — one in, one out.
+            if not early_done:
+                _submit_next()
+
+    # On early termination, cancel anything still queued so we release
+    # the executor promptly.
+    for fut in pending:
+        fut.cancel()
+
     return decoded_count, no_detect_count, early_done
 
 
