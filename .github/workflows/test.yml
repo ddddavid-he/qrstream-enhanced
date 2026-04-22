@@ -38,7 +38,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v8
+        # setup-uv stopped publishing floating major/minor tags at v8
+        # (https://github.com/astral-sh/setup-uv/releases/tag/v8.0.0).
+        # Pin an exact release tag; update manually when a newer one is
+        # desired. A commit SHA would be even safer.
+        uses: astral-sh/setup-uv@v8.1.0
         with:
           enable-cache: true
 
