@@ -1,0 +1,156 @@
+
+======================================================================
+ staged encode  size=1KB  workers=14
+ wall=0.313s  frames=4  K=2  blocksize=635
+ frame=1250x1250
+======================================================================
+  pool.map (QR gen + IPC)   :    0.229s  ( 73.2%)
+  VideoWriter.write         :    0.023s  (  7.3%)
+  cv2.resize (if mismatch)  :    0.000s  (  0.0%)
+  producer put() backpress. :    0.000s  (overlapped w/ pool)
+  other (sched/startup/etc) :    0.061s  ( 19.5%)
+  throughput                :   12.8 frames/s
+
+======================================================================
+ encode_to_video  size=1KB  workers=1  wall=0.392s
+======================================================================
+Saved: encode_single_1KB.prof
+Top 25 functions by tottime:
+
+         2122834 function calls (2107464 primitive calls) in 0.392 seconds
+
+   Ordered by: internal time
+   List reduced from 365 to 25 due to restriction <25>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+       45    0.085    0.002    0.126    0.003 main.py:474(map_data)
+       40    0.053    0.001    0.066    0.002 util.py:270(_lost_point_level3)
+       40    0.030    0.001    0.031    0.001 util.py:200(_lost_point_level1)
+ 5081/105    0.026    0.000    0.046    0.000 base.py:274(__mod__)
+       40    0.019    0.000    0.025    0.001 util.py:243(_lost_point_level2)
+        4    0.018    0.005    0.018    0.005 {method 'write' of 'cv2.VideoWriter' objects}
+515879/515878    0.018    0.000    0.018    0.000 {built-in method builtins.next}
+    88956    0.012    0.000    0.017    0.000 util.py:154(<lambda>)
+    79132    0.010    0.000    0.013    0.000 util.py:489(put_bit)
+     9884    0.007    0.000    0.020    0.000 util.py:482(put)
+    34452    0.007    0.000    0.007    0.000 {method 'draw_rectangle' of 'ImagingDraw' objects}
+   154256    0.006    0.000    0.006    0.000 base.py:234(glog)
+    34452    0.006    0.000    0.010    0.000 ImageDraw.py:143(_getink)
+    34452    0.006    0.000    0.032    0.000 pil.py:46(drawrect)
+    34452    0.006    0.000    0.023    0.000 ImageDraw.py:384(rectangle)
+   144304    0.006    0.000    0.006    0.000 base.py:240(gexp)
+   177920    0.006    0.000    0.006    0.000 {built-in method math.floor}
+        5    0.005    0.001    0.038    0.008 main.py:339(make_image)
+116571/106189    0.005    0.000    0.006    0.000 {built-in method builtins.len}
+    63540    0.005    0.000    0.005    0.000 util.py:158(<lambda>)
+    63540    0.004    0.000    0.004    0.000 util.py:160(<lambda>)
+   101664    0.004    0.000    0.004    0.000 util.py:150(<lambda>)
+    63540    0.004    0.000    0.004    0.000 util.py:156(<lambda>)
+        1    0.004    0.004    0.004    0.004 {method 'release' of 'cv2.VideoWriter' objects}
+    34452    0.003    0.000    0.003    0.000 base.py:57(pixel_box)
+
+
+
+======================================================================
+ staged encode  size=10KB  workers=14
+ wall=0.836s  frames=34  K=17  blocksize=635
+ frame=1290x1290
+======================================================================
+  pool.map (QR gen + IPC)   :    0.535s  ( 64.0%)
+  VideoWriter.write         :    0.246s  ( 29.4%)
+  cv2.resize (if mismatch)  :    0.006s  (  0.8%)
+  producer put() backpress. :    0.000s  (overlapped w/ pool)
+  other (sched/startup/etc) :    0.048s  (  5.8%)
+  throughput                :   40.7 frames/s
+
+======================================================================
+ encode_to_video  size=10KB  workers=1  wall=2.897s
+======================================================================
+Saved: encode_single_10KB.prof
+Top 25 functions by tottime:
+
+         15352351 function calls (15242810 primitive calls) in 2.897 seconds
+
+   Ordered by: internal time
+   List reduced from 264 to 25 due to restriction <25>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+      315    0.607    0.002    0.918    0.003 main.py:474(map_data)
+      280    0.381    0.001    0.470    0.002 util.py:270(_lost_point_level3)
+       34    0.247    0.007    0.247    0.007 {method 'write' of 'cv2.VideoWriter' objects}
+      280    0.217    0.001    0.220    0.001 util.py:200(_lost_point_level1)
+36238/755    0.191    0.000    0.331    0.000 base.py:274(__mod__)
+      280    0.137    0.000    0.179    0.001 util.py:243(_lost_point_level2)
+3689179/3689177    0.127    0.000    0.127    0.000 {built-in method builtins.next}
+   724864    0.093    0.000    0.141    0.000 util.py:154(<lambda>)
+   562804    0.070    0.000    0.092    0.000 util.py:489(put_bit)
+    70298    0.053    0.000    0.146    0.000 util.py:482(put)
+   248701    0.047    0.000    0.047    0.000 {method 'draw_rectangle' of 'ImagingDraw' objects}
+  1449728    0.047    0.000    0.047    0.000 {built-in method math.floor}
+  1099973    0.047    0.000    0.047    0.000 base.py:234(glog)
+   248701    0.046    0.000    0.075    0.000 ImageDraw.py:143(_getink)
+   248701    0.045    0.000    0.167    0.000 ImageDraw.py:384(rectangle)
+   248701    0.044    0.000    0.233    0.000 pil.py:46(drawrect)
+  1029007    0.044    0.000    0.044    0.000 base.py:240(gexp)
+       35    0.036    0.001    0.272    0.008 main.py:339(make_image)
+   481524    0.034    0.000    0.034    0.000 util.py:160(<lambda>)
+829686/755630    0.034    0.000    0.040    0.000 {built-in method builtins.len}
+   454220    0.032    0.000    0.032    0.000 util.py:158(<lambda>)
+   454220    0.026    0.000    0.026    0.000 util.py:156(<lambda>)
+   557772    0.023    0.000    0.023    0.000 util.py:146(<lambda>)
+   248701    0.022    0.000    0.022    0.000 base.py:57(pixel_box)
+   466928    0.019    0.000    0.019    0.000 util.py:152(<lambda>)
+
+
+
+======================================================================
+ staged encode  size=100KB  workers=14
+ wall=4.255s  frames=324  K=162  blocksize=635
+ frame=1250x1250
+======================================================================
+  pool.map (QR gen + IPC)   :    2.088s  ( 49.1%)
+  VideoWriter.write         :    2.086s  ( 49.0%)
+  cv2.resize (if mismatch)  :    0.024s  (  0.6%)
+  producer put() backpress. :    2.542s  (overlapped w/ pool)
+  other (sched/startup/etc) :    0.057s  (  1.3%)
+  throughput                :   76.1 frames/s
+
+======================================================================
+ encode_to_video  size=100KB  workers=1  wall=26.502s
+======================================================================
+Saved: encode_single_100KB.prof
+Top 25 functions by tottime:
+
+         142186799 function calls (141169370 primitive calls) in 26.502 seconds
+
+   Ordered by: internal time
+   List reduced from 282 to 25 due to restriction <25>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+     2925    5.623    0.002    8.483    0.003 main.py:474(map_data)
+     2600    3.526    0.001    4.348    0.002 util.py:270(_lost_point_level3)
+      324    2.104    0.006    2.104    0.006 {method 'write' of 'cv2.VideoWriter' objects}
+     2600    2.002    0.001    2.028    0.001 util.py:200(_lost_point_level1)
+336588/7013    1.751    0.000    3.044    0.000 base.py:274(__mod__)
+     2600    1.267    0.000    1.655    0.001 util.py:243(_lost_point_level2)
+34261651/34261649    1.170    0.000    1.170    0.000 {built-in method builtins.next}
+  6572792    0.846    0.000    1.276    0.000 util.py:154(<lambda>)
+  5226988    0.657    0.000    0.862    0.000 util.py:489(put_bit)
+   652886    0.497    0.000    1.359    0.000 util.py:482(put)
+  2297707    0.438    0.000    0.438    0.000 {method 'draw_rectangle' of 'ImagingDraw' objects}
+ 10216825    0.433    0.000    0.433    0.000 base.py:234(glog)
+ 13145584    0.430    0.000    0.430    0.000 {built-in method math.floor}
+  2297707    0.420    0.000    0.689    0.000 ImageDraw.py:143(_getink)
+  2297707    0.412    0.000    2.153    0.000 pil.py:46(drawrect)
+  2297707    0.411    0.000    1.538    0.000 ImageDraw.py:384(rectangle)
+  9557675    0.407    0.000    0.407    0.000 base.py:240(gexp)
+      325    0.331    0.001    2.505    0.008 main.py:339(make_image)
+7706963/7019111    0.313    0.000    0.373    0.000 {built-in method builtins.len}
+  4373220    0.311    0.000    0.311    0.000 util.py:160(<lambda>)
+  4270612    0.303    0.000    0.303    0.000 util.py:158(<lambda>)
+  4232488    0.243    0.000    0.243    0.000 util.py:156(<lambda>)
+  4998308    0.209    0.000    0.209    0.000 util.py:146(<lambda>)
+  2297707    0.204    0.000    0.204    0.000 base.py:57(pixel_box)
+  4981824    0.181    0.000    0.181    0.000 util.py:150(<lambda>)
+
+

@@ -1,0 +1,37 @@
+# Containerfile for QRStream performance profiling
+# Build from project root:
+#   podman build -t qrstream-profile -f dev/perf-profile/Containerfile .
+#
+# Run the full suite:
+#   podman run --rm -v $(pwd)/dev/perf-profile/results:/app/dev/perf-profile/results:Z \
+#     qrstream-profile python dev/perf-profile/run_all.py --quick
+
+FROM python:3.12-slim
+
+# OpenCV runtime deps (minimal, headless usage).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglib2.0-0 \
+        ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install dependencies first for better layer caching.
+COPY pyproject.toml /app/pyproject.toml
+
+# Use the opencv-contrib-python wheel (bundles binaries); ffmpeg above
+# is needed for VideoWriter fourcc support.
+RUN pip install --no-cache-dir \
+        "opencv-contrib-python>=4.5.0" \
+        "numpy>=1.20.0" \
+        "tqdm>=4.60.0" \
+        "qrcode[pil]>=7.0"
+
+COPY src /app/src
+COPY dev /app/dev
+COPY benchmarks /app/benchmarks
+
+ENV PYTHONPATH=/app/src
+
+CMD ["python", "dev/perf-profile/run_all.py", "--quick"]

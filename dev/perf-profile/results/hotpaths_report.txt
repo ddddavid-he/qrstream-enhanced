@@ -1,0 +1,66 @@
+QRStream hot-path micro-benchmarks
+======================================================================
+
+--- generate_qr_image (encode hot path) ---
+  v20 packed=345B                    iter=   30  median= 40868.9µs  mean= 40807.0µs  min= 39817.2µs  p95= 41654.9µs  blocksize=317/auto=635
+  v25 packed=510B                    iter=   30  median= 60303.1µs  mean= 60410.0µs  min= 58994.3µs  p95= 61339.2µs  blocksize=482/auto=965
+  v40 packed=1174B                   iter=   30  median=141964.7µs  mean=143011.1µs  min=139622.7µs  p95=147764.7µs  blocksize=1146/auto=2293
+
+--- LTEncoder.generate_block (encode) ---
+  K=10, blocksize=666                iter=  200  median=     3.1µs  mean=     4.9µs  min=     1.1µs  p95=    12.0µs  
+  K=100, blocksize=666               iter=  200  median=     4.0µs  mean=     6.3µs  min=     1.0µs  p95=    17.7µs  
+  K=1000, blocksize=666              iter=  200  median=     3.9µs  mean=     9.0µs  min=     1.1µs  p95=    31.1µs  
+  K=10000, blocksize=666             iter=   50  median=     5.0µs  mean=    13.5µs  min=     1.6µs  p95=    84.2µs  
+
+--- cv2.imencode / imdecode (decode IPC) ---
+  imencode q=95 540x540              iter=   50  median=  1203.5µs  mean=  1316.5µs  min=   993.5µs  p95=  1917.6µs  jpeg_bytes=347052
+  imdecode q=95 540x540              iter=   50  median=  1634.0µs  mean=  1666.1µs  min=  1579.1µs  p95=  1790.1µs  jpeg_bytes=347052
+  imencode q=85 540x540              iter=   50  median=   827.8µs  mean=   831.7µs  min=   815.3µs  p95=   861.4µs  jpeg_bytes=223902
+  imdecode q=85 540x540              iter=   50  median=  1352.0µs  mean=  1353.3µs  min=  1283.7µs  p95=  1388.0µs  jpeg_bytes=223902
+  imencode q=75 540x540              iter=   50  median=   723.2µs  mean=   725.6µs  min=   708.6µs  p95=   747.9µs  jpeg_bytes=178084
+  imdecode q=75 540x540              iter=   50  median=  1156.1µs  mean=  1161.0µs  min=  1112.2µs  p95=  1204.9µs  jpeg_bytes=178084
+  imencode q=95 1080x1080            iter=   50  median=  3988.2µs  mean=  4020.0µs  min=  3918.8µs  p95=  4197.0µs  jpeg_bytes=1371188
+  imdecode q=95 1080x1080            iter=   50  median=  6773.4µs  mean=  6755.2µs  min=  6453.0µs  p95=  6852.5µs  jpeg_bytes=1371188
+  imencode q=85 1080x1080            iter=   50  median=  3373.5µs  mean=  3362.4µs  min=  3183.2µs  p95=  3449.7µs  jpeg_bytes=883251
+  imdecode q=85 1080x1080            iter=   50  median=  5570.5µs  mean=  5556.5µs  min=  5325.3µs  p95=  5721.7µs  jpeg_bytes=883251
+  imencode q=75 1080x1080            iter=   50  median=  3056.4µs  mean=  3092.6µs  min=  2877.2µs  p95=  3257.5µs  jpeg_bytes=701896
+  imdecode q=75 1080x1080            iter=   50  median=  4841.3µs  mean=  4873.6µs  min=  4613.0µs  p95=  5208.0µs  jpeg_bytes=701896
+
+--- _downscale_frame (decode frame prep) ---
+  720x720                            iter=   30  median=     0.1µs  mean=     0.3µs  min=     0.1µs  p95=     0.3µs  
+  1080x1080                          iter=   30  median=     0.2µs  mean=     0.3µs  min=     0.1µs  p95=     0.4µs  
+  2160x2160                          iter=   30  median=   155.4µs  mean=   163.1µs  min=   143.4µs  p95=   195.4µs  
+  2160x3840                          iter=   30  median=  5756.5µs  mean=  5776.9µs  min=  5409.9µs  p95=  6140.2µs  
+
+--- try_decode_qr (decode worker hot path) ---
+  v20 packed=345B                    iter=   30  median=102924.2µs  mean=103993.1µs  min=100809.6µs  p95=110518.3µs  frame=1090x1090
+  v25 packed=510B                    iter=   30  median=  7282.9µs  mean=  7275.7µs  min=  6794.3µs  p95=  7586.1µs  frame=1290x1290
+  v40 packed=1174B                   iter=   30  median= 16461.8µs  mean= 16415.3µs  min= 15609.5µs  p95= 16999.3µs  frame=1890x1890
+
+--- cobs_encode / cobs_decode ---
+  cobs_encode 100B                   iter=  500  median=     5.9µs  mean=     5.9µs  min=     5.2µs  p95=     6.5µs  → 101B
+  cobs_decode 100B                   iter=  500  median=     3.0µs  mean=     3.0µs  min=     2.5µs  p95=     3.3µs  
+  cobs_encode 500B                   iter=  500  median=    28.5µs  mean=    28.6µs  min=    24.9µs  p95=    30.8µs  → 502B
+  cobs_decode 500B                   iter=  500  median=    13.7µs  mean=    13.8µs  min=    13.0µs  p95=    14.9µs  
+  cobs_encode 1000B                  iter=  500  median=    55.7µs  mean=    55.8µs  min=    48.5µs  p95=    61.0µs  → 1004B
+  cobs_decode 1000B                  iter=  500  median=    27.1µs  mean=    27.4µs  min=    24.9µs  p95=    29.5µs  
+  cobs_encode 2000B                  iter=  500  median=   114.3µs  mean=   115.8µs  min=   100.5µs  p95=   126.3µs  → 2004B
+  cobs_decode 2000B                  iter=  500  median=    55.7µs  mean=    56.4µs  min=    54.2µs  p95=    61.2µs  
+
+--- protocol.unpack (decode, with CRC) ---
+  unpack V3                          iter= 2000  median=     0.8µs  mean=     0.8µs  min=     0.7µs  p95=     1.0µs  payload=694B
+  unpack V3 (skip_crc)               iter= 2000  median=     0.7µs  mean=     0.7µs  min=     0.6µs  p95=     0.7µs  
+
+--- BlockGraph.add_block (decode belief prop.) ---
+  full decode K=100                  iter=    3  median=   829.3µs  mean=   847.9µs  min=   805.1µs  p95=   909.3µs  (≈8.3µs/block avg)
+  full decode K=1000                 iter=    3  median= 11612.2µs  mean= 11745.9µs  min= 11585.2µs  p95= 12040.2µs  (≈11.6µs/block avg)
+  full decode K=5000                 iter=    3  median= 76995.8µs  mean= 76414.9µs  min= 75067.9µs  p95= 77181.0µs  (≈15.4µs/block avg)
+
+--- PRNG.get_src_blocks (both paths) ---
+  K=100                              iter=  500  median=     1.0µs  mean=     1.5µs  min=     0.6µs  p95=     3.2µs  
+  K=1000                             iter=  500  median=     1.0µs  mean=     2.0µs  min=     0.7µs  p95=     6.1µs  
+  K=10000                            iter=  500  median=     1.0µs  mean=     2.4µs  min=     0.7µs  p95=    12.6µs  
+
+--- cv2.VideoWriter.write (encode muxing) ---
+  mp4v 1290x1290                     iter=  200  median=  1499.1µs  mean=  1758.6µs  min=  1391.8µs  p95=  4339.6µs  
+  mjpeg 1290x1290                    iter=  200  median=  6557.8µs  mean=  6611.8µs  min=  5987.6µs  p95=  7030.2µs  
