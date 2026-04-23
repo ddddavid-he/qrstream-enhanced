@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import struct
+import zlib
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,40 @@ from qrstream.protocol import auto_blocksize, unpack
 
 
 _FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+# L2's ground-truth oracle rebuilds the encoded payload at test time
+# by calling ``zlib.compress(raw)`` (see
+# :func:`_build_ground_truth_encoder`).  That assumes
+# ``zlib.compress`` is byte-identical across runtimes — true for
+# stock zlib, but *not* for zlib-ng, which Fedora 43+ ship behind
+# the ``zlib`` API.  zlib-ng produces spec-valid but byte-different
+# DEFLATE streams, so the per-seed ground-truth blocks don't match
+# the ones embedded in the fixture video.  L1/L3/L4 are unaffected
+# because ``zlib.decompress`` *is* cross-implementation byte-
+# identical.
+#
+# FIXME(zlib-ng-oracle): reformulate this oracle to avoid runtime
+# recompression.  Two candidate fixes:
+#   (a) commit the expected per-seed ground-truth block bytes as a
+#       fixture file alongside the video, making the oracle
+#       interpreter-independent; or
+#   (b) change L2 to a decompress-then-compare check — peel via
+#       LTDecoder, then compare ``zlib.decompress(bytes_dump())``
+#       against the raw fixture.  This weakens L2's per-block
+#       granularity (a single poisoned block would only surface if
+#       it also corrupts the aggregated payload) but removes the
+#       zlib-ng dependency outright.
+# Until one of those lands, skip L2 when runtime zlib is zlib-ng so
+# the test doesn't report spurious failures on Fedora / podman.
+_ZLIB_NG_SKIP = pytest.mark.skipif(
+    "zlib-ng" in zlib.ZLIB_RUNTIME_VERSION,
+    reason=(
+        "L2 ground-truth oracle re-runs zlib.compress() at test time; "
+        f"runtime zlib is {zlib.ZLIB_RUNTIME_VERSION!r} which is not "
+        "byte-identical to stock zlib. See FIXME(zlib-ng-oracle)."
+    ),
+)
 
 
 class _FixtureSpec:
@@ -236,12 +271,19 @@ def test_layer1_extract_yields_enough_unique_blocks(fixture_spec):
 
 
 @pytest.mark.slow
+@_ZLIB_NG_SKIP
 def test_layer2_each_block_matches_ground_truth(fixture_spec):
     """L2: every decoded (seed, data) must byte-equal the ground truth.
 
     If this fails: the decoder accepted a corrupt block whose CRC
     happened to match but whose payload bytes are wrong.  That
     points at a protocol / CRC / encoder-PRNG bug, not LT.
+
+    FIXME(zlib-ng-oracle): skipped on zlib-ng runtimes (Fedora 43+).
+    The oracle rebuilt by :func:`_build_ground_truth_encoder` calls
+    ``zlib.compress`` on the raw fixture, which is not byte-
+    identical under zlib-ng.  See the module-level note above
+    ``_ZLIB_NG_SKIP`` for the two candidate long-term fixes.
     """
     blocks = extract_qr_from_video(
         str(fixture_spec.video), sample_rate=0, verbose=False, workers=None,

@@ -241,7 +241,7 @@ class LTDecoder:
         return written
 
 
-# ── Video QR extraction (multiprocess) ───────────────────────────
+# ── Video QR extraction (thread pool) ────────────────────────────
 
 # Max pixel dimension for QR detection. Frames larger than this are
 # downscaled before detection to avoid wasting CPU on 4K+ input.
@@ -267,12 +267,11 @@ def _worker_detect_qr(frame_data):
     Returns (frame_idx, block_bytes_or_None, seed_or_None).
 
     The frame is a ``numpy.ndarray`` (BGR uint8, already downscaled
-    to ``_MAX_DETECT_DIM``) handed to the worker by reference.  Under
+    to ``_MAX_DETECT_DIM``) handed to the worker by reference: under
     ``ThreadPoolExecutor`` workers share the main process address
-    space, so the ndarray travels as a zero-copy reference — no
-    pickle round-trip, no IPC, and the main thread and worker see
-    the same buffer.  The per-thread ``WeChatQRCode`` detector is
-    cached in :mod:`qrstream.qr_utils`' ``threading.local()``.
+    space, so the ndarray travels as a zero-copy reference. The
+    per-thread ``WeChatQRCode`` detector is cached in
+    :mod:`qrstream.qr_utils`' ``threading.local()``.
     """
     from .protocol import base45_decode, cobs_decode
 
@@ -404,22 +403,18 @@ def _read_frames(video_path, sample_rate, total_frames, start_frame=0):
     downscaled to ``_MAX_DETECT_DIM`` and passed as BGR uint8
     ndarrays directly.  Worker threads share the main process
     address space, so the ndarray is handed over as a zero-copy
-    reference without any pickle/IPC overhead and without the
-    previous imencode('.jpg')/imdecode roundtrip (which was both
-    slow and lossy).
+    reference.
 
-    One subtlety worth recording: ``cv2.VideoCapture.read()`` reuses
-    an internal frame buffer — each call returns an ndarray that
+    Thread-safety note: ``cv2.VideoCapture.read()`` reuses an
+    internal frame buffer — each call returns an ndarray that
     views the *same* memory overwritten on the next iteration.
-    Under a ``ProcessPoolExecutor`` pickle would deep-copy the frame
-    before shipping it to the worker, so this aliasing was invisible.
-    Under a ``ThreadPoolExecutor`` the worker sees the live buffer
-    and the next ``read()`` scribbles over it mid-detect, which
-    corrupts WeChat's output.  We therefore force a contiguous
-    *copy* before yielding so each worker owns its frame outright.
-    ``np.ascontiguousarray`` by itself is not enough: if the array
-    is already contiguous it returns the same object without
-    copying.  ``.copy()`` is the belt-and-braces form.
+    Under a ``ThreadPoolExecutor`` a worker can see the live
+    buffer scribbled over mid-detect by the producer's next
+    ``read()``, which corrupts WeChat's output.  We therefore
+    force a contiguous *copy* before yielding so each worker
+    owns its frame outright.  ``np.ascontiguousarray`` alone is
+    not enough: if the array is already contiguous it returns
+    the same object without copying, so we chain ``.copy()``.
     """
     cap = cv2.VideoCapture(video_path)
     if start_frame > 0:

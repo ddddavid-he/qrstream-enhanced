@@ -269,10 +269,22 @@ def encode_to_video(input_path: str, output_path: str,
         if workers is None:
             # QR image generation is dominated by ``qrcode.QRCode.make()``,
             # which is pure Python and holds the GIL.  Under a
-            # ``ThreadPoolExecutor`` more workers than ~4 only contend
-            # on the GIL without adding real parallelism, so cap the
-            # default here.  The writer thread still runs in the
-            # background for IO parallelism.
+            # ``ThreadPoolExecutor`` more workers than ~4 mostly contend
+            # on the GIL without adding real parallelism, so we cap the
+            # *auto-picked* default here.  The writer thread still runs
+            # in the background for IO parallelism, so capping at 4
+            # does not starve the pipeline.
+            #
+            # Users on CPU-rich machines can still pass ``--workers``
+            # (CLI) or ``workers=N`` (API) to override this cap; we do
+            # not clamp the user-supplied value.
+            #
+            # FIXME(encoder-workers-cap): the "4" here was picked from
+            # GIL-bound reasoning rather than a real benchmark.  When
+            # we have throughput numbers for workers={1,2,4,8,cpu}
+            # across a few file sizes we should revisit whether this
+            # cap is too conservative (or too loose) and either raise
+            # it or make it adaptive.
             workers = min(os.cpu_count() or 1, 4)
 
         if verbose:

@@ -3,13 +3,13 @@ Detailed profiling of the encode pipeline.
 
 Two complementary measurements:
 
-1. Single-process cProfile — function-level hotspots (accurate, but slower
+1. Single-worker cProfile — function-level hotspots (accurate, but slower
    than production because workers=1).
-2. Multi-process staged timing — wall-time broken down into:
+2. Multi-thread staged timing — wall-time broken down into:
    - LT block generation (producer thread)
-   - QR image generation (worker pool)
+   - QR image generation (ThreadPoolExecutor workers)
    - VideoWriter.write (main thread)
-   - IPC / scheduling overhead (difference)
+   - Scheduling / contention overhead (difference)
 
 Usage:
     python dev/perf-profile/profile_encode.py
@@ -163,7 +163,7 @@ def staged_encode_timing(input_path: str, workers: int) -> dict:
 
     # Timing accumulators
     time_producer = 0.0  # LT block generation (in producer thread)
-    time_qr_pool = 0.0   # pool.map wait (QR generation + IPC)
+    time_qr_pool = 0.0   # pool.map wait (QR generation + thread scheduling)
     time_write = 0.0     # writer.write
     time_resize = 0.0    # cv2.resize if shape mismatch
     total_start = time.perf_counter()
@@ -262,7 +262,7 @@ def format_staged_report(label: str, stats: dict) -> str:
         f"K={stats['K']}  blocksize={stats['blocksize']}",
         f" frame={stats['frame_size'][0]}x{stats['frame_size'][1]}",
         f"{'=' * 70}",
-        f"  pool.map (QR gen + IPC)   : {stats['qr_pool']:8.3f}s  "
+        f"  pool.map (QR gen + sched) : {stats['qr_pool']:8.3f}s  "
         f"({_format_pct(stats['qr_pool'], wall)})",
         f"  VideoWriter.write         : {stats['writer_write']:8.3f}s  "
         f"({_format_pct(stats['writer_write'], wall)})",
