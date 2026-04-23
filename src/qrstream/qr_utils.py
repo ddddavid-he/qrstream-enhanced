@@ -31,6 +31,7 @@ History note — why we no longer emit COBS payloads
 """
 
 import base64 as _b64lib
+import threading
 
 import cv2
 import numpy as np
@@ -153,14 +154,19 @@ def _render_qr(payload: bytes, ec_level: int, box_size: int,
 # It is faster, more robust, and handles phone-captured screens
 # significantly better than OpenCV's built-in QRCodeDetector.
 
-# Per-process lazy singleton for the WeChatQRCode detector.
-# In multiprocessing ``spawn`` mode each worker gets its own copy of
-# module globals, so the detector is initialised once per OS process
-# on first call to :func:`try_decode_qr`.  Using a sentinel object
-# instead of ``None`` lets us distinguish "not yet initialised" from
-# "initialisation failed (cv2.error / OSError)".
-_WECHAT_UNINIT = object()
-_wechat_detector: object = _WECHAT_UNINIT
+# Per-thread lazy singleton for the WeChatQRCode detector.
+# Under ``ThreadPoolExecutor`` each worker thread receives its own
+# slot on this ``threading.local()`` object, so the detector is
+# initialised once per thread on first call to :func:`try_decode_qr`
+# and reused for every subsequent frame that thread processes.  The
+# detector is not documented as thread-safe, so we intentionally
+# avoid sharing a single instance across threads.
+#
+# Sentinel semantics are the same as before: ``_UNINIT`` lets us
+# distinguish "not yet initialised" from "initialisation failed
+# (cv2.error / OSError)", which is stored as ``None``.
+_UNINIT = object()
+_thread_local = threading.local()
 
 
 def try_decode_qr(frame: np.ndarray, qr_detector=None) -> str | None:
@@ -171,18 +177,18 @@ def try_decode_qr(frame: np.ndarray, qr_detector=None) -> str | None:
     raise UnicodeDecodeError; we swallow that and return None so
     the caller can try alternative detectors if it wants.
     """
-    global _wechat_detector
-
-    # Lazy-init WeChatQRCode detector (per-process, for multiprocessing)
-    if _wechat_detector is _WECHAT_UNINIT:
+    # Lazy-init WeChatQRCode detector (per-thread, for ThreadPoolExecutor)
+    detector = getattr(_thread_local, "detector", _UNINIT)
+    if detector is _UNINIT:
         try:
-            _wechat_detector = cv2.wechat_qrcode_WeChatQRCode()
+            detector = cv2.wechat_qrcode_WeChatQRCode()
         except (cv2.error, OSError):
-            _wechat_detector = None
+            detector = None
+        _thread_local.detector = detector
 
-    if _wechat_detector is not None:
+    if detector is not None:
         try:
-            results, _ = _wechat_detector.detectAndDecode(frame)
+            results, _ = detector.detectAndDecode(frame)
         except UnicodeDecodeError:
             return None
         if results:
@@ -194,6 +200,13 @@ def try_decode_qr(frame: np.ndarray, qr_detector=None) -> str | None:
 
 
 def reset_strategy_stats():
-    """Reset detector state (useful for testing)."""
-    global _wechat_detector
-    _wechat_detector = _WECHAT_UNINIT
+    """Reset detector state (useful for testing).
+
+    Rebinds the module-level ``threading.local()`` to a fresh
+    instance.  This invalidates the ``detector`` slot on every
+    thread at once — mutating a single slot would only clear the
+    caller's thread, leaving worker threads with stale cached
+    detectors.
+    """
+    global _thread_local
+    _thread_local = threading.local()

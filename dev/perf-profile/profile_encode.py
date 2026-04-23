@@ -129,7 +129,7 @@ def staged_encode_timing(input_path: str, workers: int) -> dict:
     """
     from queue import Queue
     from threading import Thread
-    from concurrent.futures import ProcessPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor
 
     # Setup (mimicking encode_to_video)
     payload, compress, used_mmap, raw_size = _load_payload(
@@ -186,7 +186,7 @@ def staged_encode_timing(input_path: str, workers: int) -> dict:
     producer = Thread(target=_block_producer, daemon=True)
     producer.start()
 
-    with ProcessPoolExecutor(max_workers=workers) as pool:
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         done = False
         while not done:
             batch = []

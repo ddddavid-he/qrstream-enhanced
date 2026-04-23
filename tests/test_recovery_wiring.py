@@ -3,8 +3,9 @@
 These tests directly target the v0.7.1 → v0.7.2 bug-fix delta:
 
   - ``_worker_detect_qr_clahe`` must exist in the decoder module and
-    be a plain callable (so ``ProcessPoolExecutor.submit`` can
-    pickle-dispatch it under the ``spawn`` start method).
+    be a plain module-level callable (so ``ThreadPoolExecutor.submit``
+    can dispatch it; keeping the worker module-level also preserves
+    clarity and test-time introspection).
   - ``_stream_scan`` must accept an injectable ``worker_fn`` so that
     main scan and targeted recovery can run different detectors on
     the same frame pipeline.
@@ -26,15 +27,15 @@ from qrstream import decoder as dec_mod
 
 
 def test_clahe_worker_is_defined_and_callable():
-    """The CLAHE recovery worker must exist as a picklable callable."""
+    """The CLAHE recovery worker must exist as a module-level callable."""
     assert hasattr(dec_mod, "_worker_detect_qr_clahe"), (
         "_worker_detect_qr_clahe is missing; the v070 recovery path "
         "will be dead even if _targeted_recovery is triggered."
     )
     fn = dec_mod._worker_detect_qr_clahe
     assert callable(fn)
-    # Must be a module-level function (not a lambda / closure) so
-    # ProcessPoolExecutor can pickle it under spawn.
+    # Must be a module-level function (not a lambda / closure) so it
+    # is trivially introspectable; ThreadPoolExecutor can dispatch it.
     assert inspect.isfunction(fn)
     assert fn.__module__ == "qrstream.decoder"
 

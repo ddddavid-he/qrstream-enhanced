@@ -6,34 +6,21 @@ Features adaptive sample rate and targeted frame recovery.
 """
 
 import io
+import os
 import struct
 import zlib
 import base64
 from math import ceil, log
 from queue import Queue
 from threading import Thread
-from concurrent.futures import ProcessPoolExecutor, as_completed, FIRST_COMPLETED, wait as _futures_wait
-import multiprocessing
+from concurrent.futures import (
+    Executor,
+    ThreadPoolExecutor,
+    as_completed,
+    FIRST_COMPLETED,
+    wait as _futures_wait,
+)
 
-
-# Force "spawn" start method for worker processes.
-#
-# v0.7 introduced a background reader thread (``_prefetch_iter``) that
-# runs while the main thread is about to fork workers via
-# ``ProcessPoolExecutor``.  On Linux the default start method is
-# ``fork``, and forking a multi-threaded parent is unsafe: child
-# processes inherit a snapshot of the parent that contains at most the
-# calling thread, but locks/other state from the reader thread can end
-# up in an indeterminate state inside the child.  Python 3.12+ even
-# emits ``DeprecationWarning: This process (...) is multi-threaded,
-# use of fork() may lead to deadlocks in the child.``
-#
-# In practice this manifested on CI: ~75% of decoded blocks returned
-# from workers were corrupt (failed LT peeling), while macOS (which
-# defaults to ``spawn`` since 3.8) was fine.  Using a ``spawn`` context
-# explicitly costs ~1-3 s of cold-start per scan but is correct
-# everywhere.
-_MP_SPAWN_CTX = multiprocessing.get_context("spawn")
 
 import cv2
 import numpy as np
@@ -274,18 +261,18 @@ def _downscale_frame(frame: np.ndarray) -> np.ndarray:
 
 
 def _worker_detect_qr(frame_data):
-    """Worker function for multiprocessing QR detection.
+    """Worker function for thread-pool QR detection.
 
     Takes (frame_idx, frame_ndarray).
     Returns (frame_idx, block_bytes_or_None, seed_or_None).
 
     The frame is a ``numpy.ndarray`` (BGR uint8, already downscaled
-    to ``_MAX_DETECT_DIM``) sent directly over multiprocessing IPC.
-    Python's default pickle protocol for spawn workers (protocol 5
-    on 3.8+) forwards the buffer out-of-band, so there is no extra
-    copy and no lossy imencode/imdecode roundtrip — which both
-    slows us down and (on at least some libjpeg builds) perturbs
-    edge pixels enough to hurt WeChatQRCode detection margin.
+    to ``_MAX_DETECT_DIM``) handed to the worker by reference.  Under
+    ``ThreadPoolExecutor`` workers share the main process address
+    space, so the ndarray travels as a zero-copy reference — no
+    pickle round-trip, no IPC, and the main thread and worker see
+    the same buffer.  The per-thread ``WeChatQRCode`` detector is
+    cached in :mod:`qrstream.qr_utils`' ``threading.local()``.
     """
     from .protocol import base45_decode, cobs_decode
 
@@ -415,10 +402,24 @@ def _read_frames(video_path, sample_rate, total_frames, start_frame=0):
 
     Yields ``(frame_idx, frame_ndarray)`` tuples. Frames are
     downscaled to ``_MAX_DETECT_DIM`` and passed as BGR uint8
-    ndarrays directly — multiprocessing (spawn + pickle protocol 5)
-    forwards the buffer out-of-band, avoiding the previous
-    imencode('.jpg')/imdecode roundtrip (which was both slow and
-    lossy).
+    ndarrays directly.  Worker threads share the main process
+    address space, so the ndarray is handed over as a zero-copy
+    reference without any pickle/IPC overhead and without the
+    previous imencode('.jpg')/imdecode roundtrip (which was both
+    slow and lossy).
+
+    One subtlety worth recording: ``cv2.VideoCapture.read()`` reuses
+    an internal frame buffer — each call returns an ndarray that
+    views the *same* memory overwritten on the next iteration.
+    Under a ``ProcessPoolExecutor`` pickle would deep-copy the frame
+    before shipping it to the worker, so this aliasing was invisible.
+    Under a ``ThreadPoolExecutor`` the worker sees the live buffer
+    and the next ``read()`` scribbles over it mid-detect, which
+    corrupts WeChat's output.  We therefore force a contiguous
+    *copy* before yielding so each worker owns its frame outright.
+    ``np.ascontiguousarray`` by itself is not enough: if the array
+    is already contiguous it returns the same object without
+    copying.  ``.copy()`` is the belt-and-braces form.
     """
     cap = cv2.VideoCapture(video_path)
     if start_frame > 0:
@@ -430,8 +431,7 @@ def _read_frames(video_path, sample_rate, total_frames, start_frame=0):
             break
         if (frame_idx - start_frame) % sample_rate == 0:
             frame = _downscale_frame(frame)
-            if not frame.flags['C_CONTIGUOUS']:
-                frame = np.ascontiguousarray(frame)
+            frame = np.ascontiguousarray(frame).copy()
             yield (frame_idx, frame)
         frame_idx += 1
     cap.release()
@@ -445,7 +445,9 @@ def _read_frame_ranges(video_path, frame_ranges):
 
     Yields ``(frame_idx, frame_ndarray)`` tuples for all frames
     within ranges. See ``_read_frames`` for the rationale behind
-    the ndarray (rather than encoded-bytes) payload.
+    the ndarray (rather than encoded-bytes) payload and the
+    mandatory ``.copy()`` (VideoCapture reuses its internal
+    buffer; threads would otherwise race with the next ``read()``).
     """
     if not frame_ranges:
         return
@@ -457,8 +459,7 @@ def _read_frame_ranges(video_path, frame_ranges):
             if not ret:
                 break
             frame = _downscale_frame(frame)
-            if not frame.flags['C_CONTIGUOUS']:
-                frame = np.ascontiguousarray(frame)
+            frame = np.ascontiguousarray(frame).copy()
             yield (fidx, frame)
     cap.release()
 
@@ -588,8 +589,7 @@ def _probe_sample_rate(video_path: str, workers: int,
     pbar = tqdm(total=probe_count, desc="Probe",
                 unit="f", dynamic_ncols=True,
                 mininterval=0, miniters=1)
-    with ProcessPoolExecutor(max_workers=workers,
-                             mp_context=_MP_SPAWN_CTX) as executor:
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_worker_detect_qr, fd): fd[0]
                    for fd in probe_frames}
         for future in as_completed(futures):
@@ -665,7 +665,7 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
     cap.release()
 
     if workers is None:
-        workers = multiprocessing.cpu_count() or 1
+        workers = os.cpu_count() or 1
 
     if verbose:
         print(f"Video: {total_frames} frames, {src_fps:.1f} FPS, {duration:.1f}s")
@@ -746,8 +746,7 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
         if remaining > 0:
             pbar.update(remaining)
 
-    with ProcessPoolExecutor(max_workers=workers,
-                             mp_context=_MP_SPAWN_CTX) as executor:
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         decoded_count, no_detect_count, early_done = _stream_scan(
             executor, _tracking_frame_iter(),
             seen_seeds, unique_blocks,
@@ -868,8 +867,7 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:3.0f}%]")
 
     early_done = False
-    with ProcessPoolExecutor(max_workers=workers,
-                             mp_context=_MP_SPAWN_CTX) as executor:
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         decoded_count, no_detect_count, early_done = _stream_scan(
             executor,
             _read_frame_ranges(video_path, frame_ranges),
@@ -954,7 +952,7 @@ def _prefetch_iter(source_iter, capacity: int = _READER_QUEUE_CAPACITY):
                 break
 
 
-def _stream_scan(executor, frame_iter, seen_seeds, unique_blocks,
+def _stream_scan(executor: Executor, frame_iter, seen_seeds, unique_blocks,
                  decoded_count, no_detect_count, lt_decoder, pbar, verbose,
                  seed_frame_map, workers, worker_fn=None):
     """Pipelined scan: keep ``workers*2`` detect tasks in flight at all times.

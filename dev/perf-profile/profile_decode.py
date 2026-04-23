@@ -148,7 +148,7 @@ def profile_decode_single_process(video_path: str, label: str) -> str:
 # ─────────────────────────────────────────────────────────────
 
 def staged_decode_timing(video_path: str, workers: int) -> dict:
-    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     # ── Probe phase ──
     t_probe = time.perf_counter()
@@ -199,7 +199,7 @@ def staged_decode_timing(video_path: str, workers: int) -> dict:
 
     t_scan_start = time.perf_counter()
 
-    with ProcessPoolExecutor(max_workers=workers) as executor:
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         batch: list = []
 
         # Reimplement _read_frames with timing.
