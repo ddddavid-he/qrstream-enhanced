@@ -8,8 +8,6 @@ staged timings, they make it easy to see what dominates.
 Covered:
   - generate_qr_image        (encode: QR matrix → BGR image)
   - LTEncoder.generate_block (encode: PRNG + XOR)
-  - cv2.imencode (JPEG)      (decode: producer IPC prep)
-  - cv2.imdecode (JPEG)      (decode: worker IPC recv)
   - _downscale_frame         (decode: frame normalisation)
   - try_decode_qr            (decode: WeChatQR / QRCodeDetector)
   - cobs_encode / decode     (encode & decode: protocol layer)
@@ -124,35 +122,6 @@ def bench_lt_generate_block() -> list[str]:
         iters = 200 if K <= 1000 else 50
         stats = _timed_loop(_call, iterations=iters)
         out.append(_format_row(f"K={K}, blocksize={blocksize}", stats))
-    return out
-
-
-def bench_imencode_imdecode() -> list[str]:
-    """JPEG roundtrip at various quality levels."""
-    out = ["\n--- cv2.imencode / imdecode (decode IPC) ---"]
-    # typical downscaled QR frame
-    for (h, w) in [(540, 540), (1080, 1080)]:
-        frame = (np.random.rand(h, w, 3) * 255).astype(np.uint8)
-        for quality in [95, 85, 75]:
-            encode_stats = _timed_loop(
-                lambda: cv2.imencode(
-                    ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality]),
-                iterations=50,
-            )
-            # prepare payload for decode
-            _, buf = cv2.imencode(
-                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
-            buf_bytes = buf.tobytes()
-            arr = np.frombuffer(buf_bytes, dtype=np.uint8)
-            decode_stats = _timed_loop(
-                lambda: cv2.imdecode(arr, cv2.IMREAD_COLOR),
-                iterations=50,
-            )
-            extra = f"jpeg_bytes={len(buf_bytes)}"
-            out.append(_format_row(
-                f"imencode q={quality} {w}x{h}", encode_stats, extra))
-            out.append(_format_row(
-                f"imdecode q={quality} {w}x{h}", decode_stats, extra))
     return out
 
 
@@ -328,7 +297,6 @@ def main() -> None:
     all_lines: list[str] = ["QRStream hot-path micro-benchmarks", "=" * 70]
     all_lines.extend(bench_generate_qr_image())
     all_lines.extend(bench_lt_generate_block())
-    all_lines.extend(bench_imencode_imdecode())
     all_lines.extend(bench_downscale_frame())
     all_lines.extend(bench_try_decode_qr())
     all_lines.extend(bench_base45())

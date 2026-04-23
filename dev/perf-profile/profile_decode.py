@@ -2,11 +2,11 @@
 Detailed profiling of the decode pipeline.
 
 Generates test videos for several file sizes, then profiles the decode path
-with cProfile (single-process) and staged timing (multi-process).
+with cProfile (single-worker) and staged timing (multi-thread).
 
 Staged timing breaks decode wall time into:
-  - frame read + JPEG encode (producer side)
-  - QR detect + base45/base64/COBS + unpack (worker pool)
+  - frame read + downscale (producer side)
+  - QR detect + base45/base64/COBS + unpack (ThreadPoolExecutor workers)
   - LT belief propagation (main thread: LTDecoder.decode_bytes)
   - probe phase (separate)
 
@@ -148,7 +148,7 @@ def profile_decode_single_process(video_path: str, label: str) -> str:
 # ─────────────────────────────────────────────────────────────
 
 def staged_decode_timing(video_path: str, workers: int) -> dict:
-    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     # ── Probe phase ──
     t_probe = time.perf_counter()
@@ -191,7 +191,7 @@ def staged_decode_timing(video_path: str, workers: int) -> dict:
     # ── Main scan ──
     BATCH_SIZE = workers * 4
     time_frame_read = 0.0   # frame read + downscale + jpeg encode (producer)
-    time_worker_wait = 0.0  # waiting on pool results (includes IPC)
+    time_worker_wait = 0.0  # waiting on pool results (scheduling + wait)
 
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -199,7 +199,7 @@ def staged_decode_timing(video_path: str, workers: int) -> dict:
 
     t_scan_start = time.perf_counter()
 
-    with ProcessPoolExecutor(max_workers=workers) as executor:
+    with ThreadPoolExecutor(max_workers=workers) as executor:
         batch: list = []
 
         # Reimplement _read_frames with timing.
@@ -293,7 +293,7 @@ def format_staged_report(label: str, stats: dict) -> str:
         f"({_format_pct(stats['probe'], wall)})",
         f"  frame read + jpeg encode  : {stats['frame_read']:8.3f}s  "
         f"({_format_pct(stats['frame_read'], wall)})",
-        f"  worker wait (detect+IPC)  : {stats['worker_wait']:8.3f}s  "
+        f"  worker wait (detect+sched): {stats['worker_wait']:8.3f}s  "
         f"({_format_pct(stats['worker_wait'], wall)})",
         f"  LT belief propagation     : {stats['lt_decode']:8.3f}s  "
         f"({_format_pct(stats['lt_decode'], wall)})",

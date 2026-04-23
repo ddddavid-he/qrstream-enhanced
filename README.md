@@ -108,7 +108,7 @@ qrstream encode <file> -o output.mp4 [options]
 | `--qr-mode` | `alphanumeric` | QR payload encoding: `alphanumeric` (base45, default, denser) or `base64` (byte mode, fallback) |
 | `--legacy-qr` | - | Accepted but ignored (kept for CLI backward compatibility) |
 | `--codec` | `mp4v` | Video codec: `mp4v` or `mjpeg` (faster but larger files) |
-| `-w, --workers` | CPU count | Parallel workers for QR generation |
+| `-w, --workers` | `min(CPU count, 4)` | Parallel worker threads for QR generation. The auto-picked default is capped at 4 because `qrcode.make()` is pure-Python (GIL-bound), so more than ~4 worker threads mostly contend on the GIL without adding real parallelism. Pass a larger value explicitly to override the cap on CPU-rich machines if profiling shows benefit. |
 | `-v, --verbose` | - | Print extra detail (progress bars always shown) |
 
 ### Decode (QR Video → File)
@@ -122,7 +122,7 @@ qrstream decode <video> -o output_file [options]
 | `<video>` | - | Input video path (MP4, MOV, etc.) |
 | `-o, --output` | `decoded_output` | Output file path |
 | `-s, --sample-rate` | `0` (auto) | Sample every Nth frame (0 = adaptive probing) |
-| `-w, --workers` | All CPU cores | Parallel workers for QR detection |
+| `-w, --workers` | All CPU cores | Parallel worker threads for QR detection. `WeChatQRCode` is implemented in C++ and releases the GIL during detection, so more threads scale close to linearly on multi-core machines. |
 | `-v, --verbose` | - | Print detailed progress |
 
 ### Examples

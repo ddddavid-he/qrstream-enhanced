@@ -1,6 +1,6 @@
 """End-to-end roundtrip tests without video I/O."""
 
-import os
+import random
 import zlib
 from math import ceil
 
@@ -54,7 +54,7 @@ class TestDataRoundtrip:
         assert result == data
 
     def test_larger_data(self):
-        data = os.urandom(1024)
+        data = random.Random(0x10241024).randbytes(1024)
         result = self._roundtrip(data, overhead=3.0)
         assert result == data
 

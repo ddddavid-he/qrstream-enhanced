@@ -7,24 +7,24 @@
 当前 benchmark（`benchmarks/benchmark.py`）只测总 wall time，无法定位真实瓶颈。
 本目录下的脚本用来回答以下问题：
 
-1. **CPU 时间花在哪里**：`cProfile` 细粒度函数级热点（单进程模式下才能看清）。
-2. **多进程下的 IPC / QR 生成 / VideoWriter 各占多少比例**：分阶段插桩测量。
+1. **CPU 时间花在哪里**：`cProfile` 细粒度函数级热点（单 worker 模式下才能看清）。
+2. **ThreadPool 下各阶段耗时分布**：QR 生成 / VideoWriter / 主线程调度各占多少比例，分阶段插桩测量。
 3. **编码与解码的瓶颈是否一致**：分别 profile。
 4. **在不同文件大小下扩展性是否线性**：1KB → 10MB。
 
 ## 文件说明
 
-- `profile_encode.py` — 编码路径详细 profile（单进程 cProfile + 多进程分阶段插桩）
-- `profile_decode.py` — 解码路径详细 profile（单进程 cProfile + 多进程分阶段插桩）
-- `profile_hotpaths.py` — 对可疑热点（`generate_qr_image`、`generate_block`、`imencode`、`BlockGraph.add_block`、`try_decode_qr` 等）做独立 micro-benchmark
+- `profile_encode.py` — 编码路径详细 profile（单 worker cProfile + 多线程分阶段插桩）
+- `profile_decode.py` — 解码路径详细 profile（单 worker cProfile + 多线程分阶段插桩）
+- `profile_hotpaths.py` — 对可疑热点（`generate_qr_image`、`generate_block`、`BlockGraph.add_block`、`try_decode_qr` 等）做独立 micro-benchmark
 - `run_all.py` — 一键跑完整套，生成 `results/` 报告
 - `results/` — 本地运行输出（`.txt` 与 `.prof`），**不入库**（已在根 `.gitignore` 中排除）；`.prof` 可用 `snakeviz` 可视化
+- `Containerfile` / `run_podman.sh` — 在 podman 容器里跑（与主仓库测试容器隔离，仅用于性能基准）
 
 ## 使用方式
 
 ```bash
-# 在项目根目录下用 podman 跑（遵循用户规则：构建/测试用 podman）
-# 若本地直接跑：
+# 本地直接跑：
 python dev/perf-profile/run_all.py
 
 # 单独跑某一项（例如只测编码）：
@@ -39,8 +39,7 @@ snakeviz dev/perf-profile/results/encode_single_100kb.prof
 
 - 文件大小：1KB、10KB、100KB、1MB、5MB、10MB
 - 参数：默认 overhead=2.0, fps=10, ec_level=1, qr_version=25, qr_mode=alphanumeric（base45），V3 协议
-- 超过 10MB 的文件不在本次 profile 范围（按用户说法时间已难以接受，
-  若有优化价值会单独立项）
+- 超过 10MB 的文件不在本次 profile 范围
 
 ## 阅读 cProfile 输出的提示
 

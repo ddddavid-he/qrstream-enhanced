@@ -106,7 +106,7 @@ qrstream encode <file> -o output.mp4 [options]
 | `--qr-mode` | `alphanumeric` | QR 载荷编码：`alphanumeric`（base45，默认，更密）或 `base64`（byte 模式，fallback） |
 | `--legacy-qr` | - | 仅作 CLI 向后兼容保留，不再影响行为 |
 | `--codec` | `mp4v` | 视频编码器：`mp4v` 或 `mjpeg`（更快但文件更大） |
-| `-w, --workers` | CPU 核心数 | 并行 QR 生成的工作进程数 |
+| `-w, --workers` | `min(CPU 核心数, 4)` | QR 生成的并行工作线程数。自动值上限 4：`qrcode.make()` 是纯 Python（持 GIL），超过 4 个线程只会互相抢 GIL，不产生真实并行。CPU 核心多且实测瓶颈确在 QR 生成时，可手动指定更大值覆盖该上限。 |
 | `-v, --verbose` | - | 输出额外详细信息（进度条始终显示） |
 
 ### 解码（QR 码视频 → 文件）
@@ -120,7 +120,7 @@ qrstream decode <video> -o output_file [options]
 | `<video>` | - | 输入视频路径（MP4, MOV 等） |
 | `-o, --output` | `decoded_output` | 输出文件路径 |
 | `-s, --sample-rate` | `0`（自动） | 每 N 帧采样一次（0=自适应探测） |
-| `-w, --workers` | 全部 CPU 核心 | 并行 QR 识别的工作进程数 |
+| `-w, --workers` | 全部 CPU 核心 | QR 识别的并行工作线程数。`WeChatQRCode` 是 C++ 实现、执行期间释放 GIL，多线程能真正并行。 |
 | `-v, --verbose` | - | 输出详细进度信息；大任务会显示 probe、扫描、LT 解码和写文件进度 |
 
 ### 示例
