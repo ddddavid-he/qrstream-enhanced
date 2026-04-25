@@ -72,8 +72,8 @@ uv sync --dev
 
 ### 系统要求
 
-- Python >= 3.10
-- 依赖：`opencv-contrib-python`, `numpy`, `tqdm`, `qrcode[pil]`
+- Python >= 3.10（已测试 3.10 – 3.14）
+- 依赖：`opencv-contrib-python`, `numpy`, `tqdm`, `segno`
 
 ## 使用方式
 
@@ -106,7 +106,7 @@ qrstream encode <file> -o output.mp4 [options]
 | `--qr-mode` | `alphanumeric` | QR 载荷编码：`alphanumeric`（base45，默认，更密）或 `base64`（byte 模式，fallback） |
 | `--legacy-qr` | - | 仅作 CLI 向后兼容保留，不再影响行为 |
 | `--codec` | `mp4v` | 视频编码器：`mp4v` 或 `mjpeg`（更快但文件更大） |
-| `-w, --workers` | `min(CPU 核心数, 4)` | QR 生成的并行工作线程数。自动值上限 4：`qrcode.make()` 是纯 Python（持 GIL），超过 4 个线程只会互相抢 GIL，不产生真实并行。CPU 核心多且实测瓶颈确在 QR 生成时，可手动指定更大值覆盖该上限。 |
+| `-w, --workers` | `min(CPU 核心数, 4)` | QR 生成的并行工作线程数。自动值上限 4：QR 矩阵生成（`segno.make()`）是纯 Python（持 GIL），超过 4 个线程只会互相抢 GIL，不产生真实并行。CPU 核心多且实测瓶颈确在 QR 生成时，可手动指定更大值覆盖该上限。 |
 | `-v, --verbose` | - | 输出额外详细信息（进度条始终显示） |
 
 ### 解码（QR 码视频 → 文件）
@@ -171,14 +171,19 @@ project-root/
 │   ├── decoder.py             # 视频帧提取 → QR 检测 → LT 解码 → 文件重建
 │   ├── lt_codec.py            # LT 喷泉码原语（PRNG、RSD、BlockGraph）
 │   ├── protocol.py            # V3 协议序列化 + base45 编解码（解码端兼容旧版 base64/COBS）
-│   └── qr_utils.py            # QR 生成（OpenCV）+ 检测（WeChatQRCode）
+│   └── qr_utils.py            # QR 生成（segno）+ 检测（WeChatQRCode）
 ├── tests/
 │   ├── test_lt_codec.py       # LT 编解码器单元测试
 │   ├── test_protocol.py       # V3 协议 + base45 测试
 │   ├── test_roundtrip.py      # 端到端回环测试
+│   ├── test_qr_generate.py    # QR 生成正确性 + glog(0) 回归测试
+│   ├── test_e2e_encode_decode.py  # 完整编码→视频→解码 SHA256 验证
 │   └── test_optimizations.py  # 性能优化 + WeChatQR + legacy fallback 测试
-└── benchmarks/
-    └── benchmark.py           # 性能基准测试
+└── dev/
+    ├── benchmark.py           # 性能基准测试
+    ├── perf-profile/          # cProfile 热点分析脚本
+    ├── test-container/        # Podman 测试容器
+    └── wechatqrcode-mnn-poc/  # WeChatQRCode MNN 加速 POC
 ```
 
 ## 技术细节
@@ -233,14 +238,21 @@ Base45（RFC 9285）成为默认是因为 QR 的 alphanumeric 模式每字符承
 | 参数 | 值 | 说明 |
 |------|-----|------|
 | 度分布 | Robust Soliton Distribution | c=0.1, delta=0.5 |
-| PRNG | LCG (a=16807, m=2^31-1) | 5 轮预热消除序列种子偏差 |
+| PRNG | SplitMix64 混淆 + LCG (a=16807, m=2^31-1) | 非线性种子混淆消除序列种子相关性 |
 | XOR | numpy 向量化 + 原地操作 | 比纯 Python 快 10-50x |
 | 解码 | Belief Propagation (Peeling) | 基于二部图的迭代消元 |
 
 ## 测试
 
 ```bash
+# 单元测试（默认，不含视频 I/O，速度快）
 uv run pytest tests/ -v
+
+# 端到端编码→视频→解码测试（10 KB、100 KB、500 KB + glog 回归）
+uv run pytest -m e2e -v
+
+# 真实手机录像测试（需要 fixture 视频文件）
+uv run pytest -m slow -v
 ```
 
 ## 许可证

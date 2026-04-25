@@ -223,7 +223,10 @@ class TestWeChatDetector:
         # the worker (the worker accepts frames as ndarrays).
         import cv2
         import numpy as np
-        import qrcode
+        qrcode = pytest.importorskip(
+            "qrcode",
+            reason="qrcode library not installed; legacy COBS frame test skipped",
+        )
         from qrcode.constants import ERROR_CORRECT_M
 
         block_data = bytes((i * 13 + 5) % 256 for i in range(64))

@@ -74,8 +74,8 @@ uv sync --dev
 
 ### Requirements
 
-- Python >= 3.10
-- Dependencies: `opencv-contrib-python`, `numpy`, `tqdm`, `qrcode[pil]`
+- Python >= 3.10 (3.10 – 3.14 tested)
+- Dependencies: `opencv-contrib-python`, `numpy`, `tqdm`, `segno`
 
 ## Usage
 
@@ -108,7 +108,7 @@ qrstream encode <file> -o output.mp4 [options]
 | `--qr-mode` | `alphanumeric` | QR payload encoding: `alphanumeric` (base45, default, denser) or `base64` (byte mode, fallback) |
 | `--legacy-qr` | - | Accepted but ignored (kept for CLI backward compatibility) |
 | `--codec` | `mp4v` | Video codec: `mp4v` or `mjpeg` (faster but larger files) |
-| `-w, --workers` | `min(CPU count, 4)` | Parallel worker threads for QR generation. The auto-picked default is capped at 4 because `qrcode.make()` is pure-Python (GIL-bound), so more than ~4 worker threads mostly contend on the GIL without adding real parallelism. Pass a larger value explicitly to override the cap on CPU-rich machines if profiling shows benefit. |
+| `-w, --workers` | `min(CPU count, 4)` | Parallel worker threads for QR generation. The auto-picked default is capped at 4 because QR matrix generation (`segno.make()`) is pure-Python (GIL-bound), so more than ~4 worker threads mostly contend on the GIL without adding real parallelism. Pass a larger value explicitly to override the cap on CPU-rich machines if profiling shows benefit. |
 | `-v, --verbose` | - | Print extra detail (progress bars always shown) |
 
 ### Decode (QR Video → File)
@@ -173,15 +173,20 @@ project-root/
 │   ├── decoder.py             # Video frame extraction → QR detect → LT decode → file rebuild
 │   ├── lt_codec.py            # LT fountain code primitives (PRNG, RSD, BlockGraph)
 │   ├── protocol.py            # V3 protocol serialization + base45 codec (legacy base64/COBS decode supported)
-│   └── qr_utils.py            # QR generation (OpenCV) + detection (WeChatQRCode)
+│   └── qr_utils.py            # QR generation (segno) + detection (WeChatQRCode)
 ├── tests/
 │   ├── test_lt_codec.py       # LT codec unit tests
 │   ├── test_protocol.py       # V3 protocol + base45 tests
 │   ├── test_decoder.py        # Decoder validation + probe strategy tests
-│   ├── test_roundtrip.py      # End-to-end roundtrip tests
+│   ├── test_roundtrip.py      # Pure LT codec roundtrip tests (no video I/O)
+│   ├── test_qr_generate.py    # QR generation correctness + glog(0) regression
+│   ├── test_e2e_encode_decode.py  # End-to-end encode→video→decode SHA256 tests
 │   └── test_optimizations.py  # Perf optimizations + WeChatQR + legacy-fallback tests
-└── benchmarks/
-    └── benchmark.py           # Performance benchmarks
+└── dev/
+    ├── benchmark.py           # Performance benchmarks
+    ├── perf-profile/          # cProfile hotspot analysis scripts
+    ├── test-container/        # Podman test container
+    └── wechatqrcode-mnn-poc/  # WeChatQRCode MNN acceleration POC
 ```
 
 ## Technical Details
@@ -236,14 +241,21 @@ Base45 (RFC 9285) is the default because QR's alphanumeric mode is denser per ch
 | Parameter | Value | Notes |
 |-----------|-------|-------|
 | Degree distribution | Robust Soliton Distribution | c=0.1, delta=0.5 |
-| PRNG | LCG (a=16807, m=2^31-1) | 5 warmup rounds to eliminate sequential seed bias |
+| PRNG | SplitMix64 mixer + LCG (a=16807, m=2^31-1) | Non-linear seed mixing eliminates sequential-seed correlation |
 | XOR | numpy vectorized + in-place | 10-50x faster than pure Python |
 | Decoding | Belief Propagation (Peeling) | Iterative elimination on bipartite graph |
 
 ## Testing
 
 ```bash
+# Unit tests (default — fast, no video I/O)
 uv run pytest tests/ -v
+
+# End-to-end encode→video→decode tests (10 KB, 100 KB, 500 KB + glog regression)
+uv run pytest -m e2e -v
+
+# Real-world phone-recording tests (requires fixture videos)
+uv run pytest -m slow -v
 ```
 
 ## License
