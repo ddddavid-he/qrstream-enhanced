@@ -50,3 +50,8 @@ dev/bench-*.json
 # under linux/amd64 emulation — see dev/ci-local.sh notes)
 qemu_*.core
 .venv-mnn/
+
+# Local benchmark / diagnostic work area (worktrees, virtualenvs,
+# result JSON).  Scripts may be versioned manually when they prove
+# reusable, but the default staging dir is local-only.
+.bench/
