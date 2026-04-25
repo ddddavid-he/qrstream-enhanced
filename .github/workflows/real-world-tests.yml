@@ -10,9 +10,8 @@ name: real-world-tests
 #     the per-(os × python-version) unit-test matrix would multiply
 #     CI time for coverage we don't need — these tests exercise
 #     OpenCV, not Python-version-specific code.
-#   * Splitting it out lets us trigger it on a narrower schedule
-#     (push to main + weekly cron) without throttling the fast
-#     feedback loop of the unit-test workflow.
+#   * Splitting it out keeps unit tests fast while still letting
+#     dev/main pushes and release gates exercise the real recordings.
 #
 # Gating vs. non-gating:
 #   * Most real-phone-v3 and all real-phone-v4 cases are gating:
@@ -27,7 +26,6 @@ on:
     branches:
       - main
       - dev
-      - 'dev/*'
     paths:
       # Only re-run when something that could actually affect the
       # end-to-end decode path changes.
@@ -41,7 +39,6 @@ on:
     branches:
       - main
       - dev
-      - 'dev/*'
     paths:
       - 'src/qrstream/**'
       - 'tests/test_real_recordings.py'
@@ -55,12 +52,23 @@ on:
     # over time even without our code moving).
     - cron: '0 6 * * 1'
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
+concurrency:
+  group: real-world-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   real-world:
+    if: |
+      !(
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/main' &&
+        startsWith(github.event.head_commit.message || '', 'skip-main-ci:')
+      )
     name: real-world (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
