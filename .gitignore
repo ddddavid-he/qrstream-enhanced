@@ -49,3 +49,4 @@ dev/bench-*.json
 # QEMU core dumps (produced by `uv python install` segfaulting
 # under linux/amd64 emulation — see dev/ci-local.sh notes)
 qemu_*.core
+.venv-mnn/
