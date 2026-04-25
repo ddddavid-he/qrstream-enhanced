@@ -32,9 +32,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - ubuntu-24.04-arm
+        # macos-latest is macos-14 arm64 (Apple Silicon, M2); it
+        # validates the darwin-arm64 opencv-contrib-python wheel —
+        # an architecture the rest of the Linux matrix doesn't
+        # exercise.  macos-13 (x86_64 Intel) is added only on full
+        # matrix runs because Intel macOS is niche and the arm64
+        # variant already catches almost all darwin-specific bugs.
+        #
+        # macOS runners DO NOT expose GPUs; any MNN Metal path is
+        # expected to fall back to MNN CPU or to OpenCV.  See
+        # ``mnn-tests.yml`` for explicit MNN-enabled validation.
+        os: ${{ fromJSON((github.event_name == 'workflow_call' || github.ref == 'refs/heads/main' || github.base_ref == 'main') && '["ubuntu-latest","ubuntu-24.04-arm","macos-latest","macos-13"]' || '["ubuntu-latest","ubuntu-24.04-arm","macos-latest"]') }}
         python-version: ${{ fromJSON((github.event_name == 'workflow_call' || github.ref == 'refs/heads/main' || github.base_ref == 'main') && '["3.10","3.11","3.12","3.13","3.14"]' || '["3.13"]') }}
 
     steps:
@@ -67,9 +75,10 @@ jobs:
         run: uv run pytest tests/ -v
 
       - name: Build distributions
-        # Build once per architecture on Python 3.13. The wheel is pure
-        # Python, so we only upload the amd64-built artifact.
-        if: matrix.python-version == '3.13'
+        # Build once per Linux architecture on Python 3.13. The wheel
+        # is pure Python, so one architecture-agnostic build is enough
+        # — macOS runners skip this step.
+        if: matrix.python-version == '3.13' && startsWith(matrix.os, 'ubuntu-')
         run: uv build
 
       - name: Upload built distributions

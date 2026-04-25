@@ -1,0 +1,147 @@
+name: mnn-tests
+
+# MNN detector path validation.
+#
+# The default test.yml / e2e-encode-decode.yml / real-world-tests.yml
+# workflows do NOT install MNN — it's not in ``pyproject.toml`` — so
+# any ``use_mnn=True`` test they exercise silently goes through the
+# "MNN unavailable → OpenCV fallback" code path.  That's useful
+# fallback coverage, but it doesn't actually validate the MNN
+# inference path itself.
+#
+# This workflow explicitly installs MNN and runs the detector
+# integration suite so the MNN-specific code (MNNQrDetector,
+# DetectorRouter.detect with MNN primary, _pad_bbox quiet-zone
+# expansion, the adaptive fallback controller's MNN-miss branch)
+# gets CI coverage on every PR that touches detector code.
+#
+# Platform matrix
+# ---------------
+# * ``ubuntu-latest`` (x86_64): Linux CPU backend, covers the most
+#   common production deployment surface.
+# * ``macos-latest`` (darwin arm64 / Apple Silicon): validates the
+#   darwin-arm64 MNN wheel and the _is_apple_platform() branch in
+#   ``mnn_backend.py``.  Note: the GitHub Actions macOS runner does
+#   NOT expose a GPU, so MNN will auto-select Metal, attempt to
+#   create a Metal session, and *may* fall back to CPU — either way
+#   is a valid outcome and exercises the right code path.  The full
+#   Metal performance numbers still need to be collected on real
+#   hardware (see dev/wechatqrcode-mnn-poc/results/).
+#
+# Trigger policy
+# --------------
+# MNN is a native wheel and the tests are slower than unit tests;
+# only run when detector code, MNN PoC, or this workflow itself
+# changes.  Push-to-main and the weekly cron of ``real-world-tests``
+# provide a second safety net.
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+    paths:
+      - 'src/qrstream/detector/**'
+      - 'src/qrstream/decoder.py'
+      - 'tests/test_detector.py'
+      - 'tests/test_detector_integration.py'
+      - 'dev/wechatqrcode-mnn-poc/**'
+      - '.github/workflows/mnn-tests.yml'
+      - 'pyproject.toml'
+      - 'uv.lock'
+  pull_request:
+    branches:
+      - main
+      - dev
+    paths:
+      - 'src/qrstream/detector/**'
+      - 'src/qrstream/decoder.py'
+      - 'tests/test_detector.py'
+      - 'tests/test_detector_integration.py'
+      - 'dev/wechatqrcode-mnn-poc/**'
+      - '.github/workflows/mnn-tests.yml'
+      - 'pyproject.toml'
+      - 'uv.lock'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mnn-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  mnn:
+    if: |
+      !(
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/main' &&
+        startsWith(github.event.head_commit.message || '', 'skip-main-ci:')
+      )
+    name: mnn (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest       # Linux CPU backend coverage
+          - macos-latest        # darwin arm64, exercises mnn_backend's Apple branch
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          # MNN 3.5 publishes wheels for 3.10–3.12; pin 3.12 so this
+          # job is independent of the main matrix's Python floor.
+          # Bump when MNN ships 3.13 wheels.
+          python-version: '3.12'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Install project + MNN
+        # ``uv sync`` installs the project dependencies; MNN is
+        # deliberately NOT in pyproject.toml (it's an optional
+        # acceleration backend, not a required runtime dep) so we
+        # install it explicitly here.  Minimum 3.5.0 matches the
+        # version the MNN PoC validated against (see
+        # dev/wechatqrcode-mnn-poc/results/m0_report.md); leaving
+        # the upper bound open lets pip pick a wheel that matches
+        # the runner's Python minor version.
+        run: |
+          uv sync --dev --python ${{ env.pythonLocation }}/bin/python
+          uv pip install --python ${{ env.pythonLocation }}/bin/python 'MNN>=3.5.0'
+
+      - name: Smoke-test MNN import
+        # Catches the most common failure mode: wheel installed but
+        # refuses to load at runtime (typically a glibc / libc++
+        # mismatch).  Do this before any pytest collection so a
+        # broken wheel produces a clear error instead of 200 cryptic
+        # import-time test errors.
+        run: |
+          uv run python -c "import MNN; print('MNN:', MNN.version())"
+
+      - name: Run detector unit tests
+        # Fast unit layer, covers _pad_bbox, DetectorRouter routing,
+        # adaptive fallback thresholds, etc. — MNN-aware but does
+        # not need actual MNN models.
+        run: uv run pytest -v tests/test_detector.py
+
+      - name: Run detector integration tests (fast + slow)
+        # Includes ``@pytest.mark.slow`` MNN end-to-end tests gated
+        # on MNN availability.  With MNN installed above they must
+        # run and must pass.  The ``-m "slow or not slow"`` idiom
+        # overrides pyproject.toml's default ``-m "not slow"`` so
+        # slow tests are actually collected.
+        run: uv run pytest -v -m "slow or not slow" tests/test_detector_integration.py
+
+    # Models + MNN inference add maybe 30 s on top of unit tests;
+    # 15 min is a generous cap that catches genuine hangs.
+    timeout-minutes: 15

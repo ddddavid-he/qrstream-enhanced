@@ -15,9 +15,11 @@
 - `WeChatQRCode` 的两个 CNN 都是通过 `OpenCV DNN + Caffe` 加载：
   - `src/detector/ssd_detector.cpp` -> `dnn::readNetFromCaffe(...)`
   - `src/scale/super_scale.cpp` -> `dnn::readNetFromCaffe(...)`
-- **M0 完成**：两个 Caffe 模型已转成 `.mnn`，输出与 OpenCV DNN 对齐；Apple M4 Pro 上 MNN Metal 实测比 WeChatQRCode 快 7~126 倍（详见 `results/m0_report.md`）
+- **M0 完成**：两个 Caffe 模型已转成 `.mnn`，输出与 OpenCV DNN 对齐；Apple M4 Pro 上 MNN Metal **detector 单次推理**比 WeChatQRCode 全套快 7~126 倍（详见 `results/m0_report.md`；注意这是 detect-only 比值，不是 end-to-end）
 - **M1 完成**：`DetectorRouter` 已真正接入 `ThreadPoolExecutor` worker，`--mnn` 显式开关生效；Linux + MNN CPU 端到端 decode 通过（详见 `results/m1_report.md`）
-- 第一条 PoC 主线 `Caffe -> MNN` 已完整验证，后续进入 M2 打包落地与 CPU 正式版
+- **M1.5 完成**：修复 `MNNQrDetector` tight-crop 丢 quiet-zone 导致的 0% 解码命中，端到端 MNN CPU –21% / MNN Metal –45%；`DetectorRouter` 加自适应 `opencv_fallback`；MNN 路径下跳过 sandbox（详见 `results/quiet_zone_fix_report.md`、`results/adaptive_fallback_report.md`）
+- **M1.75 规划中**：替换 `MNNQrDetector._cpu_decode` 里的 OpenCV WeChatQRCode 整套 pipeline 为轻量 QR 解码器（预期把每帧 ~74 ms 压到 ~12 ms，end-to-end 再提速 2–3×）——详见 Milestone 1.75。这是 **M5 batch pipeline 的前置条件**。
+- 第一条 PoC 主线 `Caffe -> MNN` 已完整验证，后续进入 M1.75（decode 路径替换）→ M2（打包）→ M5（batch）
 
 ### 为什么优先选 MNN
 
@@ -177,6 +179,122 @@ flowchart TD
 
 详见 `results/m1_report.md`。
 
+#### Milestone 1.5：命中率与 fallback 成本修复（已完成）
+
+目标：end-to-end 测得 `--mnn` 比 `OpenCV` 慢的现象必须收敛到"M1 达成其合同范围内"的水平，再判断下一步是否需要进一步优化。
+
+实际发现与落地（见 `results/quiet_zone_fix_report.md` + `results/adaptive_fallback_report.md`）：
+
+1. **tight-crop 丢 quiet zone**（`fix(mnn): pad bbox by quiet-zone margin`）
+   - MNN SSD 给出的 bbox 紧贴外部 finder，直接 `frame[y0:y1, x0:x1]` 交给 ZXing 会切掉 ISO/IEC 18004 要求的 4 模块静默区。
+   - IMG_9425 抽样：`pad=0% → 0/100`，`pad=5% → 93/100`，`pad≥15% → 95/100` = OpenCV 全帧上限。
+   - 修复：`_QUIET_ZONE_PAD_RATIO = 0.15`，在 `_clamp_bbox` 之后、裁剪之前按 bbox 短边扩展并 re-clamp；失败时 tight-crop 兜底重试。
+   - 跨样本验证：`IMG_9425 / v061 / v070 / v073-10kB / v073-100kB / v073-300kB` 共 6 个真实样本，production 路径 6/6 追平或微超 OpenCV 全帧命中率。
+
+2. **自适应 `opencv_fallback`**（`feat(router): adaptive opencv_fallback`）
+   - padding 修完后 MNN 的 miss 绝大多数是 OpenCV 也救不回的脏帧，默认 fallback 每次都跑一次 OpenCV 纯浪费。
+   - `DetectorRouter` 增加滚动窗口 rescue 率监控：`warmup=64 / window=256 / disable=2% / enable=5%` 双阈值滞回，`probe_interval=64` 保证压制期仍能感知 rate 恢复。
+   - IMG_9425 上 MNN miss 中的 OpenCV 调用次数从 779 次压到 52 次（~15× 减少）。
+   - 7 条单元回归锁定 disable / re-enable / probe / 滞回 / warmup / opt-out / status。
+
+3. **MNN 路径跳过 sandbox**
+   - `detect_isolation="on"` 仅在 `qr_router is None` 时启 `SandboxedDetector`。
+   - MNN 路径由 `MNNQrDetector` 自己做边界安全，router 里的 OpenCV fallback 是进程内调用，sandbox 帮不到它，反而在某些 macOS 环境下 `import cv2` 阶段假 crash 3 个 helper。
+
+IMG_9425.MOV 端到端（SHA256 匹配源文件）：
+
+| 路径 | 修复前 | M1.5 落地后 |
+|---|---:|---:|
+| OpenCV 全帧 | 23.41 s | 25.65 s |
+| MNN CPU | 30.05 s | **23.67 s** (–21.2%) |
+| MNN Metal | 48.31 s | **26.34 s** (–45.5%) |
+
+#### Milestone 1.75：替换 `MNNQrDetector._cpu_decode` 的 ZXing 路径（下一步优先级最高）
+
+##### 背景 — 为什么 end-to-end 远不如 M0 单帧数字亮眼
+
+M0 报告里 `WeChatQR 49 ms → MNN Metal 1.3 ms → batch=16 0.39 ms → 126×` 是**纯 CNN detector 单次推理**的加速比。IMG_9425 上拆 M1.5 后的数据（`results-host/detect_breakdown_after_padding.json`）：
+
+| 阶段 | avg ms/frame |
+|---|---:|
+| MNN CPU detect-only（CNN 推理） | **2.9 ms** |
+| OpenCV 全帧 WeChatQRCode.detectAndDecode | 91.7 ms |
+| **MNN production（detect + crop + pad + `_cpu_decode`）** | **74.0 ms** |
+
+`_cpu_decode` 当前实现是：
+
+```python
+detector = cv2.wechat_qrcode_WeChatQRCode()
+results, _ = detector.detectAndDecode(region)
+```
+
+MNN 已经给出 bbox 之后，我们在 cropped region 上**又整套跑了一遍 OpenCV 的 WeChatQRCode**——包括它自己的 SSD detect + SR + ZXing decode。于是：
+
+- 每帧 74 ms 里 CNN 推理只占 2.9 ms（≈ 4%）。
+- 其余 71 ms 是在 MNN 已选好的 crop 上**再跑一次完整 OpenCV pipeline**。
+- Amdahl 定律：把 4% 的环节加速 38× 整体只能省 ~3.9% → 和实测的 MNN CPU "1.08× OpenCV" 完全对得上。
+- Metal `DetectionOutput` 层不支持 GPU 会回落 CPU，加上 per-frame session 的 `copyFrom/copyToHostTensor` IO 没被摊薄（要靠 M5 的 batch），所以 Metal 在 end-to-end 反而略慢于 MNN CPU。
+
+**结论：在 `_cpu_decode` 被替换之前，继续做 M5 batch 或扩展 GPU backend 都会被 `cpu_decode` 的 71 ms 吃掉，重复犯 M1 的认知错误。**
+
+##### 目标
+
+把 `_cpu_decode` 从 "整套 OpenCV WeChatQRCode" 替换为"只做 QR 解码"的轻量路径。MNN 已经提供了精确 bbox + padded crop，根本不需要再跑一次 detector/SR。
+
+##### 调研方案（执行前先验证，不要直接替换）
+
+候选解码器，按"信心"由高到低：
+
+1. **`opencv.QRCodeDetector` / `cv2.QRCodeDetector`（原生 OpenCV，非 contrib）**
+   - 轻量，不带 ZXing 的 wild-memory-access bug（`opencv_contrib#3570` 只出现在 `wechat_qrcode_WeChatQRCode`）。
+   - 只能解 QR（不是 Data Matrix / PDF417）—— 对我们正好够用。
+   - 已随 `opencv-contrib-python` 一起分发，零新依赖，零 wheel 风险。
+   - 未知：对于 WeChat 系列 detector 能解、OpenCV 原生 detector 解不出来的"边缘质量"帧占比多少 —— 需要实测。
+
+2. **`zxing-cpp`（纯 C++ ZXing C++ port，带 Python binding）**
+   - Apache-2.0，维护活跃（2025 年仍有 release），比 OpenCV 里的 ZXing 新很多。
+   - 对 QR 的识别率据多方 benchmark 高于 OpenCV 原生 QRCodeDetector；API 直接输入 grayscale ndarray。
+   - 引入一个 C++ wheel 依赖，需要分别验证 linux-x86_64 / linux-aarch64 / macos-arm64 / macos-x86_64 的可用性。
+   - 同样无 `wechat_qrcode_WeChatQRCode` 的 native-crash 问题。
+
+3. **`pyzbar`（`libzbar-0` 的 Python wrapper）**
+   - 老牌、稳定，支持多种 barcode 而不只 QR。
+   - 需要系统级 `libzbar-0`（`brew install zbar` / `apt install libzbar0`），分发比前两者复杂。
+   - 识别率在 low-quality 帧上一般不如 ZXing。
+
+4. **手写 Finder Pattern locator + reed-solomon decoder**
+   - 纯 Python / Cython；依赖最少，但开发成本高，不作为首选。
+
+##### 调研验收项
+
+新建 `dev/wechatqrcode-mnn-poc/scripts/probe_cpu_decoders.py`：
+
+- 输入：`IMG_9425.MOV` + 5 个 `tests/fixtures/real-phone-v[34]/*.mp4`。
+- 对每个样本抽样 200 帧，用 MNN CPU 先拿 padded crop（复用 M1.5 后的 padding 逻辑）。
+- 每个候选解码器分别跑 200 个 crop，记录：
+  - 识别率（`hit_rate`）、avg_ms、p95_ms。
+  - **重要**：记录 "仅 OpenCV WeChatQRCode 能解、候选不能解" 的帧集合（判断候选对边缘帧的鲁棒性）。
+- 输出：`results/cpu_decoder_survey.md`，给出首选 + 备选的组合策略。
+
+##### 落地方案（候选确定后）
+
+约束：
+
+- **不破坏 `_cpu_decode` 当前错误兜底的 API 契约**——失败时返回 `None`，由 `MNNQrDetector.detect` 的 padded → tight 重试路径继续保底。
+- **保留 OpenCV WeChatQRCode 作为二级 fallback**：候选解码器 miss 时再调一次 WeChatQRCode（概率很低但补齐识别率长尾）。这条回退只在 M1.5 的自适应控制器之外发生，不进 `DetectorRouter` 统计，由 `_cpu_decode` 内部自包含。
+- **继续走 `DetectorRouter.opencv_fallback` 机制**：crop 级二级 fallback 失败后，router 层的帧级 OpenCV fallback（自适应控制）仍有机会再救一次。
+
+##### 5.4 量化验收项
+
+- `MNNQrDetector.detect` 单帧 avg P50 ≤ 15 ms（目前 74 ms；预期 ≈ CNN 2.9 ms + crop/SR 2–3 ms + 新 decoder 5–10 ms）。
+- IMG_9425 end-to-end：MNN CPU ≤ 12 s、MNN Metal ≤ 10 s（目前 23.67 / 26.34 s，预期 2–3× 进一步提速）。
+- 6 个跨样本 `production` 命中率不低于 M1.5 的测量值（保证不为速度牺牲识别率）。
+- 所有 fast 回归继续全绿；新增 `test_cpu_decode_contract.py` 覆盖 "candidate 失败 → WeChatQRCode 保底 → None" 的决策树。
+
+##### 与 M5 的顺序锁定
+
+**M1.75 必须先于 M5 完成。** 否则 M5 把 CNN 推理从 2.9 ms 压到 0.4 ms，每帧也只能省 2.5 ms（仍被 71 ms 的 `_cpu_decode` 主导），end-to-end 几乎看不到动静——会再一次复现当前这种 "benchmark 很漂亮但 end-to-end 几乎没动" 的困局。
+
 #### Milestone 2：CPU 正式版与打包落地
 
 目标：把默认包策略与显式 `cpu` 版本整理清楚，形成稳定分发模型；同时为 M5 / M6 预留最小非破坏抽象。
@@ -217,6 +335,8 @@ flowchart TD
 #### Milestone 5：流水线优化与 Batch 加速
 
 目标：在不牺牲稳定性的前提下，再追求吞吐和资源利用率；同时为未来的**流式输入输出**能力预留架构接口。
+
+> **前置条件**：必须先完成 **Milestone 1.75**（替换 `MNNQrDetector._cpu_decode` 的 ZXing 路径）。否则 batch 把 CNN 推理从 per-frame ~3 ms 压到 ~0.4 ms，端到端每帧也只能省 ~2.5 ms（绝大多数耗时仍在 ZXing decode），batch 的加速会被"稀释 20×"出现在测得的数字里——这正是 M1 的端到端表现远低于 M0 单帧加速比的根本原因。M1.75 把 decode 成本从 ~71 ms 降到 ~10 ms 后，M5 的 batch 才能真正按 M0 预测的比例转化为端到端收益。
 
 本 Milestone 的核心观察是：**M0 benchmark 已经证明 MNN Metal batch 能把 per-frame 延迟从 1.26 ms 降到 0.39 ms（batch=16，3.2×）**。但 M1 的 `ThreadPoolExecutor` 把 worker 设计成独立的短任务（一个 worker 收一帧、推一帧、返回一帧），没法吃到这条加速。M5 把 CNN 推理单独抽成异步 pipeline 阶段，与帧读取、后处理解耦。
 
