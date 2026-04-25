@@ -28,10 +28,33 @@ from tqdm import tqdm
 
 from .lt_codec import PRNG, BlockGraph, DEFAULT_C, DEFAULT_DELTA
 from .protocol import unpack
-from .qr_utils import try_decode_qr
+from .qr_utils import try_decode_qr, DETECTOR_CAN_CRASH
+from . import qr_sandbox
 
 
 _PROGRESS_BAR_THRESHOLD = 512
+
+# ── crash-isolation dispatch hook ────────────────────────────────
+# Worker functions call ``_dispatch_detect`` instead of
+# ``try_decode_qr`` directly. :func:`extract_qr_from_video` swaps
+# this to :meth:`qr_sandbox.SandboxedDetector.detect` when
+# ``detect_isolation != 'off'`` and restores it on exit, so the
+# sandbox is transparent to ``_worker_detect_qr`` /
+# ``_worker_detect_qr_clahe``.
+
+
+def _in_process_detect(_frame_idx: int, frame: "np.ndarray") -> str | None:
+    return try_decode_qr(frame)
+
+
+_dispatch_detect = _in_process_detect
+
+
+def _validate_isolation_mode(mode: str) -> None:
+    if mode not in ("on", "off"):
+        raise ValueError(
+            f"detect_isolation must be 'on' or 'off', got {mode!r}"
+        )
 
 # Maximum frames the reader thread may prefetch ahead of the worker pool
 # for the main scan / targeted recovery.  Kept small so we don't balloon
@@ -279,7 +302,7 @@ def _worker_detect_qr(frame_data):
     if frame is None:
         return (frame_idx, None, None)
 
-    qr_data = try_decode_qr(frame)
+    qr_data = _dispatch_detect(frame_idx, frame)
 
     if qr_data is None:
         return (frame_idx, None, None)
@@ -344,7 +367,7 @@ def _worker_detect_qr_clahe(frame_data):
     if not boosted.flags['C_CONTIGUOUS']:
         boosted = np.ascontiguousarray(boosted)
 
-    qr_data = try_decode_qr(boosted)
+    qr_data = _dispatch_detect(frame_idx, boosted)
     if qr_data is None:
         return (frame_idx, None, None)
 
@@ -633,7 +656,8 @@ def _probe_sample_rate(video_path: str, workers: int,
 
 
 def extract_qr_from_video(video_path: str, sample_rate: int = 0,
-                           verbose: bool = False, workers: int | None = None):
+                           verbose: bool = False, workers: int | None = None,
+                           *, detect_isolation: str = "on"):
     """Extract unique QR code payloads from a video file.
 
     Uses an LT decoder internally for early termination: stops scanning
@@ -647,9 +671,19 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
         sample_rate: Process every Nth frame. 0 = auto-detect (default).
         verbose: Print progress details.
         workers: Number of parallel worker processes.
+        detect_isolation: ``'on'`` (default) runs QR detection in a pool
+            of subprocess helpers so a native crash in
+            ``cv2.wechat_qrcode_WeChatQRCode`` (see
+            ``opencv_contrib#3570``) degrades to a single dropped frame
+            instead of killing the decode process. ``'off'`` runs
+            detection in-process (slightly faster but unsafe on
+            camera-captured inputs).
 
     Returns a list of raw block byte strings.
     """
+    global _dispatch_detect
+    _validate_isolation_mode(detect_isolation)
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise FileNotFoundError(f"Cannot open video file: {video_path}")
@@ -666,116 +700,143 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
         print(f"Video: {total_frames} frames, {src_fps:.1f} FPS, {duration:.1f}s")
         print(f"Using {workers} worker processes")
 
-    seen_seeds = set()
-    unique_blocks = []
-    decoded_count = 0
-    no_detect_count = 0
-    lt_decoder = LTDecoder()
-    seed_frame_map: dict[int, int] = {}  # observed seed → first frame index
+    sandbox = None
+    original_dispatch = _dispatch_detect
+    if detect_isolation == "on":
+        try:
+            sandbox = qr_sandbox.SandboxedDetector(pool_size=3)
+            _dispatch_detect = sandbox.detect
+        except Exception as exc:
+            print(
+                f"[sandbox] failed to initialise ({exc}); "
+                f"falling back to in-process detection."
+            )
+            sandbox = None
+    # else: 'off' → stay with _in_process_detect
 
-    # ── Auto sample_rate probe ────────────────────────────────────
-    probe_results = []
-    probe_count = 0
-    leading_frames_probed = 0
-    detect_rate = 1.0
-    avg_repeat = 1.0
+    try:
+        seen_seeds = set()
+        unique_blocks = []
+        decoded_count = 0
+        no_detect_count = 0
+        lt_decoder = LTDecoder()
+        seed_frame_map: dict[int, int] = {}  # observed seed → first frame index
 
-    if sample_rate <= 0:
-        (auto_rate, probe_results, probe_count,
-         leading_frames_probed, detect_rate, avg_repeat) = _probe_sample_rate(
-            video_path, workers, verbose)
-        sample_rate = auto_rate
-        if verbose:
-            print(f"  Using auto sample_rate={sample_rate}")
+        # ── Auto sample_rate probe ────────────────────────────────
+        probe_results = []
+        probe_count = 0
+        leading_frames_probed = 0
+        detect_rate = 1.0
+        avg_repeat = 1.0
 
-        # Feed probe results into decoder
-        for fidx, block_bytes, seed in probe_results:
-            if block_bytes is not None and seed is not None:
-                if seed not in seed_frame_map:
-                    seed_frame_map[seed] = fidx
-                if seed not in seen_seeds:
-                    seen_seeds.add(seed)
-                    unique_blocks.append(block_bytes)
-                    decoded_count += 1
-                    try:
-                        done, _ = lt_decoder.decode_bytes(block_bytes, skip_crc=True)
-                        if done:
-                            print(f"Extraction done (during probe): "
-                                  f"{probe_count} sampled frames, "
-                                  f"{decoded_count} unique blocks")
-                            return unique_blocks
-                    except (ValueError, struct.error):
-                        pass
-            else:
-                no_detect_count += 1
+        if sample_rate <= 0:
+            (auto_rate, probe_results, probe_count,
+             leading_frames_probed, detect_rate, avg_repeat) = _probe_sample_rate(
+                video_path, workers, verbose)
+            sample_rate = auto_rate
+            if verbose:
+                print(f"  Using auto sample_rate={sample_rate}")
 
-    if verbose and probe_count > 0:
-        pct = lt_decoder.progress * 100
-        print(f"  After probe: {decoded_count} unique blocks, "
-              f"progress={pct:.1f}%")
+            # Feed probe results into decoder
+            for fidx, block_bytes, seed in probe_results:
+                if block_bytes is not None and seed is not None:
+                    if seed not in seed_frame_map:
+                        seed_frame_map[seed] = fidx
+                    if seed not in seen_seeds:
+                        seen_seeds.add(seed)
+                        unique_blocks.append(block_bytes)
+                        decoded_count += 1
+                        try:
+                            done, _ = lt_decoder.decode_bytes(block_bytes, skip_crc=True)
+                            if done:
+                                print(f"Extraction done (during probe): "
+                                      f"{probe_count} sampled frames, "
+                                      f"{decoded_count} unique blocks")
+                                return unique_blocks
+                        except (ValueError, struct.error):
+                            pass
+                else:
+                    no_detect_count += 1
 
-    # ── Main scan (remaining frames) ─────────────────────────────
-    pbar = tqdm(total=total_frames, desc="Scan",
-                unit="f", dynamic_ncols=True)
+        if verbose and probe_count > 0:
+            pct = lt_decoder.progress * 100
+            print(f"  After probe: {decoded_count} unique blocks, "
+                  f"progress={pct:.1f}%")
 
-    if leading_frames_probed > 0:
-        pbar.update(leading_frames_probed)
+        # ── Main scan (remaining frames) ─────────────────────────
+        pbar = tqdm(total=total_frames, desc="Scan",
+                    unit="f", dynamic_ncols=True)
 
-    early_done = False
+        if leading_frames_probed > 0:
+            pbar.update(leading_frames_probed)
 
-    # Wrap _read_frames so pbar updates reflect the current video
-    # position even when frames are skipped by sample_rate.
-    def _tracking_frame_iter():
-        last_reported = leading_frames_probed - 1
-        for frame_data in _read_frames(
-                video_path, sample_rate, total_frames,
-                start_frame=leading_frames_probed):
-            skipped = frame_data[0] - last_reported - 1
-            if skipped > 0:
-                pbar.update(skipped)
-            last_reported = frame_data[0]
-            yield frame_data
-        # After iteration, advance pbar for any frames past the last
-        # sampled one (they were read but not yielded).
-        remaining = total_frames - (last_reported + 1)
-        if remaining > 0:
-            pbar.update(remaining)
+        early_done = False
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        decoded_count, no_detect_count, early_done = _stream_scan(
-            executor, _tracking_frame_iter(),
-            seen_seeds, unique_blocks,
-            decoded_count, no_detect_count, lt_decoder, pbar, verbose,
-            seed_frame_map, workers)
-        if early_done and verbose:
-            tqdm.write(
-                "  Early termination: all source blocks recovered!")
+        # Wrap _read_frames so pbar updates reflect the current video
+        # position even when frames are skipped by sample_rate.
+        def _tracking_frame_iter():
+            last_reported = leading_frames_probed - 1
+            for frame_data in _read_frames(
+                    video_path, sample_rate, total_frames,
+                    start_frame=leading_frames_probed):
+                skipped = frame_data[0] - last_reported - 1
+                if skipped > 0:
+                    pbar.update(skipped)
+                last_reported = frame_data[0]
+                yield frame_data
+            # After iteration, advance pbar for any frames past the last
+            # sampled one (they were read but not yielded).
+            remaining = total_frames - (last_reported + 1)
+            if remaining > 0:
+                pbar.update(remaining)
 
-    pbar.close()
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            decoded_count, no_detect_count, early_done = _stream_scan(
+                executor, _tracking_frame_iter(),
+                seen_seeds, unique_blocks,
+                decoded_count, no_detect_count, lt_decoder, pbar, verbose,
+                seed_frame_map, workers)
+            if early_done and verbose:
+                tqdm.write(
+                    "  Early termination: all source blocks recovered!")
 
-    total_processed = decoded_count + no_detect_count
-    status = " (early termination)" if early_done else ""
-    print(f"Extraction done{status}: {total_frames} frames "
-          f"({total_processed} sampled, sample_rate={sample_rate}), "
-          f"{decoded_count} unique blocks, "
-          f"{no_detect_count} missed")
+        pbar.close()
 
-    # ── Targeted recovery for missing seeds ───────────────────────
-    # Triggered whenever the main scan finished without LT converging,
-    # regardless of ``sample_rate``.  The previous ``sample_rate > 1``
-    # guard skipped recovery on videos where the probe decided to read
-    # every frame (sample_rate=1) — but such a video can still land on
-    # a pathological ~3% LT seed subset (see v070 amd64 regression)
-    # and recovery has a cheap CLAHE-boosted rescan to offer even when
-    # the main scan already visited every frame.
-    if (not early_done and lt_decoder.initialized
-            and not lt_decoder.done):
-        unique_blocks, decoded_count, no_detect_count = _targeted_recovery(
-            video_path, total_frames, src_fps, workers,
-            seen_seeds, unique_blocks, decoded_count, no_detect_count,
-            lt_decoder, avg_repeat, verbose, seed_frame_map)
+        total_processed = decoded_count + no_detect_count
+        status = " (early termination)" if early_done else ""
+        print(f"Extraction done{status}: {total_frames} frames "
+              f"({total_processed} sampled, sample_rate={sample_rate}), "
+              f"{decoded_count} unique blocks, "
+              f"{no_detect_count} missed")
 
-    return unique_blocks
+        # ── Targeted recovery for missing seeds ───────────────────
+        # Triggered whenever the main scan finished without LT converging,
+        # regardless of ``sample_rate``.  The previous ``sample_rate > 1``
+        # guard skipped recovery on videos where the probe decided to read
+        # every frame (sample_rate=1) — but such a video can still land on
+        # a pathological ~3% LT seed subset (see v070 amd64 regression)
+        # and recovery has a cheap CLAHE-boosted rescan to offer even when
+        # the main scan already visited every frame.
+        if (not early_done and lt_decoder.initialized
+                and not lt_decoder.done):
+            unique_blocks, decoded_count, no_detect_count = _targeted_recovery(
+                video_path, total_frames, src_fps, workers,
+                seen_seeds, unique_blocks, decoded_count, no_detect_count,
+                lt_decoder, avg_repeat, verbose, seed_frame_map)
+
+        return unique_blocks
+    finally:
+        _dispatch_detect = original_dispatch
+        if sandbox is not None:
+            crashes = sandbox.crash_count
+            sandbox.close()
+            if crashes > 0:
+                # Unconditional print (not gated on --verbose).
+                print(
+                    f"[sandbox] detector crashed {crashes} time(s) "
+                    f"during decode; affected frames treated as "
+                    f"no-detect. Decoding proceeded normally."
+                )
 
 
 def _estimate_frame_for_seed(seed: int, seed_frame_map: dict[int, int],

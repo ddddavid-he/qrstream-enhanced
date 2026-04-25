@@ -258,6 +258,21 @@ uv run pytest -m e2e -v
 uv run pytest -m slow -v
 ```
 
+### Decoder native crashes
+
+If `qrs decode` exits with `trace trap` or a SIGSEGV/SIGTRAP message,
+you are hitting a known unfixed crash in the WeChat QR detector
+bundled with `opencv_contrib` (upstream issue `opencv_contrib#3570`).
+Since v0.7.7, `qrs decode` runs detection in subprocess helpers by
+default, so a single crashing frame is caught and treated as a dropped
+frame — the decode continues and completes as long as LT overhead (see
+`--overhead`) is ≥ 1.5.
+
+To see whether the subprocess sandbox caught any crashes, look for a
+summary line like `[sandbox] detector crashed N time(s) during decode`.
+If you believe the sandbox overhead is unnecessary on your input, you
+can disable it at your own risk with `--detect-isolation off`.
+
 ## License
 
 MIT
