@@ -444,3 +444,31 @@ No direct reproducer on the current dev box; the fix has to be
 validated on macOS arm64 (or by forcing the sandbox path on Linux
 and asserting the helper crash-recovery logic behaves as
 specified, which can run in Linux CI).
+
+---
+
+## 10. Resolution
+
+Implemented in branch `fix/wechat-native-crash`, PR to `dev`.
+
+Approach: section §7 option (A), subprocess-isolated detector, default
+on, overridable with `--detect-isolation off`.
+
+Key design deviations from §7 (A) as written:
+
+- No `auto` mode; sandbox is ON on all platforms by default (see
+  handoff decision #1). Rationale: the native crash is not
+  platform-specific in principle — it's a content-dependent native
+  OOB read that happens to fire more often on macOS arm64 due to
+  ASLR but can fire anywhere.
+- `pool_size = 3` (not 2) to provide more headroom during helper
+  respawn without materially increasing memory footprint.
+- Unconditional one-line summary when any crash was caught, not
+  gated on `--verbose`.
+- Minimal future-proofing: single `DETECTOR_CAN_CRASH: bool`
+  constant in `qr_utils.py`. No `Detector` abstract base class, no
+  plugin registry; those are postponed until an actual
+  non-crashing detector (e.g. MNN) is ready to land.
+
+The §7 option (B) `skip_crc` hardening and option (C) new fixture
+video were explicitly out of scope for this PR.

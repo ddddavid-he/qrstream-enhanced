@@ -255,6 +255,19 @@ uv run pytest -m e2e -v
 uv run pytest -m slow -v
 ```
 
+### 解码器原生崩溃（Troubleshooting）
+
+如果 `qrs decode` 出现 `trace trap`、`SIGSEGV` 或 `SIGTRAP` 相关退出消息，
+说明你正撞上 `opencv_contrib` 自带 WeChat QR 检测器的一个上游未修复 bug
+（issue `opencv_contrib#3570`）。从 v0.7.7 开始，`qrs decode` 默认会把
+检测放进子进程 helper 池中运行：单个导致崩溃的帧会被捕获并当作丢帧处理，
+只要 LT 冗余（`--overhead`）≥ 1.5，解码过程会自动继续并最终完成。
+
+如果想确认沙箱在本次解码中是否实际捕获过崩溃，可以在标准输出里寻找类似
+`[sandbox] detector crashed N time(s) during decode` 的汇总行。如果你确信
+自己的输入足够稳定、不想承担沙箱开销，可以通过 `--detect-isolation off`
+主动关闭它（风险自负）。
+
 ## 许可证
 
 MIT
