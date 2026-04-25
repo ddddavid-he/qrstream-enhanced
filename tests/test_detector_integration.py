@@ -212,6 +212,222 @@ class TestRouterFallbackPolicy:
         assert stats["opencv_attempts"] == 0
 
 
+# ── Adaptive opencv_fallback controller ──────────────────────────
+
+
+class _ScriptedOpenCV:
+    """Replacement for ``router._opencv_detector`` whose per-call
+    verdict is dictated by a caller-provided boolean list.
+
+    Lets a test drive the router through an exact rescue pattern
+    without needing real image data or a real WeChatQRCode model.
+    """
+
+    DETECTOR_CAN_CRASH = False
+
+    def __init__(self, script: list[bool]):
+        self._script = list(script)
+        self._i = 0
+        self.calls = 0
+
+    def detect(self, frame: np.ndarray) -> DetectResult:
+        self.calls += 1
+        if self._i < len(self._script):
+            hit = self._script[self._i]
+            self._i += 1
+        else:
+            hit = False
+        return DetectResult(
+            text="ok" if hit else None, backend="scripted-opencv",
+        )
+
+    def is_available(self) -> bool:
+        return True
+
+    @property
+    def name(self) -> str:
+        return "scripted-opencv"
+
+
+def _make_router(
+    *, script: list[bool],
+    warmup: int = 8, window: int = 32,
+    disable_rate: float = 0.1, enable_rate: float = 0.3,
+    probe_interval: int = 8,
+    adaptive: bool = True,
+    opencv_fallback: bool = True,
+) -> tuple[DetectorRouter, _ScriptedOpenCV, _FakeDetector]:
+    """Build a router with a scripted OpenCV and an always-miss MNN.
+
+    Small warmup/window values keep the tests fast while still
+    exercising the full threshold logic.
+    """
+    router = DetectorRouter(
+        use_mnn=True,
+        opencv_fallback=opencv_fallback,
+        adaptive_fallback=adaptive,
+        adaptive_warmup=warmup,
+        adaptive_window=window,
+        adaptive_disable_rate=disable_rate,
+        adaptive_enable_rate=enable_rate,
+        adaptive_probe_interval=probe_interval,
+    )
+    cv_stub = _ScriptedOpenCV(script)
+    router._opencv_detector = cv_stub
+    mnn_stub = _FakeDetector(text=None)
+    router._mnn_detector = mnn_stub
+    router._mnn_init_attempted = True
+    return router, cv_stub, mnn_stub
+
+
+class TestAdaptiveFallback:
+    """Rolling rescue-rate controls whether MNN misses retry OpenCV.
+
+    Regression guard for the observation that on IMG_9425.MOV the
+    default path ran OpenCV 779 times per video, rescuing zero
+    frames.  With the adaptive controller on, that wasted work
+    should stop after the warmup window.
+    """
+
+    def _drive(self, router: DetectorRouter, n: int) -> None:
+        frame = np.zeros((32, 32, 3), dtype=np.uint8)
+        for _ in range(n):
+            router.detect(frame)
+
+    def test_disables_fallback_when_rescue_rate_stays_low(self):
+        # OpenCV will never save an MNN miss.
+        router, cv_stub, _ = _make_router(
+            script=[False] * 100,
+            warmup=8, window=16, disable_rate=0.1,
+        )
+
+        self._drive(router, 20)
+
+        stats = router.get_stats()
+        assert stats["mnn_attempts"] == 20
+        assert stats["mnn_fallbacks"] == 20
+        # OpenCV should only be asked while the controller was still
+        # in warmup; after that the adaptive switch flips off and
+        # OpenCV stops being called.
+        assert stats["opencv_attempts"] < 20
+        # Must have seen at least the warmup budget.
+        assert stats["opencv_attempts"] >= 8
+        assert stats["adaptive_disables"] >= 1
+        assert stats["opencv_rescues"] == 0
+
+    def test_reenables_fallback_when_rescue_rate_recovers(self):
+        # First burst looks hopeless (disable), then OpenCV starts
+        # rescuing every frame.  The controller must probe OpenCV
+        # periodically while suppressed so it notices the recovery.
+        bad = [False] * 16
+        good = [True] * 64
+        router, cv_stub, _ = _make_router(
+            script=bad + good, warmup=8, window=12,
+            disable_rate=0.1, enable_rate=0.3,
+            probe_interval=2,
+        )
+
+        self._drive(router, len(bad) + len(good))
+
+        stats = router.get_stats()
+        assert stats["adaptive_disables"] >= 1
+        assert stats["adaptive_enables"] >= 1
+        # Final state must be active again; otherwise the router is
+        # stuck off and we lose MNN-miss rescues forever.
+        with router._stats_lock:
+            assert router._fallback_active is True
+
+    def test_hysteresis_prevents_flapping(self):
+        # Rescue rate hovers near the disable threshold: with
+        # disable_rate=0.1 and enable_rate=0.3, rate=0.15 must NOT
+        # cause fallback to re-enable once it's been turned off.
+        #
+        # Pattern: start with zeros to force disable, then a band
+        # where ~15% of misses rescue.
+        zeros = [False] * 20
+        mild = ([True] + [False] * 6) * 4  # ~14% hit rate
+        script = zeros + mild
+        router, _, _ = _make_router(
+            script=script, warmup=8, window=20,
+            disable_rate=0.1, enable_rate=0.3,
+        )
+
+        self._drive(router, len(script))
+
+        stats = router.get_stats()
+        assert stats["adaptive_disables"] >= 1
+        # Rescue rate in the second phase is below enable_rate (0.3),
+        # so no re-enable allowed.
+        assert stats["adaptive_enables"] == 0
+
+    def test_warmup_prevents_early_disable(self):
+        # Even with 100% rescue-rate-of-zero, the controller must
+        # not flip during warmup.  If it did, a video that starts
+        # with a few all-dark frames would permanently lose OpenCV
+        # fallback before we've learnt anything.
+        router, _, _ = _make_router(
+            script=[False] * 20, warmup=16, window=16,
+        )
+
+        # Drive exactly warmup-1 frames.
+        self._drive(router, 15)
+
+        stats = router.get_stats()
+        assert stats["adaptive_disables"] == 0
+        with router._stats_lock:
+            assert router._fallback_active is True
+
+    def test_adaptive_false_never_flips(self):
+        # User explicitly disables adaptive behaviour → OpenCV must
+        # be called for every single MNN miss, forever.
+        router, _, _ = _make_router(
+            script=[False] * 200, warmup=4, window=8,
+            adaptive=False,
+        )
+
+        self._drive(router, 40)
+
+        stats = router.get_stats()
+        assert stats["opencv_attempts"] == 40
+        assert stats["adaptive_disables"] == 0
+        assert stats["adaptive_enables"] == 0
+
+    def test_opencv_fallback_false_is_absolute(self):
+        # ``opencv_fallback=False`` is a hard user preference — the
+        # adaptive controller must never re-enable a fallback the
+        # user explicitly asked not to run.
+        router, cv_stub, _ = _make_router(
+            script=[True] * 100, warmup=2, window=4,
+            opencv_fallback=False, adaptive=True,
+        )
+
+        self._drive(router, 20)
+
+        stats = router.get_stats()
+        assert stats["mnn_fallbacks"] == 20
+        assert stats["opencv_attempts"] == 0
+        assert cv_stub.calls == 0
+        # No adaptive bookkeeping either, because the adaptive
+        # controller itself is a no-op when user-level fallback
+        # is off.
+        assert stats["adaptive_disables"] == 0
+        assert stats["adaptive_enables"] == 0
+
+    def test_status_summary_reports_fallback_state(self):
+        router, _, _ = _make_router(
+            script=[False] * 40, warmup=4, window=8, disable_rate=0.1,
+        )
+        self._drive(router, 12)
+
+        summary = router.get_status_summary()
+        assert "Fallback:" in summary
+        # The controller should have flipped; the summary must
+        # reflect whichever state we're now in.
+        with router._stats_lock:
+            expected = "active" if router._fallback_active else "suppressed"
+        assert expected in summary
+
+
 # ── DetectorRouter stats thread-safety smoke ─────────────────────
 
 

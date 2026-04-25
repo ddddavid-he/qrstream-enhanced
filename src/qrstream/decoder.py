@@ -733,7 +733,16 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
 
     sandbox = None
     original_dispatch = _dispatch_detect
-    if detect_isolation == "on":
+    # Only start the sandbox on the pure-OpenCV path.  When MNN is
+    # enabled, detection runs through ``DetectorRouter`` in-process
+    # (MNN + OpenCV fallback), which already isolates MNN failures
+    # into a no-detect result and handles ZXing errors inside
+    # ``MNNQrDetector._cpu_decode`` via ``try/except``.  Spawning
+    # the subprocess pool as well would only add startup cost and
+    # helper-crash noise without protecting anything the router
+    # doesn't already cover.
+    sandbox_needed = (detect_isolation == "on") and (qr_router is None)
+    if sandbox_needed:
         try:
             sandbox = qr_sandbox.SandboxedDetector(pool_size=3)
             _dispatch_detect = sandbox.detect
@@ -743,7 +752,7 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
                 f"falling back to in-process detection."
             )
             sandbox = None
-    # else: 'off' → stay with _in_process_detect
+    # else: 'off' or MNN-enabled → stay with _in_process_detect
 
     try:
         seen_seeds = set()
@@ -888,10 +897,20 @@ def _print_router_stats(router) -> None:
     mnn_fallbacks = stats.get("mnn_fallbacks", 0)
     opencv_attempts = stats.get("opencv_attempts", 0)
     opencv_success = stats.get("opencv_success", 0)
+    opencv_rescues = stats.get("opencv_rescues", 0)
+    adaptive_disables = stats.get("adaptive_disables", 0)
+    adaptive_enables = stats.get("adaptive_enables", 0)
+    tail = ""
+    if adaptive_disables or adaptive_enables:
+        tail = (
+            f", adaptive=[off×{adaptive_disables},"
+            f"on×{adaptive_enables}]"
+        )
     print(
         f"Detector stats: mnn={mnn_success}/{mnn_attempts} "
         f"(fallback={mnn_fallbacks}), "
-        f"opencv={opencv_success}/{opencv_attempts}"
+        f"opencv={opencv_success}/{opencv_attempts} "
+        f"(rescues={opencv_rescues}){tail}"
     )
 
 

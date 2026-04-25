@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -52,6 +53,13 @@ class DetectorRouter(QRDetector):
         mnn_backend: str | None = None,
         use_sr: bool = True,
         opencv_fallback: bool = True,
+        *,
+        adaptive_fallback: bool = True,
+        adaptive_warmup: int = 64,
+        adaptive_window: int = 256,
+        adaptive_disable_rate: float = 0.02,
+        adaptive_enable_rate: float = 0.05,
+        adaptive_probe_interval: int = 64,
     ) -> None:
         self._use_mnn = use_mnn
         self._mnn_model_dir = mnn_model_dir
@@ -62,6 +70,40 @@ class DetectorRouter(QRDetector):
         # final — this is the low-latency mode for videos where
         # most frames contain a QR and OpenCV retry is pure overhead.
         self._opencv_fallback = opencv_fallback
+
+        # ── Adaptive fallback controller ─────────────────────────
+        # On videos where MNN already catches everything OpenCV can,
+        # the default ``opencv_fallback=True`` path pays an extra
+        # ~90ms/frame OpenCV call for every MNN miss and recovers
+        # essentially nothing (IMG_9425: 677 OpenCV rescues, 0 extra
+        # decodes with padding enabled).  We compute a rolling
+        # "rescue rate" — the fraction of MNN misses that OpenCV
+        # actually saves — and flip ``opencv_fallback`` to False
+        # when that rate drops near zero.  Hysteresis (two separate
+        # thresholds) prevents flapping when the true rescue rate
+        # sits near the boundary.
+        self._adaptive_fallback = adaptive_fallback and opencv_fallback
+        self._adaptive_warmup = max(1, adaptive_warmup)
+        self._adaptive_window = max(self._adaptive_warmup, adaptive_window)
+        self._adaptive_disable_rate = adaptive_disable_rate
+        self._adaptive_enable_rate = adaptive_enable_rate
+        # While fallback is suppressed, run OpenCV once every
+        # ``adaptive_probe_interval`` MNN misses to keep feeding the
+        # rescue-rate window.  Without these probes the adaptive
+        # switch would be a one-way door: once off, no rescue
+        # observations could ever arrive to turn it back on.
+        self._adaptive_probe_interval = max(1, adaptive_probe_interval)
+        # Counter of MNN misses since the last probe while fallback
+        # is suppressed.  Reset whenever a probe fires.
+        self._suppressed_miss_count = 0
+        # Rolling log of recent (mnn_miss, opencv_rescue) pairs.
+        # Only entries where MNN missed are appended — success cases
+        # don't influence the rescue-rate decision.
+        self._rescue_log: deque[bool] = deque(maxlen=self._adaptive_window)
+        # Runtime fallback flag that workers actually observe.  It
+        # starts equal to the user-provided ``opencv_fallback`` and
+        # may later flip to False by the adaptive logic.
+        self._fallback_active = opencv_fallback
 
         # Always available as fallback
         self._opencv_detector = OpenCVWeChatDetector()
@@ -84,6 +126,9 @@ class DetectorRouter(QRDetector):
             "mnn_fallbacks": 0,
             "opencv_attempts": 0,
             "opencv_success": 0,
+            "opencv_rescues": 0,          # OpenCV decoded a frame MNN missed
+            "adaptive_disables": 0,       # times adaptive logic turned fallback off
+            "adaptive_enables": 0,        # times it turned back on
         }
 
     # ── QRDetector interface ──────────────────────────────────────
@@ -103,13 +148,59 @@ class DetectorRouter(QRDetector):
                 # MNN returned no-detect.
                 with self._stats_lock:
                     self._stats["mnn_fallbacks"] += 1
-                if not self._opencv_fallback:
-                    return result
-                logger.debug(
-                    "MNN detector returned no-detect, falling back to OpenCV"
-                )
+                    fallback_active = self._fallback_active
+                    # Decide whether this MNN miss should trigger an
+                    # OpenCV run.  Three cases:
+                    #   1. fallback active (user opt-out not set,
+                    #      adaptive not suppressing) → always run.
+                    #   2. fallback suppressed but adaptive on:
+                    #      run periodically so the controller can
+                    #      notice if OpenCV starts saving frames
+                    #      again.
+                    #   3. user-level fallback=False OR adaptive off
+                    #      while suppressed → skip entirely.
+                    should_run_opencv = fallback_active
+                    is_probe = False
+                    if (not fallback_active
+                            and self._adaptive_fallback
+                            and self._opencv_fallback):
+                        self._suppressed_miss_count += 1
+                        if (self._suppressed_miss_count
+                                >= self._adaptive_probe_interval):
+                            should_run_opencv = True
+                            is_probe = True
+                            self._suppressed_miss_count = 0
 
-        # OpenCV fallback (or default path)
+                if not should_run_opencv:
+                    return result
+
+                if is_probe:
+                    logger.debug(
+                        "DetectorRouter: probing OpenCV fallback "
+                        "(suppressed; %d misses since last probe)",
+                        self._adaptive_probe_interval,
+                    )
+                else:
+                    logger.debug(
+                        "MNN detector returned no-detect, falling back to OpenCV"
+                    )
+
+                # Run OpenCV and record whether it rescued the frame,
+                # so the adaptive controller can decide whether the
+                # fallback path is still pulling its weight.
+                with self._stats_lock:
+                    self._stats["opencv_attempts"] += 1
+                cv_result = self._opencv_detector.detect(frame)
+                rescued = cv_result.text is not None
+                if rescued:
+                    with self._stats_lock:
+                        self._stats["opencv_success"] += 1
+                        self._stats["opencv_rescues"] += 1
+                self._record_rescue_observation(rescued)
+                return cv_result
+
+        # OpenCV-only path (use_mnn=False or MNN unavailable).  No
+        # rescue observation here — there is no MNN verdict to rescue.
         with self._stats_lock:
             self._stats["opencv_attempts"] += 1
         result = self._opencv_detector.detect(frame)
@@ -117,6 +208,43 @@ class DetectorRouter(QRDetector):
             with self._stats_lock:
                 self._stats["opencv_success"] += 1
         return result
+
+    # ── Adaptive controller ──────────────────────────────────────
+
+    def _record_rescue_observation(self, rescued: bool) -> None:
+        """Feed a (mnn-miss, opencv-rescued?) sample into the controller.
+
+        Runs under ``_stats_lock`` for the window deque, but the
+        deque itself is only mutated here, so contention is bounded
+        to a single append per frame.
+        """
+        if not self._adaptive_fallback:
+            return
+
+        with self._stats_lock:
+            self._rescue_log.append(rescued)
+            samples = len(self._rescue_log)
+            if samples < self._adaptive_warmup:
+                return
+            rescue_rate = sum(self._rescue_log) / samples
+            active = self._fallback_active
+
+            if active and rescue_rate < self._adaptive_disable_rate:
+                self._fallback_active = False
+                self._stats["adaptive_disables"] += 1
+                logger.info(
+                    "DetectorRouter: disabling OpenCV fallback (rescue "
+                    "rate %.2f%% over last %d MNN misses)",
+                    rescue_rate * 100, samples,
+                )
+            elif (not active) and rescue_rate >= self._adaptive_enable_rate:
+                self._fallback_active = True
+                self._stats["adaptive_enables"] += 1
+                logger.info(
+                    "DetectorRouter: re-enabling OpenCV fallback (rescue "
+                    "rate %.2f%% over last %d MNN misses)",
+                    rescue_rate * 100, samples,
+                )
 
     def is_available(self) -> bool:
         """At minimum, OpenCV detector should be available."""
@@ -198,6 +326,12 @@ class DetectorRouter(QRDetector):
     def get_status_summary(self) -> str:
         """Return a human-readable status string."""
         stats = self.get_stats()
+        with self._stats_lock:
+            fallback_active = self._fallback_active
+            samples = len(self._rescue_log)
+            rescue_rate = (
+                sum(self._rescue_log) / samples if samples else 0.0
+            )
         lines = [f"DetectorRouter: use_mnn={self._use_mnn}"]
         if self._use_mnn:
             if self._mnn_detector:
@@ -211,5 +345,11 @@ class DetectorRouter(QRDetector):
             f"  OpenCV: "
             f"{'available' if self._opencv_detector.is_available() else 'unavailable'}"
         )
+        if self._use_mnn and self._opencv_fallback:
+            lines.append(
+                f"  Fallback: {'active' if fallback_active else 'suppressed'}"
+                f" (adaptive={self._adaptive_fallback}, "
+                f"rescue_rate={rescue_rate:.1%} over {samples} samples)"
+            )
         lines.append(f"  Stats: {stats}")
         return "\n".join(lines)
