@@ -55,6 +55,16 @@ try:
 except ImportError:
     HAS_SEGNO = False
 
+# Future-facing flag. WeChatQRCode (opencv_contrib) has known unfixed
+# native crashes in its bundled zxing code (issue opencv_contrib#3570).
+# When someone swaps the detector out for a non-crashing implementation
+# (e.g. an MNN-based QR pipeline), flip this to False and rely on
+# callers to stop spawning sandboxes. Nothing in this module reads the
+# flag; it is purely a signal consumed by ``qrstream.decoder`` and
+# future code paths that want to know whether crash-isolation is still
+# warranted.
+DETECTOR_CAN_CRASH: bool = True
+
 # Map ec_level int (0=L,1=M,2=Q,3=H) to segno error-correction letter.
 _EC_MAP: dict[int, str] = {0: 'l', 1: 'm', 2: 'q', 3: 'h'}
 
