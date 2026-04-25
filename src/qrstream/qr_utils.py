@@ -76,7 +76,8 @@ def generate_qr_image(data: bytes, ec_level: int = 1,
                       version: int | None = None,
                       use_legacy: bool = False,
                       binary_mode: bool | None = None,
-                      alphanumeric: bool | None = None) -> np.ndarray:
+                      alphanumeric: bool | None = None,
+                      auto_mask: bool = False) -> np.ndarray:
     """Generate a QR code image from binary data.
 
     Args:
@@ -94,6 +95,9 @@ def generate_qr_image(data: bytes, ec_level: int = 1,
         alphanumeric: When True (default), encode via base45 into QR
             alphanumeric mode (higher density). When False, encode via
             base64 into QR byte mode.
+        auto_mask: When True, let segno evaluate all 8 ISO 18004 mask
+            patterns and pick the best one (slower, ~5× per frame).
+            Default False uses mask=0 for maximum throughput.
 
     Returns:
         BGR numpy array suitable for OpenCV.
@@ -123,12 +127,13 @@ def generate_qr_image(data: bytes, ec_level: int = 1,
         payload = _b64lib.b64encode(data).decode("ascii")
 
     return _render_qr(payload, ec_level, box_size, border, version,
-                      use_alphanumeric)
+                      use_alphanumeric, auto_mask)
 
 
 def _render_qr(payload: str, ec_level: int, box_size: int,
                border: float, version: int | None,
-               alphanumeric: bool) -> np.ndarray:
+               alphanumeric: bool,
+               auto_mask: bool = False) -> np.ndarray:
     """Render an ASCII payload string to a BGR numpy array via segno.
 
     ``payload`` is a plain ASCII string (base45 or base64 encoded).
@@ -147,16 +152,14 @@ def _render_qr(payload: str, ec_level: int, box_size: int,
         # boost_error=False: honour the requested EC level exactly,
         # never silently upgrade it (keeps frame size predictable).
         boost_error=False,
-        # mask=0: skip segno's per-frame 8-way mask selection loop
-        # (ISO 18004 §7.8.3).  segno's mask selector is pure Python
-        # and costs ~80% of segno.make()'s wall-clock on V25 frames.
-        # ISO 18004 leaves mask selection to the encoder; any mask in
-        # 0..7 is standards-compliant.  WeChatQRCode (the decoder we
-        # ship) reads whichever mask the generator chose and has no
-        # preference among the 8 patterns.  Fixing mask=0 therefore
-        # trades an imperceptible scan-quality delta for ~5× single-
-        # frame encode speedup on synthetic payloads.
-        mask=0,
+        # mask: when auto_mask is False (default), pin mask=0 to skip
+        # segno's per-frame 8-way mask selection loop (ISO 18004
+        # §7.8.3).  segno's mask selector is pure Python and costs
+        # ~80% of segno.make()'s wall-clock on V25 frames.  Pass
+        # mask=None to let segno evaluate all 8 patterns and pick the
+        # best one (slower but better scan quality under adverse
+        # conditions).
+        mask=None if auto_mask else 0,
     )
 
     # Render via the raw module matrix — faster than encode-to-PNG then

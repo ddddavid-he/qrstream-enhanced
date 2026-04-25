@@ -80,6 +80,7 @@ def cmd_encode(args):
         codec=args.codec,
         alphanumeric_qr=alphanumeric_qr,
         force_compress=args.force_compress,
+        auto_mask=args.auto_mask,
     )
 
 
@@ -159,6 +160,11 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                      help='Video codec: mp4v (default) or mjpeg (faster, larger)')
     enc.add_argument('-w', '--workers', type=int, default=None,
                      help='Parallel workers for QR generation (default: CPU count)')
+    enc.add_argument('--auto-mask', action='store_true',
+                     help='Let segno evaluate all 8 ISO 18004 mask patterns '
+                          'instead of using the fixed mask=0 fast path. '
+                          'Slower (~5× per frame) but may improve scan '
+                          'quality under adverse capture conditions.')
     enc.add_argument('-v', '--verbose', action='store_true',
                      help='Print extra detail (block stats, compression ratio, etc.)')
 

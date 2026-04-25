@@ -200,7 +200,8 @@ def encode_to_video(input_path: str, output_path: str,
                     codec: str = 'mp4v',
                     binary_qr: bool = True,
                     alphanumeric_qr: bool | None = None,
-                    force_compress: bool = False):
+                    force_compress: bool = False,
+                    auto_mask: bool = False):
     """Encode a file to a QR-code video using LT fountain codes.
 
     ``binary_qr`` and ``alphanumeric_qr`` are aliases for the
@@ -263,6 +264,7 @@ def encode_to_video(input_path: str, output_path: str,
             version=qr_version,
             use_legacy=use_legacy_qr,
             alphanumeric=high_density,
+            auto_mask=auto_mask,
         )
         h, w = first_qr.shape[:2]
 
@@ -357,12 +359,13 @@ def encode_to_video(input_path: str, output_path: str,
                         break
                     # generate_qr_image signature:
                     #   (data, ec_level, box_size, border, version,
-                    #    use_legacy, binary_mode, alphanumeric)
+                    #    use_legacy, binary_mode, alphanumeric, auto_mask)
                     qr_imgs = list(pool.map(
                         generate_qr_image, batch,
                         repeat(ec_level), repeat(10), repeat(border_modules),
                         repeat(qr_version), repeat(use_legacy_qr),
                         repeat(None), repeat(high_density),
+                        repeat(auto_mask),
                     ))
                     for qr_img in qr_imgs:
                         writer_queue.put(qr_img)
@@ -380,6 +383,7 @@ def encode_to_video(input_path: str, output_path: str,
                     version=qr_version,
                     use_legacy=use_legacy_qr,
                     alphanumeric=high_density,
+                    auto_mask=auto_mask,
                 )
                 writer_queue.put(qr_img)
                 progress.update(1)
