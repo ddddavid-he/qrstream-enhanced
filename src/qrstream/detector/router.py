@@ -21,6 +21,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -50,21 +51,33 @@ class DetectorRouter(QRDetector):
         mnn_model_dir: str | Path | None = None,
         mnn_backend: str | None = None,
         use_sr: bool = True,
+        opencv_fallback: bool = True,
     ) -> None:
         self._use_mnn = use_mnn
         self._mnn_model_dir = mnn_model_dir
         self._mnn_backend = mnn_backend
         self._use_sr = use_sr
+        # When True, a no-detect result from MNN triggers an OpenCV
+        # re-scan on the same frame.  When False, MNN's verdict is
+        # final — this is the low-latency mode for videos where
+        # most frames contain a QR and OpenCV retry is pure overhead.
+        self._opencv_fallback = opencv_fallback
 
         # Always available as fallback
         self._opencv_detector = OpenCVWeChatDetector()
 
-        # Lazily initialised MNN detector
+        # Lazily initialised MNN detector (protected by _init_lock
+        # so parallel workers don't race on first-call construction).
         self._mnn_detector: QRDetector | None = None
         self._mnn_init_attempted = False
         self._mnn_init_error: str | None = None
+        self._init_lock = threading.Lock()
 
-        # Statistics for diagnostics
+        # Statistics for diagnostics.  CPython's GIL would make naive
+        # ``+= 1`` on dict values effectively atomic today, but
+        # that's an implementation detail — we take an explicit lock
+        # so the counters stay consistent under future free-threading.
+        self._stats_lock = threading.Lock()
         self._stats = {
             "mnn_attempts": 0,
             "mnn_success": 0,
@@ -80,20 +93,29 @@ class DetectorRouter(QRDetector):
         if self._use_mnn:
             mnn = self._get_mnn_detector()
             if mnn is not None:
-                self._stats["mnn_attempts"] += 1
+                with self._stats_lock:
+                    self._stats["mnn_attempts"] += 1
                 result = mnn.detect(frame)
                 if result.text is not None:
-                    self._stats["mnn_success"] += 1
+                    with self._stats_lock:
+                        self._stats["mnn_success"] += 1
                     return result
-                # MNN returned no-detect — fall through to OpenCV
-                self._stats["mnn_fallbacks"] += 1
-                logger.debug("MNN detector returned no-detect, falling back to OpenCV")
+                # MNN returned no-detect.
+                with self._stats_lock:
+                    self._stats["mnn_fallbacks"] += 1
+                if not self._opencv_fallback:
+                    return result
+                logger.debug(
+                    "MNN detector returned no-detect, falling back to OpenCV"
+                )
 
         # OpenCV fallback (or default path)
-        self._stats["opencv_attempts"] += 1
+        with self._stats_lock:
+            self._stats["opencv_attempts"] += 1
         result = self._opencv_detector.detect(frame)
         if result.text is not None:
-            self._stats["opencv_success"] += 1
+            with self._stats_lock:
+                self._stats["opencv_success"] += 1
         return result
 
     def is_available(self) -> bool:
@@ -113,27 +135,44 @@ class DetectorRouter(QRDetector):
         if self._mnn_init_attempted:
             return self._mnn_detector
 
-        self._mnn_init_attempted = True
+        with self._init_lock:
+            # Another thread may have completed init while we waited.
+            if self._mnn_init_attempted:
+                return self._mnn_detector
+            self._mnn_init_attempted = True
 
-        try:
-            from .mnn_detector import MNNQrDetector
-            det = MNNQrDetector(
-                model_dir=self._mnn_model_dir,
-                backend=self._mnn_backend,
-                use_sr=self._use_sr,
-            )
-            if det.is_available():
-                self._mnn_detector = det
-                logger.info("DetectorRouter: MNN detector available (%s)", det.name)
-            else:
-                self._mnn_init_error = "MNN detector not available (models missing or MNN not installed)"
-                logger.warning("DetectorRouter: %s, using OpenCV fallback", self._mnn_init_error)
-        except ImportError as e:
-            self._mnn_init_error = f"MNN import failed: {e}"
-            logger.warning("DetectorRouter: %s, using OpenCV fallback", self._mnn_init_error)
-        except Exception as e:
-            self._mnn_init_error = f"MNN init failed: {e}"
-            logger.warning("DetectorRouter: %s, using OpenCV fallback", self._mnn_init_error)
+            try:
+                from .mnn_detector import MNNQrDetector
+                det = MNNQrDetector(
+                    model_dir=self._mnn_model_dir,
+                    backend=self._mnn_backend,
+                    use_sr=self._use_sr,
+                )
+                if det.is_available():
+                    self._mnn_detector = det
+                    logger.info(
+                        "DetectorRouter: MNN detector available (%s)", det.name
+                    )
+                else:
+                    self._mnn_init_error = (
+                        "MNN detector not available (models missing or MNN not installed)"
+                    )
+                    logger.warning(
+                        "DetectorRouter: %s, using OpenCV fallback",
+                        self._mnn_init_error,
+                    )
+            except ImportError as e:
+                self._mnn_init_error = f"MNN import failed: {e}"
+                logger.warning(
+                    "DetectorRouter: %s, using OpenCV fallback",
+                    self._mnn_init_error,
+                )
+            except Exception as e:
+                self._mnn_init_error = f"MNN init failed: {e}"
+                logger.warning(
+                    "DetectorRouter: %s, using OpenCV fallback",
+                    self._mnn_init_error,
+                )
 
         return self._mnn_detector
 
@@ -152,17 +191,25 @@ class DetectorRouter(QRDetector):
         return self.active_detector.DETECTOR_CAN_CRASH
 
     def get_stats(self) -> dict[str, int]:
-        """Return detection statistics for diagnostics."""
-        return dict(self._stats)
+        """Return a snapshot of detection statistics for diagnostics."""
+        with self._stats_lock:
+            return dict(self._stats)
 
     def get_status_summary(self) -> str:
         """Return a human-readable status string."""
+        stats = self.get_stats()
         lines = [f"DetectorRouter: use_mnn={self._use_mnn}"]
         if self._use_mnn:
             if self._mnn_detector:
                 lines.append(f"  MNN: available ({self._mnn_detector.name})")
             else:
-                lines.append(f"  MNN: unavailable ({self._mnn_init_error or 'not initialised'})")
-        lines.append(f"  OpenCV: {'available' if self._opencv_detector.is_available() else 'unavailable'}")
-        lines.append(f"  Stats: {self._stats}")
+                lines.append(
+                    f"  MNN: unavailable "
+                    f"({self._mnn_init_error or 'not initialised'})"
+                )
+        lines.append(
+            f"  OpenCV: "
+            f"{'available' if self._opencv_detector.is_available() else 'unavailable'}"
+        )
+        lines.append(f"  Stats: {stats}")
         return "\n".join(lines)

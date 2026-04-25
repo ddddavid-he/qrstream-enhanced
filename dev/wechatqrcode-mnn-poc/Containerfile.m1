@@ -1,0 +1,76 @@
+# Milestone 1: end-to-end verification of the --mnn decode path.
+#
+# Builds on the dev/test-container base (fedora:latest + uv) and
+# layers MNN on top so we can exercise:
+#
+#   * DetectorRouter selecting the CPU MNN backend at runtime
+#   * MNNQrDetector per-thread session creation under ThreadPoolExecutor
+#   * extract_qr_from_video(use_mnn=True) doing a real encode → decode
+#     round-trip
+#
+# Apple Metal is NOT available inside a Linux container, so this
+# pipeline always runs on the MNN CPU backend.  That's fine — the
+# M0 benchmark already confirmed MNN CPU ≈ 2 ms/frame on a real
+# phone-recorded video.  This Milestone 1 container's job is
+# correctness + integration, not performance.
+#
+# Build:
+#   podman build -f dev/wechatqrcode-mnn-poc/Containerfile.m1 \
+#       -t qrstream-mnn-m1 .
+#
+# Run the MNN-specific test suite:
+#   podman run --rm qrstream-mnn-m1
+#
+# Interactive shell for debugging:
+#   podman run --rm -it qrstream-mnn-m1 bash
+
+FROM fedora:latest
+
+# System libs required by the opencv-contrib-python wheel and the
+# MNN runtime shared library (MNN wheels ship their own libs but
+# still need glibc-side OpenGL / GLib / gomp for the OpenCV wheel).
+RUN dnf install -y --setopt=install_weak_deps=False \
+        python3.13 python3.13-devel python3-pip \
+        gcc gcc-c++ make \
+        mesa-libGL libglvnd-glx glib2 libgomp \
+        libSM libXext libXrender zlib \
+        git \
+    && dnf clean all
+
+WORKDIR /app
+
+ENV UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+
+RUN pip install --no-cache-dir uv
+
+# Full repo first — lets uv derive the project version via hatch-vcs
+# from the .git metadata.  Then layer MNN on top of the sync'd venv.
+COPY . .
+
+RUN uv sync --dev --python /usr/bin/python3.13 \
+    && uv pip install MNN
+
+# Smoke check: models must be present inside the image.  The M0
+# container produces these under ``dev/wechatqrcode-mnn-poc/models/mnn``
+# — we bake them in via the top-level COPY above rather than relying
+# on a volume mount so test runs are hermetic.
+RUN test -f dev/wechatqrcode-mnn-poc/models/mnn/detect.mnn \
+    && test -f dev/wechatqrcode-mnn-poc/models/mnn/sr.mnn \
+    || (echo "ERROR: MNN models missing. Run the M0 container first and commit the .mnn files." >&2 && exit 1)
+
+# Default: run BOTH the detector integration suite (CPU/Python
+# fallback) AND the MNN-flagged subset (actual MNN CPU inference).
+# Both layers must stay green for Milestone 1 to be considered done.
+CMD ["sh", "-c", "\
+    set -e ; \
+    echo '=== MNN import smoke ===' ; \
+    uv run python -c 'import MNN; print(\"MNN version:\", MNN.version())' ; \
+    echo '=== detector integration (fast) ===' ; \
+    uv run pytest tests/test_detector_integration.py tests/test_detector.py -v ; \
+    echo '=== detector integration (slow — MNN CPU end-to-end) ===' ; \
+    uv run pytest tests/test_detector_integration.py -v -m slow ; \
+    echo '=== full fast suite (regression gate) ===' ; \
+    uv run pytest tests/ \
+"]

@@ -10,12 +10,20 @@ Safety constraints (from ``fix/wechat-native-crash`` lessons):
 - All bbox / ROI coordinates are clamped to image bounds before cropping.
 - All tensor shapes are cross-checked against actual array lengths.
 - Any anomaly results in ``DetectResult(text=None)`` — never a crash.
+
+Threading model:
+- A single ``MNNQrDetector`` instance is safe to share across threads.
+- Each thread lazily creates its own MNN ``Interpreter`` / ``Session``
+  via ``threading.local()``.  MNN sessions are not documented as
+  thread-safe for concurrent ``runSession`` calls, and the per-thread
+  strategy mirrors what ``OpenCVWeChatDetector`` already does for
+  ``cv2.wechat_qrcode_WeChatQRCode``.
 """
 
 from __future__ import annotations
 
 import logging
-import os
+import threading
 from pathlib import Path
 
 import cv2
@@ -27,8 +35,15 @@ from .mnn_backend import MNNBackend, is_mnn_available, select_backend
 logger = logging.getLogger(__name__)
 
 # Default model paths relative to the models directory.
-# These will be .mnn files produced by MNNConvert from the original Caffe models.
-_DEFAULT_MODEL_DIR = Path(__file__).resolve().parent.parent.parent.parent / "dev" / "wechatqrcode-mnn-poc" / "models"
+# These .mnn files are produced by MNNConvert from the original
+# Caffe models — see ``dev/wechatqrcode-mnn-poc/Containerfile.m0``
+# for the conversion recipe.  We look under ``models/mnn/`` by
+# default (matching the M0 container's layout), so developers can
+# drop new converted models in without touching this path.
+_DEFAULT_MODEL_DIR = (
+    Path(__file__).resolve().parent.parent.parent.parent
+    / "dev" / "wechatqrcode-mnn-poc" / "models" / "mnn"
+)
 
 _DETECT_MODEL_NAME = "detect.mnn"
 _SR_MODEL_NAME = "sr.mnn"
@@ -45,6 +60,10 @@ _SSD_TARGET_AREA = 400.0 * 400.0
 # SR threshold: only apply super-resolution when the QR region
 # (sqrt(area)) is smaller than this in pixels.
 _SR_MAX_SIZE = 160
+
+# Sentinel used by per-thread lazy-init guards to distinguish
+# "not yet attempted" from "attempted but failed (cached None)".
+_UNINIT = object()
 
 
 class MNNQrDetector(QRDetector):
@@ -68,20 +87,23 @@ class MNNQrDetector(QRDetector):
     ) -> None:
         self._model_dir = Path(model_dir) if model_dir else _DEFAULT_MODEL_DIR
         self._use_sr = use_sr
+        self._init_lock = threading.Lock()
         self._initialized = False
         self._init_error: str | None = None
 
-        # MNN runtime objects (set during _lazy_init)
-        self._detect_session = None
-        self._sr_session = None
-        self._backend = None
+        # Per-thread MNN runtime objects.  Each thread lazily builds
+        # its own (interpreter, session) pair on first detect() call.
+        self._tls = threading.local()
+
+        # Resolved at first _ensure_init() call
+        self._backend: MNNBackend | None = None
+        self._has_sr_model: bool = False
+        self._detect_model_path: str | None = None
+        self._sr_model_path: str | None = None
 
         # Resolve backend
         if isinstance(backend, str):
-            try:
-                self._requested_backend = MNNBackend(backend.lower())
-            except ValueError:
-                self._requested_backend = None
+            self._requested_backend = MNNBackend.from_string(backend)
         elif isinstance(backend, MNNBackend):
             self._requested_backend = backend
         else:
@@ -97,8 +119,12 @@ class MNNQrDetector(QRDetector):
         if not _valid_frame(frame):
             return DetectResult(backend=self.name)
 
+        detect_sess = self._get_thread_detect_session()
+        if detect_sess is None:
+            return DetectResult(backend=self.name)
+
         try:
-            bboxes = self._run_detector(frame)
+            bboxes = self._run_detector(frame, detect_sess)
         except Exception:
             logger.debug("MNNQrDetector: detector inference failed", exc_info=True)
             return DetectResult(backend=self.name)
@@ -108,6 +134,8 @@ class MNNQrDetector(QRDetector):
 
         # Process each detected QR region
         img_h, img_w = frame.shape[:2]
+        sr_sess = self._get_thread_sr_session() if self._use_sr else None
+
         for bbox in bboxes:
             # Safety rule #2: clamp bbox to image bounds
             roi = _clamp_bbox(bbox, img_w, img_h)
@@ -120,13 +148,16 @@ class MNNQrDetector(QRDetector):
                 continue
 
             # Optionally apply super-resolution
-            if self._use_sr and self._sr_session is not None:
+            if sr_sess is not None:
                 area = (x1 - x0) * (y1 - y0)
                 if area > 0 and int(area ** 0.5) < _SR_MAX_SIZE:
                     try:
-                        cropped = self._run_sr(cropped)
+                        cropped = self._run_sr(cropped, sr_sess)
                     except Exception:
-                        logger.debug("MNNQrDetector: SR failed, using original crop", exc_info=True)
+                        logger.debug(
+                            "MNNQrDetector: SR failed, using original crop",
+                            exc_info=True,
+                        )
 
             # CPU decode (use OpenCV WeChatQRCode on the cropped region)
             text = self._cpu_decode(cropped)
@@ -153,51 +184,60 @@ class MNNQrDetector(QRDetector):
     # ── Lazy initialization ───────────────────────────────────────
 
     def _ensure_init(self) -> bool:
-        """Lazy-init MNN sessions. Returns True if ready."""
+        """Resolve backend + validate model files once.
+
+        Only the *metadata* (backend choice, model paths) is resolved
+        here — the actual ``Interpreter`` / ``Session`` objects are
+        built lazily per thread in :meth:`_get_thread_detect_session`
+        and :meth:`_get_thread_sr_session`, because MNN sessions are
+        not safe for concurrent ``runSession`` calls.
+        """
         if self._initialized:
             return self._init_error is None
-        self._initialized = True
+        with self._init_lock:
+            # Double-checked locking: another thread may have finished
+            # initialization while we were waiting for the lock.
+            if self._initialized:
+                return self._init_error is None
 
-        if not is_mnn_available():
-            self._init_error = "MNN not installed"
-            logger.warning("MNNQrDetector: %s", self._init_error)
-            return False
+            if not is_mnn_available():
+                self._init_error = "MNN not installed"
+                logger.warning("MNNQrDetector: %s", self._init_error)
+                self._initialized = True
+                return False
 
-        try:
-            self._backend = select_backend(
-                self._requested_backend.value if self._requested_backend else None
-            )
-        except RuntimeError as e:
-            self._init_error = str(e)
-            logger.warning("MNNQrDetector: %s", self._init_error)
-            return False
-
-        # Load detector model
-        detect_path = self._model_dir / _DETECT_MODEL_NAME
-        if not detect_path.exists():
-            self._init_error = f"Detector model not found: {detect_path}"
-            logger.warning("MNNQrDetector: %s", self._init_error)
-            return False
-
-        try:
-            self._detect_session = self._create_session(str(detect_path))
-        except Exception as e:
-            self._init_error = f"Failed to load detector model: {e}"
-            logger.warning("MNNQrDetector: %s", self._init_error)
-            return False
-
-        # Load SR model (optional — detection works without it)
-        sr_path = self._model_dir / _SR_MODEL_NAME
-        if self._use_sr and sr_path.exists():
             try:
-                self._sr_session = self._create_session(str(sr_path))
-            except Exception as e:
-                logger.warning("MNNQrDetector: SR model load failed (%s), continuing without SR", e)
-                self._sr_session = None
+                self._backend = select_backend(
+                    self._requested_backend.value if self._requested_backend else None
+                )
+            except RuntimeError as e:
+                self._init_error = str(e)
+                logger.warning("MNNQrDetector: %s", self._init_error)
+                self._initialized = True
+                return False
 
-        logger.info("MNNQrDetector initialized: backend=%s, sr=%s",
-                     self._backend.value, self._sr_session is not None)
-        return True
+            # Detector model is required
+            detect_path = self._model_dir / _DETECT_MODEL_NAME
+            if not detect_path.exists():
+                self._init_error = f"Detector model not found: {detect_path}"
+                logger.warning("MNNQrDetector: %s", self._init_error)
+                self._initialized = True
+                return False
+            self._detect_model_path = str(detect_path)
+
+            # SR model is optional
+            sr_path = self._model_dir / _SR_MODEL_NAME
+            if self._use_sr and sr_path.exists():
+                self._has_sr_model = True
+                self._sr_model_path = str(sr_path)
+
+            logger.info(
+                "MNNQrDetector ready: backend=%s, sr_model=%s",
+                self._backend.value,
+                self._has_sr_model,
+            )
+            self._initialized = True
+            return True
 
     def _create_session(self, model_path: str):
         """Create an MNN inference session.
@@ -221,9 +261,45 @@ class MNNQrDetector(QRDetector):
         session = interpreter.createSession({"backend": backend_name})
         return (interpreter, session)
 
+    # ── Per-thread session accessors ─────────────────────────────
+
+    def _get_thread_detect_session(self):
+        """Return this thread's detector (interpreter, session), lazily.
+
+        Returns ``None`` if init is broken.  Caching failures via a
+        sentinel prevents hot-looping on broken models.
+        """
+        det = getattr(self._tls, "detect_session", _UNINIT)
+        if det is _UNINIT:
+            try:
+                det = self._create_session(self._detect_model_path)
+            except Exception as e:
+                logger.warning(
+                    "MNNQrDetector: per-thread detect session creation failed: %s", e
+                )
+                det = None
+            self._tls.detect_session = det
+        return det
+
+    def _get_thread_sr_session(self):
+        """Return this thread's SR (interpreter, session), lazily."""
+        if not self._has_sr_model:
+            return None
+        sr = getattr(self._tls, "sr_session", _UNINIT)
+        if sr is _UNINIT:
+            try:
+                sr = self._create_session(self._sr_model_path)
+            except Exception as e:
+                logger.warning(
+                    "MNNQrDetector: per-thread SR session creation failed: %s", e
+                )
+                sr = None
+            self._tls.sr_session = sr
+        return sr
+
     # ── Inference methods ─────────────────────────────────────────
 
-    def _run_detector(self, frame: np.ndarray) -> list[np.ndarray]:
+    def _run_detector(self, frame: np.ndarray, detect_sess) -> list[np.ndarray]:
         """Run SSD detector and return list of bounding boxes.
 
         Each bbox is a (4,2) float32 array of corner points.
@@ -236,7 +312,7 @@ class MNNQrDetector(QRDetector):
         import MNN
 
         img_h, img_w = frame.shape[:2]
-        interpreter, session = self._detect_session
+        interpreter, session = detect_sess
 
         # Convert to grayscale (model input: 1 channel)
         if frame.ndim == 3 and frame.shape[2] >= 3:
@@ -335,7 +411,7 @@ class MNNQrDetector(QRDetector):
 
         return bboxes
 
-    def _run_sr(self, crop: np.ndarray) -> np.ndarray:
+    def _run_sr(self, crop: np.ndarray, sr_sess) -> np.ndarray:
         """Run super-resolution on a cropped QR region.
 
         Preprocessing matches upstream ``super_scale.cpp``:
@@ -345,7 +421,7 @@ class MNNQrDetector(QRDetector):
         """
         import MNN
 
-        interpreter, session = self._sr_session
+        interpreter, session = sr_sess
 
         # Convert to grayscale if needed
         if crop.ndim == 3 and crop.shape[2] == 3:

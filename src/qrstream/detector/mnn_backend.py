@@ -34,6 +34,22 @@ class MNNBackend(Enum):
     CUDA = "CUDA"
     OPENCL = "OpenCL"
 
+    @classmethod
+    def from_string(cls, name: str) -> "MNNBackend | None":
+        """Case-insensitive lookup by the MNN backend name.
+
+        Accepts user-provided strings like ``"metal"``, ``"Metal"``,
+        or ``"opencl"`` and returns the matching enum member, or
+        ``None`` if nothing matches.
+        """
+        if not isinstance(name, str) or not name:
+            return None
+        needle = name.strip().lower()
+        for member in cls:
+            if member.value.lower() == needle:
+                return member
+        return None
+
 
 def is_mnn_available() -> bool:
     """Check whether MNN Python bindings are importable."""
@@ -87,9 +103,8 @@ def select_backend(preferred: str | None = None) -> MNNBackend:
 
     # Explicit override
     if preferred:
-        try:
-            backend = MNNBackend(preferred.lower())
-        except ValueError:
+        backend = MNNBackend.from_string(preferred)
+        if backend is None:
             logger.warning("Unknown MNN backend %r, falling back to auto", preferred)
         else:
             logger.info("MNN backend: using explicit %s", backend.value)
