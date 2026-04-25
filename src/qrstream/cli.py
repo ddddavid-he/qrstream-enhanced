@@ -54,10 +54,13 @@ def cmd_encode(args):
         )
 
     output = args.output
-    if output is None:
-        base = os.path.splitext(os.path.basename(args.file))[0]
-        ext = '.avi' if args.codec == 'mjpeg' else '.mp4'
-        output = f"{base}{ext}"
+
+    if os.path.abspath(args.file) == os.path.abspath(output):
+        print(
+            f"Error: output path is the same as the input file '{args.file}'.\n"
+            f"Specify a different path with -o."
+        )
+        sys.exit(1)
 
     alphanumeric_qr = (args.qr_mode == 'alphanumeric')
 
@@ -123,8 +126,8 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
     enc = subparsers.add_parser(
         'encode', help='Encode a file into a QR code video')
     enc.add_argument('file', help='Path to the input file')
-    enc.add_argument('-o', '--output', default=None,
-                     help='Output video path (default: <filename>.mp4)')
+    enc.add_argument('-o', '--output', required=True,
+                     help='Output video path (e.g. output.mp4)')
     enc.add_argument('--overhead', type=float, default=2.0,
                      help=f'Ratio of encoded blocks to source blocks '
                           f'(default: 2.0, minimum: {_MIN_OVERHEAD}, '

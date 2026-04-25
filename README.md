@@ -96,7 +96,7 @@ qrstream encode <file> -o output.mp4 [options]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `<file>` | - | Input file path |
-| `-o, --output` | `<filename>.mp4` | Output video path |
+| `-o, --output` | **required** | Output video path |
 | `--overhead` | `2.0` | Encoding redundancy ratio (multiple of source block count) |
 | `--fps` | `10` | Output video frame rate |
 | `--ec-level` | `1` | QR error correction: 0=L(7%), 1=M(15%), 2=Q(25%), 3=H(30%) |
