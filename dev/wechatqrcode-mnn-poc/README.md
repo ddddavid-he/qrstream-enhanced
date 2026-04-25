@@ -15,8 +15,9 @@
 - `WeChatQRCode` 的两个 CNN 都是通过 `OpenCV DNN + Caffe` 加载：
   - `src/detector/ssd_detector.cpp` -> `dnn::readNetFromCaffe(...)`
   - `src/scale/super_scale.cpp` -> `dnn::readNetFromCaffe(...)`
-- 当前仓库仍直接调用 `cv2.wechat_qrcode_WeChatQRCode()`，没有 backend 选择层，也没有 detector / SR 分阶段调度层
-- 第一条 PoC 主线仍是：**直接验证 `Caffe -> MNN`，把推理从 OpenCV DNN 黑盒中拆出来**
+- **M0 完成**：两个 Caffe 模型已转成 `.mnn`，输出与 OpenCV DNN 对齐；Apple M4 Pro 上 MNN Metal 实测比 WeChatQRCode 快 7~126 倍（详见 `results/m0_report.md`）
+- **M1 完成**：`DetectorRouter` 已真正接入 `ThreadPoolExecutor` worker，`--mnn` 显式开关生效；Linux + MNN CPU 端到端 decode 通过（详见 `results/m1_report.md`）
+- 第一条 PoC 主线 `Caffe -> MNN` 已完整验证，后续进入 M2 打包落地与 CPU 正式版
 
 ### 为什么优先选 MNN
 
@@ -155,31 +156,30 @@ flowchart TD
   - SR 是否输出正确尺寸与像素范围
 - 暂不接业务主链，只做离线比对
 
-#### Milestone 1：Apple Metal 首版接入
+#### Milestone 1：Apple Metal 首版接入 ✅ 已完成
 
 目标：在 **Apple 平台** 打通 `Metal -> CPU -> OpenCV fallback`，并提供 `--mnn` 显式开关。
 
-- 新建 `MNN Detector Runner`
-- 新建 `MNN SR Runner`
-- 新建 MNN 可用性检测与 backend 选择层
-- 在 `decode` 路径增加 `--mnn`
-- 新增可替换的 `QRDetector` 适配层，避免把 MNN 路径继续写死在 `try_decode_qr()` 里
-- 与 `origin/fix/wechat-native-crash` 的兼容基线保持一致：
-  - 如目标基线已包含 `--detect-isolation`，则 `--mnn` 必须与其共存
-  - 保留 `_dispatch_detect` / `DETECTOR_CAN_CRASH` 这一类检测分发抽象的兼容接入点
-  - 不破坏 `OpenCV WeChatQRCode` 作为稳定 fallback 的默认行为
-- 保留现有：
-  - OpenCV 图像读取
-  - ROI 裁剪 / 对齐
-  - ZXing 解码
-  - `qrstream` payload / LT 解码
-- 当 MNN backend 初始化失败、推理失败、结果异常时，自动回退到 `OpenCV WeChatQRCode`
+交付物：
 
-这是第一版的明确交付边界。
+- ✅ `MNN Detector Runner` + `MNN SR Runner`（`src/qrstream/detector/mnn_detector.py`，per-thread MNN session）
+- ✅ MNN 可用性检测与 backend 选择层（`src/qrstream/detector/mnn_backend.py`）
+- ✅ `decode` 路径 `--mnn` 开关（CLI + `extract_qr_from_video(use_mnn=True)`）
+- ✅ 可替换 `QRDetector` 适配层（`src/qrstream/detector/base.py`、`opencv_wechat.py`、`router.py`）
+- ✅ **`DetectorRouter` 真正接入 `ThreadPoolExecutor` worker**（通过 `functools.partial`），覆盖 probe、main scan、targeted recovery 三条 worker 路径
+- ✅ 与 `origin/fix/wechat-native-crash` 的兼容基线保持一致：`DETECTOR_CAN_CRASH` 标志、`active_detector_can_crash` 暴露给未来 `--detect-isolation` 使用
+- ✅ 保留 `OpenCV WeChatQRCode` 作为 fallback，默认行为不变
+- ✅ MNN 初始化失败 / 推理失败 / 输出异常时自动回退到 OpenCV
+- ✅ `verbose` 模式下打印 `DetectorRouter` 统计（`mnn_success/attempts, opencv_success/attempts`）
+- ✅ malformed frame / 空 ROI / 异常 bbox / 异常 tensor shape 的单元回归测试（`tests/test_detector.py`、`tests/test_detector_integration.py`）
+- ✅ `dev/wechatqrcode-mnn-poc/Containerfile.m1` 提供 podman 验收容器（Linux + MNN CPU，含全量回归），M0 的 Metal 性能基线沿用 `results/m0_report.md`
+- ✅ 所有回归与集成测试通过：**163 fast + 4 slow（MNN CPU 端到端）**
+
+详见 `results/m1_report.md`。
 
 #### Milestone 2：CPU 正式版与打包落地
 
-目标：把默认包策略与显式 `cpu` 版本整理清楚，形成稳定分发模型。
+目标：把默认包策略与显式 `cpu` 版本整理清楚，形成稳定分发模型；同时为 M5 / M6 预留最小非破坏抽象。
 
 - `qrstream` 默认包：
   - Apple 上默认支持 `Metal -> CPU`
@@ -188,6 +188,10 @@ flowchart TD
 - 明确模型文件、wheel、backend runtime 的分发方式
 - 补充安装失败、backend 不可用、fallback 发生时的日志提示
 - 建立针对单帧延迟的基准测试流程
+- **为 M5 / M6 预留的最小抽象**（成本低、不破坏 M1 行为，放在 M2 一起做避免 M5 / M6 时再改基类签名）：
+  - 在 `QRDetector` 基类加 `detect_batch(frames) -> list[DetectResult]` 的**默认实现**（fallback 到 `[self.detect(f) for f in frames]`），此时不真正加速，但所有 detector 立刻拿到一个可用的 batch API
+  - 在 `DetectorRouter` 加 `detect_batch` 的透传实现；单元测试锁定"batch 调用与逐帧调用结果一致"
+  - **不**引入 `FrameSource` / pipeline 改造，这些留给 M5 / M6
 
 #### Milestone 3：CUDA / OpenCL 扩展
 
@@ -210,16 +214,193 @@ flowchart TD
   - 最终统一回退 `CPU`
 - 明确日志输出“当前选中的 backend”和“回退原因”
 
-#### Milestone 5：流水线优化
+#### Milestone 5：流水线优化与 Batch 加速
 
-目标：在不牺牲稳定性的前提下，再追求吞吐和资源利用率。
+目标：在不牺牲稳定性的前提下，再追求吞吐和资源利用率；同时为未来的**流式输入输出**能力预留架构接口。
 
-- 将 detector / SR / decode 分阶段
-- 评估 ROI 复用、条件性触发 SR、帧级缓存
-- 评估 CPU / GPU overlap
-- 评估多线程队列与异步流水线
+本 Milestone 的核心观察是：**M0 benchmark 已经证明 MNN Metal batch 能把 per-frame 延迟从 1.26 ms 降到 0.39 ms（batch=16，3.2×）**。但 M1 的 `ThreadPoolExecutor` 把 worker 设计成独立的短任务（一个 worker 收一帧、推一帧、返回一帧），没法吃到这条加速。M5 把 CNN 推理单独抽成异步 pipeline 阶段，与帧读取、后处理解耦。
 
-注意：这一阶段主要偏向**视频流吞吐**，不是第一版的首要目标。
+##### 5.1 为什么 M1 没做 batch
+
+- M1 的合同是**正确性 + Metal 首版接入 + fallback 稳定**；batch 属于吞吐优化
+- 当前 `probe` / `main scan` / `targeted recovery` 三条路径全部假设 per-frame worker，硬塞 batch 会一次性改三处核心流程
+- batch 下"部分失败"的 fallback 语义会比 M1 单帧路径复杂（整个 batch 退回 OpenCV？还是只退失败的那几帧？）
+- 产品优先级是"先追单帧延迟"，M4 Pro 上 Metal 单帧 1.3 ms 已经足够，首版不必压到 0.4 ms
+
+所以 batch 专门留到 M5。
+
+##### 5.2 Pipeline 架构
+
+```
+┌──────────────┐   ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+│ FrameSource  │──▶│ Batcher      │──▶│ MNN Detect   │──▶│ Decoder Pool │
+│ (video file/ │   │ (coalesce N  │   │ (single MNN  │   │ (ROI+SR+ZXing│
+│  camera/RTP) │   │  frames OR   │   │  session,    │   │  via thread  │
+│              │   │  timeout)    │   │  batch=N)    │   │  pool)       │
+└──────────────┘   └──────────────┘   └──────────────┘   └──────────────┘
+     1 thread        bounded Q N          1 thread          W workers
+```
+
+关键设计点：
+
+- **Batcher 双阈值**：攒够 `batch_size` 帧**或**等满 `max_wait_ms` 就 flush。保证单帧请求不会被无限期挂起 —— 实时摄像头场景（30 fps，`max_wait_ms=33`）天然退化到 batch=1 或 2，延迟依然受控；离线视频场景帧源够快，稳定吃满 batch。
+- **MNN 推理改成单线程 + 单 session**：M1 目前每个 worker 持有自己的 MNN session（per-thread `threading.local`），M5 的 batch 模式换回**单 session 顺序 run**。好处是：
+  - 内存从 `workers × ~1MB` 降到常数；
+  - MNN session 本身就不是为并发 run 设计的，M1 的 per-thread 是为了绕开 `ThreadPoolExecutor` 的共享约束，而 batch pipeline 只有一个推理线程；
+  - backend 切换只需要 init 一次（Metal command queue、CUDA context 都是重对象）。
+- **Decoder pool 保持现状**：CNN 返回 bbox 后，SR + crop + ZXing decode 仍然 per-frame 并行（这条路本来就不吃 batch 加速），继续用 `ThreadPoolExecutor`。
+- **batch=1 退化**：如果 `batch_size=1` 或 Batcher 因为超时 flush 一帧，走和 M1 一样的单帧路径，不引入额外开销。
+
+##### 5.3 API 改造（非破坏性）
+
+在 `QRDetector` 基类上**新增**一个方法，保留 `detect` 不变：
+
+```python
+class QRDetector(abc.ABC):
+    @abc.abstractmethod
+    def detect(self, frame) -> DetectResult: ...                  # 单帧，M1 就有
+    def detect_batch(self, frames) -> list[DetectResult]:          # M5 新增
+        return [self.detect(f) for f in frames]                    # 默认实现
+```
+
+- `OpenCVWeChatDetector` 直接用默认实现（`cv2.wechat_qrcode_WeChatQRCode` 没有 batch 能力）。
+- `MNNQrDetector` 覆写 `detect_batch`：一次 `resizeTensor((N,1,H,W))` + 一次 `runSession` + `getSessionOutput` 按 batch 维度切片。
+- `DetectorRouter.detect_batch` 按 `use_mnn` 分发，失败/MNN no-detect 的样本用单帧 OpenCV 再扫一轮（batch 部分失败时的回退策略）。
+
+##### 5.4 验收项
+
+- `MNNQrDetector.detect_batch` 在 Apple M4 Pro 上 per-frame P50 ≤ 0.6 ms（batch=4+ 命中 M0 的 2.2× 收益）
+- 端到端视频解码 `extract_qr(source=VideoFileSource(path), batch_size=8)` 吞吐 ≥ 2× 对应 M1 单帧路径
+- batch 模式下识别率、fallback 行为、`DetectorRouter` 统计全部与 M1 单帧路径一致
+- batch pipeline 在实时 30 fps 摄像头场景自动退化到低延迟（P95 per-frame ≤ 50 ms）
+- 在 Metal 不可用的 CPU 平台上，batch 不劣化（MNN CPU batch=16 M0 数据约 1.9×，最差情况与单帧持平）
+
+##### 5.5 其余流水线优化（次优先）
+
+这些是 batch 之外的吞吐杠杆，优先级低于 5.2–5.4，但可以在 M5 一并评估：
+
+- **条件性 SR**：只有 bbox 足够小时才跑 SR 模型；大 bbox 直接跳过（M1 已有 `_SR_MAX_SIZE=160` 阈值，M5 再精调）
+- **ROI / 帧级缓存**：相邻帧 bbox 变化小时复用上一帧结果（LT decoder 关心的是 seed 唯一性，重复 bbox 可以 short-circuit）
+- **CPU / GPU overlap**：MNN 推理跑在 GPU 时，CPU 同时做下一批帧的 preprocess + 上一批的 ZXing decode
+- **分离 probe 的 batch 尺寸**：probe 阶段帧数少（3×120 帧），用小 batch；main scan 用大 batch
+
+#### Milestone 6：流式输入输出能力
+
+目标：打破当前 "文件 → 文件" 的硬约束，让 `qrstream` 能接入**摄像头、stdin/stdout 管道、RTP/WebRTC 流**，并把解码结果流式写出。
+
+本 Milestone 与 M5 在架构上高度互补：M5 的 Batcher + 单推理线程 pipeline **就是**流式场景需要的异步分级处理骨架。换句话说，**做完 M5 的人已经做了一半 M6**。把它单独拆成 Milestone 是因为流式改造会动到 `decoder.py` 的语义接口（返回 `list` → `Iterator`），风险面比 M5 的性能优化更大，需要单独的发版保护。
+
+##### 6.1 当前架构里被流式场景打破的假设
+
+| 假设 | 文件场景 | 流式场景 | 应对策略 |
+|------|---------|---------|---------|
+| `total_frames` 已知 | ✓ 可预分配进度条、sample_rate | ✗ 直到流结束才知道 | `total_frames: int \| None` |
+| 可以 seek 到任意帧 | ✓ `CAP_PROP_POS_FRAMES` | ✗ 只能顺序读 | 见 6.3 |
+| probe 三窗口定 sample_rate | ✓ 用视频全长做采样决策 | ✗ 没有"全长"概念 | 改用滑动窗口持续估计 |
+| `extract_qr_from_video` 返回 `list[bytes]` | ✓ 内存足够小 | ✗ 长流会 OOM | 返回 `Iterator[bytes]` |
+| LT decoder 最后一次性 dump 文件 | ✓ 解码完成再写盘 | ✗ 需要流式输出 | 已有 `bytes_dump_to_file`，但它要求 `done=True`，需新增流式 dump |
+
+最大的结构冲突是 **`_targeted_recovery` 依赖 seek**：当前实现会在主扫描结束后按观测到的 `(seed, frame_idx)` 映射回推缺失 seed 的位置、seek 回去重扫。摄像头和 RTP 流做不到这件事。
+
+##### 6.2 流式改造的 3 个抽象点
+
+**抽象 1：`FrameSource` protocol**
+
+把 `_read_frames(video_path, ...)` 里隐含的 "cv2.VideoCapture 打开文件" 抽出来：
+
+```python
+# src/qrstream/frame_source.py (新增)
+class FrameSource(Protocol):
+    def iter_frames(self) -> Iterator[tuple[int, np.ndarray]]: ...
+    @property
+    def total_frames(self) -> int | None: ...  # None = unknown/stream
+    @property
+    def fps(self) -> float | None: ...
+    @property
+    def seekable(self) -> bool: ...            # False ⇒ 禁用 targeted recovery
+
+class VideoFileSource(FrameSource): ...        # 包当前 cv2.VideoCapture 路径
+class CameraSource(FrameSource): ...           # 未来：/dev/video0、AVFoundation
+class StdinPipeSource(FrameSource): ...        # 未来：ffmpeg -f rawvideo pipe
+class RtpSource(FrameSource): ...              # 未来：RTP / WebRTC / RTSP
+```
+
+旧 `extract_qr_from_video(video_path=...)` 内部改为 `extract_qr(source=VideoFileSource(path))`，对外保留为 thin wrapper，兼容不动。
+
+**抽象 2：流式 block 产出 + 流式 LT decode**
+
+当前 `extract_qr_from_video` 返回 `list[bytes]` —— 这个 `list` 就是 "非流式" 的硬伤：LT decode 必须一次性收齐才开始。但 `LTDecoder.consume_block` 其实已经是流式的，只是外层接口把它封死。新增 API：
+
+```python
+# 流式 extract：每识别一个唯一 block 就 yield
+def iter_qr_blocks(source: FrameSource, *,
+                   detector: QRDetector | None = None,
+                   early_terminate: bool = True) -> Iterator[bytes]: ...
+
+# 流式 decode：block 一边进，文件一边写
+def decode_stream(block_iter: Iterable[bytes], sink: BinaryIO, *,
+                  early_terminate: bool = True) -> DecodeResult: ...
+
+# 二者联立 = 完全流式的解码 pipeline
+decode_stream(iter_qr_blocks(source), sys.stdout.buffer)
+```
+
+这和 `LTDecoder` 现有的 `consume_block` + `is_done` 语义一对一，改造成本低。
+
+**抽象 3：`QRDetector.detect_batch` 同时服务 batch 与流**
+
+M5 引入的 `detect_batch` 在流式场景有天然语义：
+- 离线视频：帧源超快，Batcher 总能攒够 N，吃满 batch 加速
+- 实时摄像头：帧源 30 fps、`max_wait_ms=33`，天然退化为 batch=1 或 2，延迟受控
+
+**同一套 batch 接口同时服务两种场景**，不需要给 streaming 单独写一条路径。
+
+##### 6.3 targeted recovery 在流式下的取舍
+
+`_targeted_recovery` 是当前 `extract_qr_from_video` 的"救命草"（见 v070 amd64 回归修复）。流式下没法 seek，必须在**三选一**：
+
+1. **放弃 targeted recovery**（最简单）：要求流式场景的 encoder 侧 `--overhead` 足够高（推荐 ≥ 2.0，比当前 1.5 更保守），靠冗余度绝对避免 LT 卡在 pathological subset。
+2. **环形缓冲 + near-past 重扫**：在 `FrameSource` 层保留近 N 秒（或 M 帧）的 decoded 帧副本，内存换回放。缓冲一旦溢出，丢失的 seed 永远找不回来。
+3. **缓存全流到磁盘后走文件路径**：退化为 "先录后解"，不是真流式，但是对用户透明。
+
+M6 建议默认走 **方案 1**，`FrameSource.seekable` 为 True 时才允许 targeted recovery，False 时 router 层直接跳过该阶段。方案 2、3 是可选扩展。
+
+##### 6.4 流式 encode（补齐对称性）
+
+当前 `encode_to_video` 也是文件 → 文件。流式 encode 的典型场景：
+
+- 从 stdin 读任意长度字节，实时产生 QR 视频流（`qrstream encode --stdin -o /dev/fd/1 | ffmpeg ...`）
+- 作为其他程序的 library，源数据是生成器而非已知文件
+
+对称地抽象：
+
+```python
+class DataSource(Protocol):
+    def read(self, n: int) -> bytes: ...
+    @property
+    def total_size(self) -> int | None: ...    # None = unknown/stream
+
+class FileDataSource(DataSource): ...          # 包 MmapDataSource
+class StdinDataSource(DataSource): ...         # sys.stdin.buffer
+```
+
+注意：**LT 编码需要总数据量来决定 K 和 blocksize**。未知总量（真流）下只能 **chunked encode**：把流切成固定大小的段，每段独立走完整 LT 编解码。这是协议层的新能力，不只是 I/O 层的改造；Milestone 6 先聚焦 decode 侧流式，encode 侧的 chunked LT 留给独立立项。
+
+##### 6.5 落地次序（按风险递增）
+
+本 Milestone 必须分三个独立 feature 分支推进，每一步都要回归测试全绿、对外 API 无破坏：
+
+1. `feature/frame-source-abstraction`：只引入 `FrameSource` protocol + `VideoFileSource` + 旧 API wrapper。**不加新功能**，只把 `_read_frames` / `_read_frame_ranges` 的 "文件路径" 参数替换为 `FrameSource` 实例。回归测试必须全部通过。
+2. `feature/streaming-decode`：在 1 的基础上新增 `iter_qr_blocks` / `decode_stream` 公开 API。同时保留 `extract_qr_from_video` 作为前者的 collect-to-list wrapper。
+3. `feature/non-seekable-sources`：引入 `CameraSource`、`StdinPipeSource`，并根据 `FrameSource.seekable` 禁用 targeted recovery；补测实时摄像头场景的 P95 延迟。
+
+##### 6.6 验收项
+
+- 旧 API（`extract_qr_from_video(video_path=...)`) 行为字节一致，所有现有测试绿
+- 新 API `iter_qr_blocks(source) + decode_stream(iter, sink)` 能在**不知 total_frames** 的情况下完整解码一段视频
+- 摄像头 / stdin 两种非 seekable source 至少各一个端到端测试（放 slow layer）
+- 流式 pipeline 内存占用与视频长度**无关**（只与 M5 的 batch buffer + LT decoder 已 consume 的唯一 block 数成正比）
+- 实时 30 fps 摄像头场景 P95 端到端延迟 ≤ 200 ms（首次识别到 block 可用的时间）
 
 ### TODO 清单（按迭代版本）
 
@@ -262,12 +443,28 @@ flowchart TD
 - 增加 backend 选择与 fallback 日志
 - 增加禁用指定 backend 的调试能力
 
-#### V5 - 流水线优化版
+#### V5 - 流水线优化与 Batch 加速版
 
-- 引入 detector / SR / decode 分阶段队列
-- 增加条件性 SR 策略
+- 给 `QRDetector` 基类新增 `detect_batch`，`MNNQrDetector` 覆写为真正的 batch 推理
+- `DetectorRouter.detect_batch` 的部分失败 fallback 策略（batch 内单帧 no-detect 退回 OpenCV 单帧路径）
+- 引入 detector / SR / decode 分阶段异步队列（Batcher + 单推理线程 + decoder pool）
+- Batcher 双阈值：攒够 `batch_size` 或等满 `max_wait_ms` 就 flush
+- `MNNQrDetector` 在 batch 模式下改用单 session 顺序 run（放弃 M1 的 per-thread session）
+- 增加条件性 SR 策略（bbox 大小阈值再精调）
 - 引入帧间缓存或 ROI 复用
 - 分别评估单帧延迟与视频吞吐收益
+- 验证 Metal batch=4+ 命中 M0 的 2.2× / 3.2× 加速比，CPU batch 不劣化
+
+#### V6 - 流式输入输出版
+
+- 引入 `FrameSource` protocol：`VideoFileSource` 包当前 `cv2.VideoCapture` 路径
+- `_read_frames` / `_read_frame_ranges` 改为接受 `FrameSource` 实例
+- 保留 `extract_qr_from_video(video_path=...)` 作为 thin wrapper，旧测试全绿
+- 新增 `iter_qr_blocks(source)` + `decode_stream(blocks, sink)` 公开 API
+- 引入 `FrameSource.seekable` 标志；非 seekable 时 router 层跳过 targeted recovery
+- 新增 `CameraSource` / `StdinPipeSource`，补实时摄像头与管道端到端 slow 测试
+- 验证流式 pipeline 内存占用与视频长度无关
+- （延后）流式 encode：`DataSource` protocol + chunked LT 编码（独立立项，不放在本 Milestone）
 
 ### 接下来的实现顺序（按当前计划）
 
