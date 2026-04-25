@@ -25,8 +25,20 @@
 
 ## 历史分支兼容策略
 
-- 已存在的 `dev/*` 历史分支保留，不做重命名或迁移。
+- 原 `dev/*` 历史分支已于 2026-04 迁移到 `archive/dev-*` 命名空间。
+  commit 历史完整保留，仅 ref 路径发生变化。迁移原因：`refs/heads/dev/xxx`
+  与新建的集成分支 `refs/heads/dev` 在 git ref 目录规则下冲突，无法共存。
+  迁移对照：
+
+  | 原分支 | 归档分支 |
+  |---|---|
+  | `dev/border_and_lead_in` | `archive/dev-border_and_lead_in` |
+  | `dev/performance` | `archive/dev-performance` |
+  | `dev/performance-enhance` | `archive/dev-performance-enhance` |
+  | `dev/threadpool-refactor` | `archive/dev-threadpool-refactor` |
+
 - 后续新工作分支不再使用 `dev/*` 命名，统一改用 `feature/*` / `fix/*` / `hotfix/*`。
+- `archive/*` 下的分支不参与 CI 验证链，仅作历史留存使用，不做后续推进。
 - CI 仅对 `main` 与 `dev` 的 `push` 生效；`feature/*`、`fix/*` 通过 PR 进入验证链。
 
 ## 推荐提交流程
