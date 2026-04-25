@@ -103,7 +103,7 @@ def cmd_decode(args):
 
     print(f"Found {len(blocks)} unique blocks. Decoding...")
 
-    output_path = args.output or "decoded_output"
+    output_path = args.output
     written = decode_blocks_to_file(blocks, output_path, args.verbose)
 
     if written is None:
@@ -166,8 +166,8 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
     dec = subparsers.add_parser(
         'decode', help='Decode a QR code video back to the original file')
     dec.add_argument('video', help='Path to the video file (MOV, MP4, etc.)')
-    dec.add_argument('-o', '--output', default=None,
-                     help='Output file path (default: decoded_output)')
+    dec.add_argument('-o', '--output', required=True,
+                     help='Output file path')
     dec.add_argument('-s', '--sample-rate', type=int, default=0,
                      help='Process every Nth frame (default: 0=auto-detect)')
     dec.add_argument('-w', '--workers', type=int, default=None,

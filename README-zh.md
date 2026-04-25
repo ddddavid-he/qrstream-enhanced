@@ -118,7 +118,7 @@ qrstream decode <video> -o output_file [options]
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `<video>` | - | 输入视频路径（MP4, MOV 等） |
-| `-o, --output` | `decoded_output` | 输出文件路径 |
+| `-o, --output` | **必填** | 输出文件路径 |
 | `-s, --sample-rate` | `0`（自动） | 每 N 帧采样一次（0=自适应探测） |
 | `-w, --workers` | 全部 CPU 核心 | QR 识别的并行工作线程数。`WeChatQRCode` 是 C++ 实现、执行期间释放 GIL，多线程能真正并行。 |
 | `-v, --verbose` | - | 输出详细进度信息；大任务会显示 probe、扫描、LT 解码和写文件进度 |

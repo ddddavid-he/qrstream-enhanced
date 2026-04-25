@@ -120,7 +120,7 @@ qrstream decode <video> -o output_file [options]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `<video>` | - | Input video path (MP4, MOV, etc.) |
-| `-o, --output` | `decoded_output` | Output file path |
+| `-o, --output` | **required** | Output file path |
 | `-s, --sample-rate` | `0` (auto) | Sample every Nth frame (0 = adaptive probing) |
 | `-w, --workers` | All CPU cores | Parallel worker threads for QR detection. `WeChatQRCode` is implemented in C++ and releases the GIL during detection, so more threads scale close to linearly on multi-core machines. |
 | `-v, --verbose` | - | Print detailed progress |

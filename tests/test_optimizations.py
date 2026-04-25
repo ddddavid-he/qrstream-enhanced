@@ -117,12 +117,12 @@ class TestCli:
 
     def test_verbose_flag_stays_on_subcommands(self):
         parser = build_parser()
-        args = parser.parse_args(['encode', 'input.bin', '-v'])
+        args = parser.parse_args(['encode', 'input.bin', '-o', 'out.mp4', '-v'])
         assert args.verbose is True
 
     def test_encode_border_default_uses_standard_quiet_zone(self):
         parser = build_parser()
-        args = parser.parse_args(['encode', 'input.bin'])
+        args = parser.parse_args(['encode', 'input.bin', '-o', 'out.mp4'])
         assert args.border is None
 
 
