@@ -17,7 +17,12 @@ import pytest
 from qrstream.detector.base import QRDetector, DetectResult
 from qrstream.detector.opencv_wechat import OpenCVWeChatDetector, _valid_frame
 from qrstream.detector.router import DetectorRouter
-from qrstream.detector.mnn_detector import _valid_frame as _mnn_valid_frame, _clamp_bbox
+from qrstream.detector.mnn_detector import (
+    _valid_frame as _mnn_valid_frame,
+    _clamp_bbox,
+    _pad_bbox,
+    _QUIET_ZONE_PAD_RATIO,
+)
 
 
 # ── DetectResult ──────────────────────────────────────────────────
@@ -228,3 +233,60 @@ class TestNonContiguousMemory:
         result = det.detect(sliced)
         assert isinstance(result, DetectResult)
         # Should not crash, may or may not detect
+
+
+# ── Quiet-zone padding (regression for MNN tight-crop bug) ────────
+#
+# IMG_9425.MOV detect-only breakdown (see
+# ``dev/wechatqrcode-mnn-poc/results`` / ``.bench/results-host/``):
+#   pad =  0% → ZXing decodes 0/100 crops
+#   pad =  5% → 93/100
+#   pad >= 15% → 95/100 (matches OpenCV full-frame upper bound)
+# These tests lock in the shape of ``_pad_bbox`` so nobody silently
+# regresses the ratio back to zero.
+
+class TestPadBboxForQuietZone:
+    def test_default_ratio_is_non_zero(self):
+        """Guard: if this drops to 0 the production ZXing decode dies."""
+        assert _QUIET_ZONE_PAD_RATIO > 0
+        # ISO 18004 needs 4 modules quiet zone; for V25 (117×117) that's
+        # ~3.4% of the bbox.  The constant chosen must leave headroom
+        # for bbox jitter and still clear that floor.
+        assert _QUIET_ZONE_PAD_RATIO >= 0.10
+
+    def test_pad_expands_bbox_on_all_sides_when_room(self):
+        x0, y0, x1, y1 = _pad_bbox(100, 100, 200, 200, 1000, 1000, 0.15)
+        # 0.15 × short_edge(100) = 15 px
+        assert (x0, y0, x1, y1) == (85, 85, 215, 215)
+
+    def test_pad_clamps_to_image_bounds(self):
+        # Bbox sits in the corner — padding should not escape [0, W/H]
+        x0, y0, x1, y1 = _pad_bbox(5, 5, 50, 50, 60, 60, 0.5)
+        assert x0 == 0 and y0 == 0
+        assert x1 <= 60 and y1 <= 60
+        assert x1 > x0 and y1 > y0
+
+    def test_pad_uses_short_edge(self):
+        # Wide bbox (200×40): padding is driven by the short edge (40).
+        # 0.15 × 40 = 6 → symmetric 6 px on every side.
+        x0, y0, x1, y1 = _pad_bbox(100, 100, 300, 140, 1000, 1000, 0.15)
+        assert (x0, y0, x1, y1) == (94, 94, 306, 146)
+
+    def test_pad_noop_for_zero_ratio(self):
+        before = (10, 10, 50, 50)
+        after = _pad_bbox(*before, 1000, 1000, 0.0)
+        assert after == before
+
+    def test_pad_minimum_one_pixel_for_tiny_bboxes(self):
+        # 4×4 bbox × 0.15 = 0.6 → would round to 0; the helper must
+        # still pad by at least 1 px so we never silently degrade to
+        # pad=0 for small codes.
+        x0, y0, x1, y1 = _pad_bbox(100, 100, 104, 104, 1000, 1000, 0.15)
+        assert (x0, y0) == (99, 99)
+        assert (x1, y1) == (105, 105)
+
+    def test_pad_rejects_degenerate_input(self):
+        # Inverted / zero-area inputs must pass through unchanged, so
+        # they stay degenerate and the caller can skip them.
+        assert _pad_bbox(50, 50, 50, 60, 100, 100, 0.15) == (50, 50, 50, 60)
+        assert _pad_bbox(50, 50, 40, 60, 100, 100, 0.15) == (50, 50, 40, 60)

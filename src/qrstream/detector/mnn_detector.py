@@ -61,6 +61,22 @@ _SSD_TARGET_AREA = 400.0 * 400.0
 # (sqrt(area)) is smaller than this in pixels.
 _SR_MAX_SIZE = 160
 
+# Quiet-zone padding ratio applied to every detected bbox before
+# handing the crop to the CPU ZXing decoder.
+#
+# ISO/IEC 18004 requires a 4-module quiet zone around the code.
+# MNN's SSD detector returns a **tight** bbox that hugs the outer
+# finder modules; cropping on that bbox strips the quiet zone and
+# ZXing's Finder Pattern scanner inside the crop fails on every
+# frame (see dev/wechatqrcode-mnn-poc/results/detect_breakdown_report.md:
+# `pad=0%` → 0/100, `pad=5%` → 93/100, `pad>=15%` → 95/100 — the
+# 95/100 figure matches OpenCV full-frame decode, i.e. we hit the
+# upper bound).  15% of the bbox's short edge is comfortably more
+# than 4 modules for every QR version we generate (V25 => 117×117
+# modules; 4 modules is ~3.4% of the code's width) and leaves
+# headroom for bbox jitter.
+_QUIET_ZONE_PAD_RATIO = 0.15
+
 # Sentinel used by per-thread lazy-init guards to distinguish
 # "not yet attempted" from "attempted but failed (cached None)".
 _UNINIT = object()
@@ -143,13 +159,25 @@ class MNNQrDetector(QRDetector):
                 continue
 
             x0, y0, x1, y1 = roi
-            cropped = frame[y0:y1, x0:x1]
+            # Tight bbox from the SSD detector hugs the outer finder
+            # modules.  Expand by a quiet-zone margin before cropping
+            # so ZXing inside ``_cpu_decode`` can actually find the
+            # finder pattern (without this, hit rate drops to 0% on
+            # real captures — see the constant's docstring for data).
+            px0, py0, px1, py1 = _pad_bbox(
+                x0, y0, x1, y1, img_w, img_h, _QUIET_ZONE_PAD_RATIO,
+            )
+            cropped = frame[py0:py1, px0:px1]
             if cropped.size == 0:
                 continue
 
-            # Optionally apply super-resolution
+            # Optionally apply super-resolution on the padded crop.
+            # We intentionally use the padded size for the SR gate:
+            # SR is aimed at small codes, and quiet-zone padding
+            # only inflates the effective size by ~30% on the short
+            # edge, so the threshold remains meaningful.
             if sr_sess is not None:
-                area = (x1 - x0) * (y1 - y0)
+                area = (px1 - px0) * (py1 - py0)
                 if area > 0 and int(area ** 0.5) < _SR_MAX_SIZE:
                     try:
                         cropped = self._run_sr(cropped, sr_sess)
@@ -161,6 +189,16 @@ class MNNQrDetector(QRDetector):
 
             # CPU decode (use OpenCV WeChatQRCode on the cropped region)
             text = self._cpu_decode(cropped)
+            if text is None:
+                # Safety net: on the off-chance that padding hurt this
+                # particular frame (e.g. heavy background clutter), try
+                # the original tight crop as a second attempt.  Data
+                # suggests this path almost never fires, but the cost
+                # is bounded (one extra ZXing call per missed bbox).
+                tight = frame[y0:y1, x0:x1]
+                if tight.size:
+                    text = self._cpu_decode(tight)
+
             if text:
                 bbox_pts = np.array([
                     [x0, y0], [x1, y0], [x1, y1], [x0, y1]
@@ -554,3 +592,42 @@ def _clamp_bbox(bbox: np.ndarray, img_w: int, img_h: int) -> tuple[int, int, int
         return None
 
     return (x0, y0, x1, y1)
+
+
+def _pad_bbox(
+    x0: int, y0: int, x1: int, y1: int,
+    img_w: int, img_h: int, ratio: float,
+) -> tuple[int, int, int, int]:
+    """Expand a clamped (x0, y0, x1, y1) bbox by ``ratio`` and re-clamp.
+
+    Padding is computed from the bbox's own short edge — that keeps
+    the effective quiet zone proportional to the QR code's on-screen
+    size, so both close-up and far-away captures get comparable
+    margins.  At least 1 pixel is added on each side whenever the
+    requested ratio is > 0, so pathologically tiny bboxes don't
+    silently collapse back to pad=0.
+
+    Safety: the result is always re-clamped to image bounds, so this
+    can never produce coordinates outside ``[0, img_w]`` / ``[0, img_h]``.
+    """
+    if ratio <= 0:
+        return (x0, y0, x1, y1)
+
+    w = x1 - x0
+    h = y1 - y0
+    if w <= 0 or h <= 0:
+        return (x0, y0, x1, y1)
+
+    # Pad based on the short edge so tall-narrow / wide-short bboxes
+    # still get a roughly square margin.
+    short = min(w, h)
+    pad = max(1, int(round(short * ratio)))
+
+    nx0 = max(0, x0 - pad)
+    ny0 = max(0, y0 - pad)
+    nx1 = min(img_w, x1 + pad)
+    ny1 = min(img_h, y1 + pad)
+
+    if nx1 <= nx0 or ny1 <= ny0:
+        return (x0, y0, x1, y1)
+    return (nx0, ny0, nx1, ny1)
