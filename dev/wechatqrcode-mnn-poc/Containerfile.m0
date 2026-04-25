@@ -1,0 +1,408 @@
+# Milestone 0: WeChatQRCode Caffe → MNN conversion & verification
+#
+# Build:
+#   podman build -f dev/wechatqrcode-mnn-poc/Containerfile.m0 \
+#       -t qrstream-mnn-m0 .
+#
+# Run verification:
+#   podman run --rm qrstream-mnn-m0
+#
+# Extract MNN models (optional):
+#   podman run --rm -v $(pwd)/dev/wechatqrcode-mnn-poc/models:/out:Z \
+#       qrstream-mnn-m0 \
+#       sh -c 'cp -r /workspace/models/mnn /out/ && cp -r /workspace/models/caffe /out/'
+#
+FROM python:3.12-slim AS base
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ca-certificates libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+# Install Python deps
+RUN pip install --no-cache-dir \
+    opencv-contrib-python-headless>=4.5.0 \
+    numpy>=1.20.0 \
+    MNN
+
+# ── Step 1: Download Caffe models ────────────────────────────────
+RUN mkdir -p /workspace/models/caffe /workspace/models/mnn \
+    && cd /workspace/models/caffe \
+    && for f in detect.prototxt detect.caffemodel sr.prototxt sr.caffemodel; do \
+         echo "Downloading $f..." ; \
+         curl -fSL "https://raw.githubusercontent.com/WeChatCV/opencv_3rdparty/wechat_qrcode/$f" \
+              -o "$f" ; \
+       done \
+    && echo "" \
+    && echo "=== Caffe model SHA256 ===" \
+    && sha256sum /workspace/models/caffe/* \
+    && echo "" \
+    && echo "=== Caffe model sizes ===" \
+    && ls -lh /workspace/models/caffe/
+
+# ── Step 2: Convert Caffe → MNN ──────────────────────────────────
+RUN echo "=== Converting detect model ===" \
+    && mnnconvert \
+        -f CAFFE \
+        --modelFile /workspace/models/caffe/detect.caffemodel \
+        --prototxt /workspace/models/caffe/detect.prototxt \
+        --MNNModel /workspace/models/mnn/detect.mnn \
+        --bizCode qrstream 2>&1 \
+    && echo "" \
+    && echo "=== Converting SR model ===" \
+    && mnnconvert \
+        -f CAFFE \
+        --modelFile /workspace/models/caffe/sr.caffemodel \
+        --prototxt /workspace/models/caffe/sr.prototxt \
+        --MNNModel /workspace/models/mnn/sr.mnn \
+        --bizCode qrstream 2>&1 \
+    && echo "" \
+    && echo "=== MNN model SHA256 ===" \
+    && sha256sum /workspace/models/mnn/* \
+    && echo "" \
+    && echo "=== MNN model sizes ===" \
+    && ls -lh /workspace/models/mnn/
+
+# ── Step 3: Inline verification script ───────────────────────────
+COPY <<'EOF' /workspace/verify_m0.py
+#!/usr/bin/env python3
+"""Milestone 0: verify Caffe→MNN conversion produces usable models."""
+
+import json
+import platform
+import sys
+import time
+
+import cv2
+import numpy as np
+
+CAFFE_DIR = "/workspace/models/caffe"
+MNN_DIR = "/workspace/models/mnn"
+
+SSD_W, SSD_H = 300, 300
+
+report = {
+    "platform": platform.platform(),
+    "python": sys.version,
+    "opencv": cv2.__version__,
+    "detector": {},
+    "sr": {},
+}
+
+
+def make_test_image():
+    """Create a 400x400 image with an embedded QR code."""
+    try:
+        enc = cv2.QRCodeEncoder.create()
+        qr = enc.encode("HELLO QRSTREAM MNN M0")
+        if qr is not None and qr.size > 0:
+            if qr.ndim == 2:
+                qr = cv2.cvtColor(qr, cv2.COLOR_GRAY2BGR)
+            h, w = qr.shape[:2]
+            canvas = np.ones((400, 400, 3), dtype=np.uint8) * 255
+            y0 = (400 - h) // 2
+            x0 = (400 - w) // 2
+            y1 = min(y0 + h, 400)
+            x1 = min(x0 + w, 400)
+            canvas[y0:y1, x0:x1] = qr[:y1 - y0, :x1 - x0]
+            return canvas
+    except Exception as e:
+        print(f"  QRCodeEncoder not available ({e}), using synthetic image")
+    # Fallback: synthetic pattern
+    img = np.ones((400, 400, 3), dtype=np.uint8) * 200
+    cv2.rectangle(img, (80, 80), (320, 320), (0, 0, 0), 3)
+    cv2.rectangle(img, (100, 100), (180, 180), (0, 0, 0), -1)
+    cv2.rectangle(img, (220, 100), (300, 180), (0, 0, 0), -1)
+    cv2.rectangle(img, (100, 220), (180, 300), (0, 0, 0), -1)
+    return img
+
+
+# ── Detector verification ────────────────────────────────────────
+def verify_detector(img):
+    print("=" * 60)
+    print("DETECTOR MODEL VERIFICATION")
+    print("=" * 60)
+
+    img_h, img_w = img.shape[:2]
+    resized = cv2.resize(img, (SSD_W, SSD_H), interpolation=cv2.INTER_CUBIC)
+    blob = cv2.dnn.blobFromImage(resized, 1.0 / 255,
+                                  (SSD_W, SSD_H), (0, 0, 0), False, False)
+
+    # --- OpenCV DNN ---
+    print("\n[OpenCV DNN]")
+    net = cv2.dnn.readNetFromCaffe(
+        f"{CAFFE_DIR}/detect.prototxt",
+        f"{CAFFE_DIR}/detect.caffemodel")
+    net.setInput(blob, "data")
+    t0 = time.perf_counter()
+    cv_out = net.forward("detection_output")
+    t_cv = (time.perf_counter() - t0) * 1000
+    print(f"  Output shape: {cv_out.shape}")
+    print(f"  Inference: {t_cv:.1f} ms")
+    print(f"  Value range: [{cv_out.min():.6f}, {cv_out.max():.6f}]")
+
+    cv_dets = []
+    for i in range(cv_out.shape[2]):
+        row = cv_out[0, 0, i]
+        if row[1] == 1 and row[2] > 1e-5:
+            cv_dets.append({"conf": float(row[2]),
+                            "bbox": [float(x) for x in row[3:7]]})
+    print(f"  QR detections: {len(cv_dets)}")
+    for d in cv_dets:
+        print(f"    conf={d['conf']:.4f} bbox={d['bbox']}")
+
+    # --- MNN ---
+    print("\n[MNN]")
+    try:
+        import MNN
+        print(f"  MNN version: {MNN.version()}" if hasattr(MNN, 'version') else "  MNN imported OK")
+    except ImportError as e:
+        print(f"  MNN import FAILED: {e}")
+        report["detector"]["status"] = "SKIP_NO_MNN"
+        return False
+
+    try:
+        interp = MNN.Interpreter(f"{MNN_DIR}/detect.mnn")
+        config = MNN.ScheduleConfig()
+        config.type = MNN.Forward_CPU
+        session = interp.createSession(config)
+
+        input_tensor = interp.getSessionInput(session)
+        # Prepare NCHW input
+        input_data = resized.astype(np.float32) / 255.0
+        input_data = np.transpose(input_data, (2, 0, 1))   # HWC → CHW
+        input_data = np.expand_dims(input_data, axis=0)     # NCHW
+
+        tmp_in = MNN.Tensor(
+            input_data.shape, MNN.Halide_Type_Float,
+            input_data, MNN.Tensor_DimensionType_Caffe)
+        input_tensor.copyFrom(tmp_in)
+
+        t0 = time.perf_counter()
+        interp.runSession(session)
+        t_mnn = (time.perf_counter() - t0) * 1000
+
+        out_tensor = interp.getSessionOutput(session, "detection_output")
+        out_shape = out_tensor.getShape()
+        print(f"  Output shape: {list(out_shape)}")
+        print(f"  Inference: {t_mnn:.1f} ms")
+
+        tmp_out = MNN.Tensor(out_shape, MNN.Halide_Type_Float,
+                             np.zeros(out_shape, dtype=np.float32),
+                             MNN.Tensor_DimensionType_Caffe)
+        out_tensor.copyToHostTensor(tmp_out)
+        mnn_data = np.array(tmp_out.getData(), dtype=np.float32)
+        print(f"  Data length: {len(mnn_data)}")
+        print(f"  Value range: [{mnn_data.min():.6f}, {mnn_data.max():.6f}]")
+
+        # Parse MNN detections
+        n_det = out_shape[2] if len(out_shape) >= 3 else 0
+        dim = out_shape[3] if len(out_shape) >= 4 else 0
+        mnn_dets = []
+        if dim == 7 and len(mnn_data) >= n_det * 7:
+            mnn_arr = mnn_data[:n_det * 7].reshape(n_det, 7)
+            for row in mnn_arr:
+                if row[1] == 1 and row[2] > 1e-5:
+                    mnn_dets.append({"conf": float(row[2]),
+                                     "bbox": [float(x) for x in row[3:7]]})
+        print(f"  QR detections: {len(mnn_dets)}")
+        for d in mnn_dets:
+            print(f"    conf={d['conf']:.4f} bbox={d['bbox']}")
+
+    except Exception as e:
+        print(f"  MNN inference FAILED: {e}")
+        import traceback; traceback.print_exc()
+        report["detector"]["status"] = "FAIL"
+        report["detector"]["error"] = str(e)
+        return False
+
+    # --- Compare ---
+    print("\n[Comparison]")
+    cv_flat = cv_out.flatten()
+    min_len = min(len(cv_flat), len(mnn_data))
+    if min_len == 0:
+        print("  WARNING: empty output")
+        report["detector"]["status"] = "FAIL_EMPTY"
+        return False
+
+    cv_f = cv_flat[:min_len]
+    mnn_f = mnn_data[:min_len]
+    max_err = float(np.max(np.abs(cv_f - mnn_f)))
+    mean_err = float(np.mean(np.abs(cv_f - mnn_f)))
+    norm_cv = np.linalg.norm(cv_f)
+    norm_mnn = np.linalg.norm(mnn_f)
+    cosine = float(np.dot(cv_f, mnn_f) / (norm_cv * norm_mnn + 1e-12))
+
+    print(f"  Max abs error:  {max_err:.6f}")
+    print(f"  Mean abs error: {mean_err:.6f}")
+    print(f"  Cosine sim:     {cosine:.6f}")
+    print(f"  Shape match:    {list(cv_out.shape)} vs {list(out_shape)}")
+    print(f"  Det count match: {len(cv_dets)} vs {len(mnn_dets)}")
+
+    ok = max_err < 0.05 and cosine > 0.95
+    report["detector"] = {
+        "status": "PASS" if ok else "FAIL",
+        "cv_shape": list(cv_out.shape),
+        "mnn_shape": list(out_shape),
+        "max_err": max_err,
+        "mean_err": mean_err,
+        "cosine": cosine,
+        "cv_time_ms": round(t_cv, 1),
+        "mnn_time_ms": round(t_mnn, 1),
+        "cv_detections": len(cv_dets),
+        "mnn_detections": len(mnn_dets),
+    }
+    print(f"\n  >>> {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+# ── SR verification ──────────────────────────────────────────────
+def verify_sr(img):
+    print("\n" + "=" * 60)
+    print("SUPER-RESOLUTION MODEL VERIFICATION")
+    print("=" * 60)
+
+    # Use a small grayscale crop
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    crop = gray[100:200, 100:200]  # 100×100
+    crop_h, crop_w = crop.shape[:2]
+    print(f"\n  Input: {crop_w}x{crop_h} grayscale")
+
+    blob = cv2.dnn.blobFromImage(crop, 1.0 / 255,
+                                  (crop_w, crop_h), (0.0,), False, False)
+
+    # --- OpenCV DNN ---
+    print("\n[OpenCV DNN]")
+    net = cv2.dnn.readNetFromCaffe(
+        f"{CAFFE_DIR}/sr.prototxt",
+        f"{CAFFE_DIR}/sr.caffemodel")
+    net.setInput(blob)
+    t0 = time.perf_counter()
+    cv_out = net.forward()
+    t_cv = (time.perf_counter() - t0) * 1000
+    print(f"  Output shape: {cv_out.shape}")
+    print(f"  Output range: [{cv_out.min():.4f}, {cv_out.max():.4f}]")
+    print(f"  Inference: {t_cv:.1f} ms")
+    cv_h, cv_w = cv_out.shape[2], cv_out.shape[3]
+    print(f"  SR output size: {cv_w}x{cv_h} (expected {crop_w*2}x{crop_h*2})")
+
+    # --- MNN ---
+    print("\n[MNN]")
+    try:
+        import MNN
+        interp = MNN.Interpreter(f"{MNN_DIR}/sr.mnn")
+        config = MNN.ScheduleConfig()
+        config.type = MNN.Forward_CPU
+        session = interp.createSession(config)
+
+        input_tensor = interp.getSessionInput(session)
+        input_data = crop.astype(np.float32) / 255.0
+        input_data = input_data.reshape(1, 1, crop_h, crop_w)
+
+        # Resize for dynamic input
+        interp.resizeTensor(input_tensor, [1, 1, crop_h, crop_w])
+        interp.resizeSession(session)
+
+        tmp_in = MNN.Tensor(
+            [1, 1, crop_h, crop_w], MNN.Halide_Type_Float,
+            input_data, MNN.Tensor_DimensionType_Caffe)
+        input_tensor.copyFrom(tmp_in)
+
+        t0 = time.perf_counter()
+        interp.runSession(session)
+        t_mnn = (time.perf_counter() - t0) * 1000
+
+        out_tensor = interp.getSessionOutput(session)
+        out_shape = out_tensor.getShape()
+        print(f"  Output shape: {list(out_shape)}")
+        print(f"  Inference: {t_mnn:.1f} ms")
+
+        tmp_out = MNN.Tensor(out_shape, MNN.Halide_Type_Float,
+                             np.zeros(out_shape, dtype=np.float32),
+                             MNN.Tensor_DimensionType_Caffe)
+        out_tensor.copyToHostTensor(tmp_out)
+        mnn_data = np.array(tmp_out.getData(), dtype=np.float32)
+        print(f"  Output range: [{mnn_data.min():.4f}, {mnn_data.max():.4f}]")
+        mnn_h = out_shape[2] if len(out_shape) > 2 else 0
+        mnn_w = out_shape[3] if len(out_shape) > 3 else 0
+        print(f"  SR output size: {mnn_w}x{mnn_h}")
+
+    except Exception as e:
+        print(f"  MNN inference FAILED: {e}")
+        import traceback; traceback.print_exc()
+        report["sr"]["status"] = "FAIL"
+        report["sr"]["error"] = str(e)
+        return False
+
+    # --- Compare ---
+    print("\n[Comparison]")
+    cv_flat = cv_out.flatten()
+    min_len = min(len(cv_flat), len(mnn_data))
+    cv_f = cv_flat[:min_len]
+    mnn_f = mnn_data[:min_len]
+    max_err = float(np.max(np.abs(cv_f - mnn_f)))
+    mean_err = float(np.mean(np.abs(cv_f - mnn_f)))
+    cosine = float(np.dot(cv_f, mnn_f) / (
+        np.linalg.norm(cv_f) * np.linalg.norm(mnn_f) + 1e-12))
+    size_match = (cv_h == mnn_h and cv_w == mnn_w)
+
+    print(f"  Size match:     {size_match} (CV: {cv_w}x{cv_h}, MNN: {mnn_w}x{mnn_h})")
+    print(f"  Max abs error:  {max_err:.6f}")
+    print(f"  Mean abs error: {mean_err:.6f}")
+    print(f"  Cosine sim:     {cosine:.6f}")
+
+    ok = max_err < 0.05 and cosine > 0.95 and size_match
+    report["sr"] = {
+        "status": "PASS" if ok else "FAIL",
+        "cv_shape": list(cv_out.shape),
+        "mnn_shape": list(out_shape),
+        "size_match": size_match,
+        "max_err": max_err,
+        "mean_err": mean_err,
+        "cosine": cosine,
+        "cv_time_ms": round(t_cv, 1),
+        "mnn_time_ms": round(t_mnn, 1),
+    }
+    print(f"\n  >>> {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+# ── Main ─────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    print(f"Python:  {sys.version}")
+    print(f"OpenCV:  {cv2.__version__}")
+    print(f"NumPy:   {np.__version__}")
+    try:
+        import MNN
+        print(f"MNN:     imported OK")
+    except ImportError:
+        print("MNN:     NOT AVAILABLE")
+    print(f"Platform: {platform.platform()}")
+    print()
+
+    img = make_test_image()
+    print(f"Test image: {img.shape}")
+    cv2.imwrite("/workspace/test_qr.png", img)
+
+    det_ok = verify_detector(img)
+    sr_ok = verify_sr(img)
+
+    print("\n" + "=" * 60)
+    print("MILESTONE 0 SUMMARY")
+    print("=" * 60)
+    print(f"  Detector: {report['detector'].get('status', 'N/A')}")
+    print(f"  SR:       {report['sr'].get('status', 'N/A')}")
+    print()
+
+    # Write JSON report
+    with open("/workspace/m0_report.json", "w") as f:
+        json.dump(report, f, indent=2)
+    print("Report saved to /workspace/m0_report.json")
+
+    all_ok = det_ok and sr_ok
+    print(f"\nOverall: {'ALL PASS' if all_ok else 'HAS FAILURES'}")
+    sys.exit(0 if all_ok else 1)
+EOF
+
+CMD ["python3", "/workspace/verify_m0.py"]

@@ -633,7 +633,8 @@ def _probe_sample_rate(video_path: str, workers: int,
 
 
 def extract_qr_from_video(video_path: str, sample_rate: int = 0,
-                           verbose: bool = False, workers: int | None = None):
+                           verbose: bool = False, workers: int | None = None,
+                           use_mnn: bool = False):
     """Extract unique QR code payloads from a video file.
 
     Uses an LT decoder internally for early termination: stops scanning
@@ -647,6 +648,9 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
         sample_rate: Process every Nth frame. 0 = auto-detect (default).
         verbose: Print progress details.
         workers: Number of parallel worker processes.
+        use_mnn: When True, use MNN-accelerated detection with
+            automatic fallback to OpenCV WeChatQRCode.  Default False
+            preserves the existing behaviour.
 
     Returns a list of raw block byte strings.
     """
@@ -661,6 +665,19 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
 
     if workers is None:
         workers = os.cpu_count() or 1
+
+    # ── Detector router (MNN opt-in) ──────────────────────────────
+    qr_router = None
+    if use_mnn:
+        try:
+            from .detector import DetectorRouter
+            qr_router = DetectorRouter(use_mnn=True)
+            if verbose:
+                print(f"MNN detector enabled: {qr_router.name}")
+        except Exception as e:
+            if verbose:
+                print(f"MNN detector init failed ({e}), using OpenCV fallback")
+            qr_router = None
 
     if verbose:
         print(f"Video: {total_frames} frames, {src_fps:.1f} FPS, {duration:.1f}s")

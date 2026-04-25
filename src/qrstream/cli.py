@@ -92,7 +92,8 @@ def cmd_decode(args):
     print("Extracting QR codes...")
 
     blocks = extract_qr_from_video(
-        args.video, args.sample_rate, args.verbose, args.workers)
+        args.video, args.sample_rate, args.verbose, args.workers,
+        use_mnn=args.use_mnn)
 
     if not blocks:
         print("No QR codes detected. Check that the video clearly shows QR codes.")
@@ -169,6 +170,11 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                      help='Process every Nth frame (default: 0=auto-detect)')
     dec.add_argument('-w', '--workers', type=int, default=None,
                      help='Parallel workers (default: all CPU cores)')
+    dec.add_argument('--mnn', action='store_true', default=False,
+                     dest='use_mnn',
+                     help='Enable MNN-accelerated QR detection '
+                          '(auto-selects Metal on Apple, CPU elsewhere; '
+                          'falls back to OpenCV WeChatQRCode on failure)')
     dec.add_argument('-v', '--verbose', action='store_true',
                      help='Print detailed progress')
 

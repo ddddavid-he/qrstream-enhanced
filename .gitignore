@@ -35,6 +35,9 @@ uv.lock
 # Performance profiling outputs (local only, not versioned)
 dev/perf-profile/results/
 
+# WeChatQRCode MNN PoC vendored upstream source (local reference only)
+dev/wechatqrcode-mnn-poc/third_party/
+
 # Diagnostic / benchmark data products (local only, reproducible
 # by re-running dev/diag-*.py and dev/bench-*.py).  The scripts
 # themselves are versioned; their outputs are not.

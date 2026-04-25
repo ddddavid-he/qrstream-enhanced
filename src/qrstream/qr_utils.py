@@ -172,11 +172,27 @@ _thread_local = threading.local()
 def try_decode_qr(frame: np.ndarray, qr_detector=None) -> str | None:
     """Decode a QR code from a frame using WeChatQRCode.
 
+    Args:
+        frame: BGR uint8 ``np.ndarray`` of shape ``(H, W, 3)``.
+        qr_detector: Optional :class:`~qrstream.detector.base.QRDetector`
+            instance.  When provided, its ``detect()`` method is called
+            instead of the built-in WeChatQRCode path.  This is the
+            integration point for the MNN accelerated detector.
+
     Returns the decoded string or None.  Non-UTF-8 payloads (e.g.
     raw-bytes COBS output from some detectors) cause WeChatQR to
     raise UnicodeDecodeError; we swallow that and return None so
     the caller can try alternative detectors if it wants.
     """
+    # ── New pluggable detector path ──────────────────────────────
+    if qr_detector is not None:
+        try:
+            result = qr_detector.detect(frame)
+            return result.text
+        except Exception:
+            return None
+
+    # ── Legacy WeChatQRCode path (default) ───────────────────────
     # Lazy-init WeChatQRCode detector (per-thread, for ThreadPoolExecutor)
     detector = getattr(_thread_local, "detector", _UNINIT)
     if detector is _UNINIT:
