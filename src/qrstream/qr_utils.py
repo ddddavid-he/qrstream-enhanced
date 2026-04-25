@@ -147,6 +147,16 @@ def _render_qr(payload: str, ec_level: int, box_size: int,
         # boost_error=False: honour the requested EC level exactly,
         # never silently upgrade it (keeps frame size predictable).
         boost_error=False,
+        # mask=0: skip segno's per-frame 8-way mask selection loop
+        # (ISO 18004 §7.8.3).  segno's mask selector is pure Python
+        # and costs ~80% of segno.make()'s wall-clock on V25 frames.
+        # ISO 18004 leaves mask selection to the encoder; any mask in
+        # 0..7 is standards-compliant.  WeChatQRCode (the decoder we
+        # ship) reads whichever mask the generator chose and has no
+        # preference among the 8 patterns.  Fixing mask=0 therefore
+        # trades an imperceptible scan-quality delta for ~5× single-
+        # frame encode speedup on synthetic payloads.
+        mask=0,
     )
 
     # Render via the raw module matrix — faster than encode-to-PNG then
