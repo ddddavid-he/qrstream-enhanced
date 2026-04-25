@@ -72,8 +72,8 @@ uv sync --dev
 
 ### 系统要求
 
-- Python >= 3.10
-- 依赖：`opencv-contrib-python`, `numpy`, `tqdm`, `qrcode[pil]`
+- Python >= 3.10（已测试 3.10 – 3.14）
+- 依赖：`opencv-contrib-python`, `numpy`, `tqdm`, `segno`
 
 ## 使用方式
 
@@ -94,7 +94,7 @@ qrstream encode <file> -o output.mp4 [options]
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `<file>` | - | 输入文件路径 |
-| `-o, --output` | `<filename>.mp4` | 输出视频路径 |
+| `-o, --output` | **必填** | 输出视频路径 |
 | `--overhead` | `2.0` | 编码冗余倍率（源块数的倍数） |
 | `--fps` | `10` | 输出视频帧率 |
 | `--ec-level` | `1` | QR 纠错等级：0=L(7%), 1=M(15%), 2=Q(25%), 3=H(30%) |
@@ -106,7 +106,7 @@ qrstream encode <file> -o output.mp4 [options]
 | `--qr-mode` | `alphanumeric` | QR 载荷编码：`alphanumeric`（base45，默认，更密）或 `base64`（byte 模式，fallback） |
 | `--legacy-qr` | - | 仅作 CLI 向后兼容保留，不再影响行为 |
 | `--codec` | `mp4v` | 视频编码器：`mp4v` 或 `mjpeg`（更快但文件更大） |
-| `-w, --workers` | `min(CPU 核心数, 4)` | QR 生成的并行工作线程数。自动值上限 4：`qrcode.make()` 是纯 Python（持 GIL），超过 4 个线程只会互相抢 GIL，不产生真实并行。CPU 核心多且实测瓶颈确在 QR 生成时，可手动指定更大值覆盖该上限。 |
+| `-w, --workers` | `min(CPU 核心数, 4)` | QR 生成的并行工作线程数。自动值上限 4：QR 矩阵生成（`segno.make()`）是纯 Python（持 GIL），超过 4 个线程只会互相抢 GIL，不产生真实并行。CPU 核心多且实测瓶颈确在 QR 生成时，可手动指定更大值覆盖该上限。 |
 | `-v, --verbose` | - | 输出额外详细信息（进度条始终显示） |
 
 ### 解码（QR 码视频 → 文件）
@@ -118,7 +118,7 @@ qrstream decode <video> -o output_file [options]
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `<video>` | - | 输入视频路径（MP4, MOV 等） |
-| `-o, --output` | `decoded_output` | 输出文件路径 |
+| `-o, --output` | **必填** | 输出文件路径 |
 | `-s, --sample-rate` | `0`（自动） | 每 N 帧采样一次（0=自适应探测） |
 | `-w, --workers` | 全部 CPU 核心 | QR 识别的并行工作线程数。`WeChatQRCode` 是 C++ 实现、执行期间释放 GIL，多线程能真正并行。 |
 | `-v, --verbose` | - | 输出详细进度信息；大任务会显示 probe、扫描、LT 解码和写文件进度 |
@@ -171,14 +171,19 @@ project-root/
 │   ├── decoder.py             # 视频帧提取 → QR 检测 → LT 解码 → 文件重建
 │   ├── lt_codec.py            # LT 喷泉码原语（PRNG、RSD、BlockGraph）
 │   ├── protocol.py            # V3 协议序列化 + base45 编解码（解码端兼容旧版 base64/COBS）
-│   └── qr_utils.py            # QR 生成（OpenCV）+ 检测（WeChatQRCode）
+│   └── qr_utils.py            # QR 生成（segno）+ 检测（WeChatQRCode）
 ├── tests/
 │   ├── test_lt_codec.py       # LT 编解码器单元测试
 │   ├── test_protocol.py       # V3 协议 + base45 测试
 │   ├── test_roundtrip.py      # 端到端回环测试
+│   ├── test_qr_generate.py    # QR 生成正确性 + glog(0) 回归测试
+│   ├── test_e2e_encode_decode.py  # 完整编码→视频→解码 SHA256 验证
 │   └── test_optimizations.py  # 性能优化 + WeChatQR + legacy fallback 测试
-└── benchmarks/
-    └── benchmark.py           # 性能基准测试
+└── dev/
+    ├── benchmark.py           # 性能基准测试
+    ├── perf-profile/          # cProfile 热点分析脚本
+    ├── test-container/        # Podman 测试容器
+    └── wechatqrcode-mnn-poc/  # WeChatQRCode MNN 加速 POC
 ```
 
 ## 技术细节
@@ -233,15 +238,35 @@ Base45（RFC 9285）成为默认是因为 QR 的 alphanumeric 模式每字符承
 | 参数 | 值 | 说明 |
 |------|-----|------|
 | 度分布 | Robust Soliton Distribution | c=0.1, delta=0.5 |
-| PRNG | LCG (a=16807, m=2^31-1) | 5 轮预热消除序列种子偏差 |
+| PRNG | SplitMix64 混淆 + LCG (a=16807, m=2^31-1) | 非线性种子混淆消除序列种子相关性 |
 | XOR | numpy 向量化 + 原地操作 | 比纯 Python 快 10-50x |
 | 解码 | Belief Propagation (Peeling) | 基于二部图的迭代消元 |
 
 ## 测试
 
 ```bash
+# 单元测试（默认，不含视频 I/O，速度快）
 uv run pytest tests/ -v
+
+# 端到端编码→视频→解码测试（10 KB、100 KB、500 KB + glog 回归）
+uv run pytest -m e2e -v
+
+# 真实手机录像测试（需要 fixture 视频文件）
+uv run pytest -m slow -v
 ```
+
+### 解码器原生崩溃（Troubleshooting）
+
+如果 `qrs decode` 出现 `trace trap`、`SIGSEGV` 或 `SIGTRAP` 相关退出消息，
+说明你正撞上 `opencv_contrib` 自带 WeChat QR 检测器的一个上游未修复 bug
+（issue `opencv_contrib#3570`）。从 v0.7.7 开始，`qrs decode` 默认会把
+检测放进子进程 helper 池中运行：单个导致崩溃的帧会被捕获并当作丢帧处理，
+只要 LT 冗余（`--overhead`）≥ 1.5，解码过程会自动继续并最终完成。
+
+如果想确认沙箱在本次解码中是否实际捕获过崩溃，可以在标准输出里寻找类似
+`[sandbox] detector crashed N time(s) during decode` 的汇总行。如果你确信
+自己的输入足够稳定、不想承担沙箱开销，可以通过 `--detect-isolation off`
+主动关闭它（风险自负）。
 
 ## 许可证
 

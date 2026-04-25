@@ -9,18 +9,27 @@ permissions:
   contents: write
 
 jobs:
-  # Gate release on the full test matrix — unit tests + slow E2E
-  # phone-recording tests on Python 3.13, across BOTH x86_64 and
-  # arm64 public runners — passing first.  A failing decode on
-  # either architecture must block the release so we never ship a
-  # wheel that silently regresses on one platform.
-  test:
+  # Release requires all three validation layers to pass first.
+  unit-test:
     uses: ./.github/workflows/test.yml
     permissions:
       contents: read
 
+  e2e:
+    uses: ./.github/workflows/e2e-encode-decode.yml
+    permissions:
+      contents: read
+
+  real-world:
+    uses: ./.github/workflows/real-world-tests.yml
+    permissions:
+      contents: read
+
   release:
-    needs: test
+    needs:
+      - unit-test
+      - e2e
+      - real-world
     runs-on: ubuntu-latest
     steps:
       - name: Check out code

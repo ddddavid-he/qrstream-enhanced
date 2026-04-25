@@ -1,0 +1,115 @@
+name: e2e-encode-decode
+
+# End-to-end pipeline tests: synthetic file → encode_to_video →
+# extract_qr_from_video → decode_blocks_to_file → SHA256 verify.
+#
+# Why this is separate from test.yml
+# ------------------------------------
+# The unit-test matrix in test.yml bypasses QR image generation
+# entirely (LTEncoder / LTDecoder are called directly).  This meant
+# that the qrcode 8.x glog(0) crash was never caught before a release:
+# the crash only surfaced when encode_to_video was called with a file
+# whose compressed payload size fell near the QR-version capacity
+# boundary.
+#
+# These tests close that gap.  They are kept in a separate workflow
+# (rather than added to test.yml) because:
+#
+#   * Each test encodes a real MP4 and decodes it with WeChatQRCode —
+#     adding this to the 2-os × 4-python-version matrix in test.yml
+#     would multiply CI time for coverage we only need once per
+#     architecture.
+#   * The e2e suite is architecture-sensitive (QR detection depends on
+#     OpenCV / WeChatQRCode native libs), so we run on both amd64 and
+#     arm64 — but only against the latest Python to keep cost down.
+#
+# Trigger policy
+# --------------
+# Run on pushes to main/dev, PRs targeting main/dev, and when release
+# workflows call this file as a reusable gate.
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+    paths:
+      - 'src/qrstream/**'
+      - 'tests/test_e2e_encode_decode.py'
+      - 'tests/test_qr_generate.py'
+      - '.github/workflows/e2e-encode-decode.yml'
+      - 'pyproject.toml'
+      - 'uv.lock'
+  pull_request:
+    branches:
+      - main
+      - dev
+    paths:
+      - 'src/qrstream/**'
+      - 'tests/test_e2e_encode_decode.py'
+      - 'tests/test_qr_generate.py'
+      - '.github/workflows/e2e-encode-decode.yml'
+      - 'pyproject.toml'
+      - 'uv.lock'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    if: |
+      !(
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/main' &&
+        startsWith(github.event.head_commit.message || '', 'skip-main-ci:')
+      )
+    name: e2e (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest       # x86_64 / amd64
+          - ubuntu-24.04-arm    # aarch64 / arm64
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          # Pin to latest stable; e2e correctness doesn't vary by
+          # Python minor version (that's covered by test.yml).
+          python-version: '3.13'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run e2e encode/decode tests
+        # -m e2e opts into the marker excluded from the default run.
+        # --timeout is not available without pytest-timeout; we rely on
+        # the GitHub Actions job-level timeout (below) instead.
+        run: uv run pytest -m e2e -v tests/test_e2e_encode_decode.py
+
+      - name: Run QR generation regression tests
+        # Also run the QR-generation unit tests here so glog(0) and
+        # image-property checks are verified on real OpenCV/segno builds.
+        run: uv run pytest -v tests/test_qr_generate.py
+
+    # Each test encodes up to ~100 KB of data (~200 frames at 36 fps ≈
+    # 6 s encode).  The full suite is 9 test cases; 20 minutes is a
+    # generous ceiling that will catch genuine hangs without false
+    # timeouts on slow arm64 runners.
+    timeout-minutes: 20

@@ -54,10 +54,13 @@ def cmd_encode(args):
         )
 
     output = args.output
-    if output is None:
-        base = os.path.splitext(os.path.basename(args.file))[0]
-        ext = '.avi' if args.codec == 'mjpeg' else '.mp4'
-        output = f"{base}{ext}"
+
+    if os.path.abspath(args.file) == os.path.abspath(output):
+        print(
+            f"Error: output path is the same as the input file '{args.file}'.\n"
+            f"Specify a different path with -o."
+        )
+        sys.exit(1)
 
     alphanumeric_qr = (args.qr_mode == 'alphanumeric')
 
@@ -77,6 +80,7 @@ def cmd_encode(args):
         codec=args.codec,
         alphanumeric_qr=alphanumeric_qr,
         force_compress=args.force_compress,
+        auto_mask=args.auto_mask,
     )
 
 
@@ -93,7 +97,8 @@ def cmd_decode(args):
 
     blocks = extract_qr_from_video(
         args.video, args.sample_rate, args.verbose, args.workers,
-        use_mnn=args.use_mnn)
+        use_mnn=args.use_mnn,
+        detect_isolation=args.detect_isolation)
 
     if not blocks:
         print("No QR codes detected. Check that the video clearly shows QR codes.")
@@ -101,7 +106,7 @@ def cmd_decode(args):
 
     print(f"Found {len(blocks)} unique blocks. Decoding...")
 
-    output_path = args.output or "decoded_output"
+    output_path = args.output
     written = decode_blocks_to_file(blocks, output_path, args.verbose)
 
     if written is None:
@@ -124,8 +129,8 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
     enc = subparsers.add_parser(
         'encode', help='Encode a file into a QR code video')
     enc.add_argument('file', help='Path to the input file')
-    enc.add_argument('-o', '--output', default=None,
-                     help='Output video path (default: <filename>.mp4)')
+    enc.add_argument('-o', '--output', required=True,
+                     help='Output video path (e.g. output.mp4)')
     enc.add_argument('--overhead', type=float, default=2.0,
                      help=f'Ratio of encoded blocks to source blocks '
                           f'(default: 2.0, minimum: {_MIN_OVERHEAD}, '
@@ -157,6 +162,11 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                      help='Video codec: mp4v (default) or mjpeg (faster, larger)')
     enc.add_argument('-w', '--workers', type=int, default=None,
                      help='Parallel workers for QR generation (default: CPU count)')
+    enc.add_argument('--auto-mask', action='store_true',
+                     help='Let segno evaluate all 8 ISO 18004 mask patterns '
+                          'instead of using the fixed mask=0 fast path. '
+                          'Slower (~5× per frame) but may improve scan '
+                          'quality under adverse capture conditions.')
     enc.add_argument('-v', '--verbose', action='store_true',
                      help='Print extra detail (block stats, compression ratio, etc.)')
 
@@ -164,8 +174,8 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
     dec = subparsers.add_parser(
         'decode', help='Decode a QR code video back to the original file')
     dec.add_argument('video', help='Path to the video file (MOV, MP4, etc.)')
-    dec.add_argument('-o', '--output', default=None,
-                     help='Output file path (default: decoded_output)')
+    dec.add_argument('-o', '--output', required=True,
+                     help='Output file path')
     dec.add_argument('-s', '--sample-rate', type=int, default=0,
                      help='Process every Nth frame (default: 0=auto-detect)')
     dec.add_argument('-w', '--workers', type=int, default=None,
@@ -177,6 +187,13 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                           'falls back to OpenCV WeChatQRCode on failure)')
     dec.add_argument('-v', '--verbose', action='store_true',
                      help='Print detailed progress')
+    dec.add_argument(
+        '--detect-isolation', choices=['on', 'off'], default='on',
+        help='Isolate the WeChat QR detector in subprocess helpers so a '
+             'native crash (opencv_contrib#3570) degrades to a single '
+             'dropped frame instead of killing the decode process. '
+             'Default: on. Use "off" to trade safety for ~20-30%% '
+             'throughput when you know your input is safe.')
 
     return parser
 

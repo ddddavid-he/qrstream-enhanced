@@ -5,42 +5,37 @@ on:
     branches:
       - main
       - dev
-      - 'dev/*'
   pull_request:
     branches:
       - main
       - dev
-      - 'dev/*'
   workflow_dispatch:
-  # Allow release.yml / publish.yml to reuse this workflow as a gate
-  # before tagging a new version.  When called this way, a failing
-  # test run blocks the release.
   workflow_call:
 
 permissions:
   contents: read
 
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    # Run the full suite on both x86_64 and arm64 public runners.
-    # Both architectures must pass before a release / PyPI publish
-    # is allowed — see release.yml / publish.yml which `needs: test`.
-    #
-    # GitHub-hosted arm64 Linux runners became free for public
-    # repositories in 2024; we pin the concrete label instead of a
-    # generic `linux-arm64` alias for reproducibility.
+    if: |
+      !(
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/main' &&
+        startsWith(github.event.head_commit.message || '', 'skip-main-ci:')
+      )
+    name: test (${{ matrix.os }}, py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os:
-          - ubuntu-latest       # x86_64 / amd64
-          - ubuntu-24.04-arm    # aarch64 / arm64
-        python-version:
-          - '3.10'
-          - '3.11'
-          - '3.12'
-          - '3.13'
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+        python-version: ${{ fromJSON((github.event_name == 'workflow_call' || github.ref == 'refs/heads/main' || github.base_ref == 'main') && '["3.10","3.11","3.12","3.13","3.14"]' || '["3.13"]') }}
 
     steps:
       - name: Check out code
@@ -72,10 +67,8 @@ jobs:
         run: uv run pytest tests/ -v
 
       - name: Build distributions
-        # One build per architecture is intentional: we verify the
-        # sdist + wheel actually build on both hosts, but we only
-        # upload the amd64-built artifact since the wheel is pure
-        # Python (arch-independent) and PyPI only needs one copy.
+        # Build once per architecture on Python 3.13. The wheel is pure
+        # Python, so we only upload the amd64-built artifact.
         if: matrix.python-version == '3.13'
         run: uv build
 
