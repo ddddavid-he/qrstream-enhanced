@@ -24,11 +24,15 @@ logger = logging.getLogger(__name__)
 
 
 class MNNBackend(Enum):
-    """Supported MNN backend identifiers."""
-    CPU = "cpu"
-    METAL = "metal"
-    CUDA = "cuda"
-    OPENCL = "opencl"
+    """Supported MNN backend identifiers.
+
+    Values must match the strings accepted by MNN 3.5+
+    ``Interpreter.createSession({'backend': ...})``.
+    """
+    CPU = "CPU"
+    METAL = "METAL"
+    CUDA = "CUDA"
+    OPENCL = "OpenCL"
 
 
 def is_mnn_available() -> bool:

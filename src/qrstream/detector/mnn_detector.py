@@ -210,8 +210,9 @@ class MNNQrDetector(QRDetector):
         interpreter = MNN.Interpreter(model_path)
 
         # Map our backend enum to MNN config dict
+        # MNN 3.5+ accepts uppercase strings: CPU, METAL, CUDA
         backend_map = {
-            MNNBackend.METAL: "Metal",
+            MNNBackend.METAL: "METAL",
             MNNBackend.CUDA: "CUDA",
             MNNBackend.OPENCL: "OpenCL",
             MNNBackend.CPU: "CPU",
