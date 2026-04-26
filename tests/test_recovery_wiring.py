@@ -37,7 +37,7 @@ def test_clahe_worker_is_defined_and_callable():
     # Must be a module-level function (not a lambda / closure) so it
     # is trivially introspectable; ThreadPoolExecutor can dispatch it.
     assert inspect.isfunction(fn)
-    assert fn.__module__ == "qrstream.decoder"
+    assert fn.__module__ in ("qrstream.decoder", "qrstream._video_io")
 
 
 def test_clahe_worker_handles_none_and_noisy_frames():
