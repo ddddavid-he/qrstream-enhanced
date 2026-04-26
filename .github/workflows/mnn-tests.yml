@@ -32,13 +32,15 @@ name: mnn-tests
 # --------------
 # MNN is a native wheel and the tests are slower than unit tests;
 # only run when detector code, MNN PoC, or this workflow itself
-# changes.  Push-to-main and the weekly cron of ``real-world-tests``
-# provide a second safety net.
+# changes.  ``dev`` is the single integration gate (see
+# BRANCHING.md); ``main`` does NOT trigger CI.  This workflow is
+# NOT part of the tag-triggered release gate (MNN is optional and
+# not in pyproject.toml, so PyPI artefacts don't depend on it
+# passing); validation lives entirely on the dev branch.
 
 on:
   push:
     branches:
-      - main
       - dev
     paths:
       - 'src/qrstream/detector/**'
@@ -51,7 +53,6 @@ on:
       - 'uv.lock'
   pull_request:
     branches:
-      - main
       - dev
     paths:
       - 'src/qrstream/detector/**'
@@ -74,17 +75,24 @@ concurrency:
 
 jobs:
   mnn:
+    # ``skip-ci:`` commit-message prefix opts a push event out of CI.
+    # See BRANCHING.md → "skip-ci: 约定".
     if: |
       !(
         github.event_name == 'push' &&
-        github.ref == 'refs/heads/main' &&
-        startsWith(github.event.head_commit.message || '', 'skip-main-ci:')
+        startsWith(github.event.head_commit.message || '', 'skip-ci:')
       )
     name: mnn (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        # ubuntu-latest (x86_64) covers the Linux CPU backend; macos-
+        # latest (darwin arm64) validates the darwin-arm64 MNN wheel
+        # and the _is_apple_platform() branch in mnn_backend.py.
+        # Both run on every detector-touching dev push — dev is the
+        # gate and Apple Silicon correctness is required before
+        # merging to main.
         os:
           - ubuntu-latest       # Linux CPU backend coverage
           - macos-latest        # darwin arm64, exercises mnn_backend's Apple branch

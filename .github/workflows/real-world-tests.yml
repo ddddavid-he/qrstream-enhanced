@@ -11,7 +11,14 @@ name: real-world-tests
 #     CI time for coverage we don't need — these tests exercise
 #     OpenCV, not Python-version-specific code.
 #   * Splitting it out keeps unit tests fast while still letting
-#     dev/main pushes and release gates exercise the real recordings.
+#     dev pushes and release gates exercise the real recordings.
+#
+# Trigger policy:
+#   * ``dev`` is the single integration gate (see BRANCHING.md);
+#     ``main`` does NOT trigger CI.  The tag-triggered release gate
+#     re-runs this file via ``workflow_call``.
+#   * The weekly ``schedule`` cron is a darwin/linux upstream-wheel
+#     canary — it runs independently of new commits.
 #
 # Gating vs. non-gating:
 #   * Most real-phone-v3 and all real-phone-v4 cases are gating:
@@ -24,7 +31,6 @@ name: real-world-tests
 on:
   push:
     branches:
-      - main
       - dev
     paths:
       # Only re-run when something that could actually affect the
@@ -38,7 +44,6 @@ on:
       - 'uv.lock'
   pull_request:
     branches:
-      - main
       - dev
     paths:
       - 'src/qrstream/**'
@@ -49,9 +54,18 @@ on:
       - 'pyproject.toml'
       - 'uv.lock'
   schedule:
-    # Mondays 06:00 UTC: catch silent upstream regressions
-    # (OpenCV / opencv-contrib / ffmpeg build matrices change
-    # over time even without our code moving).
+    # Mondays 06:00 UTC (Mon 14:00 Asia/Shanghai): upstream-wheel
+    # canary.  This workflow's dependencies drift *without* any
+    # change in our repo:
+    #   * opencv-contrib-python patch versions (pip resolves on each
+    #     runner boot — not fully pinned in uv.lock for native wheels)
+    #   * ffmpeg baked into the GitHub runner image
+    #   * WeChatQRCode model files embedded in the opencv wheel
+    # A code-freeze week with no pushes would hide those regressions
+    # until the next PR author accidentally catches the blame; the
+    # weekly cron surfaces them out-of-band so the cause is
+    # obviously upstream.  Monday morning is deliberate — if it
+    # fails there's a full work week to diagnose.
     - cron: '0 6 * * 1'
   workflow_dispatch:
   workflow_call:
@@ -65,17 +79,24 @@ concurrency:
 
 jobs:
   real-world:
+    # ``skip-ci:`` commit-message prefix opts a push event out of CI.
+    # See BRANCHING.md → "skip-ci: 约定".
     if: |
       !(
         github.event_name == 'push' &&
-        github.ref == 'refs/heads/main' &&
-        startsWith(github.event.head_commit.message || '', 'skip-main-ci:')
+        startsWith(github.event.head_commit.message || '', 'skip-ci:')
       )
     name: real-world (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        # Linux amd64 + arm64 cover server/container deployments;
+        # macos-latest (darwin arm64) validates the darwin-arm64
+        # OpenCV / WeChatQRCode wheel.  All three run on every
+        # trigger — real-world fixture decoding is the strongest
+        # gate we have and dev must pass it on every supported
+        # architecture.
         os:
           - ubuntu-latest       # x86_64 / amd64
           - ubuntu-24.04-arm    # aarch64 / arm64

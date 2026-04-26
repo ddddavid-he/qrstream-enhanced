@@ -25,13 +25,15 @@ name: e2e-encode-decode
 #
 # Trigger policy
 # --------------
-# Run on pushes to main/dev, PRs targeting main/dev, and when release
-# workflows call this file as a reusable gate.
+# ``dev`` is the single integration gate (see BRANCHING.md).  Runs
+# on dev pushes, feature→dev PRs, release/publish workflow_call, and
+# manual dispatch.  ``main`` does NOT trigger CI — it is a pure
+# publication channel and the tag-triggered release gate re-runs
+# this file via ``workflow_call``.
 
 on:
   push:
     branches:
-      - main
       - dev
     paths:
       - 'src/qrstream/**'
@@ -42,7 +44,6 @@ on:
       - 'uv.lock'
   pull_request:
     branches:
-      - main
       - dev
     paths:
       - 'src/qrstream/**'
@@ -63,17 +64,23 @@ concurrency:
 
 jobs:
   e2e:
+    # ``skip-ci:`` commit-message prefix opts a push event out of CI.
+    # See BRANCHING.md → "skip-ci: 约定".
     if: |
       !(
         github.event_name == 'push' &&
-        github.ref == 'refs/heads/main' &&
-        startsWith(github.event.head_commit.message || '', 'skip-main-ci:')
+        startsWith(github.event.head_commit.message || '', 'skip-ci:')
       )
     name: e2e (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        # Linux amd64 + arm64 cover the primary deployment targets;
+        # macos-latest (darwin arm64) validates the darwin-arm64
+        # opencv-contrib / segno wheels.  All three run on every
+        # trigger because this workflow is dev's gate and correctness
+        # on Apple Silicon matters to real users of the project.
         os:
           - ubuntu-latest       # x86_64 / amd64
           - ubuntu-24.04-arm    # aarch64 / arm64

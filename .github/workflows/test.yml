@@ -1,13 +1,28 @@
 name: test
 
+# Unit-test gate.
+#
+# Trigger policy
+# --------------
+# ``dev`` is the single integration gate in this project's branching
+# model (see BRANCHING.md):
+#
+#   feature/* ──PR──▶ dev ──merge──▶ main ──tag v*──▶ release
+#
+# Everything must pass the full test suite on ``dev`` before it can
+# flow to ``main``.  ``main`` itself does NOT trigger CI on push or
+# PR — it is a pure publication channel fed exclusively by
+# already-validated ``dev`` merges.  The ``tag v*`` event re-runs
+# this workflow via ``workflow_call`` in release.yml / publish.yml
+# as the last safety net before a PyPI release (catches dev→main
+# merge mistakes and PyPI build-environment drift).
+
 on:
   push:
     branches:
-      - main
       - dev
   pull_request:
     branches:
-      - main
       - dev
   workflow_dispatch:
   workflow_call:
@@ -21,29 +36,44 @@ concurrency:
 
 jobs:
   test:
+    # Allow opting out of CI on push events with a ``skip-ci:``
+    # commit-message prefix.  See BRANCHING.md → "skip-ci: 约定".
+    # Only ``push`` is gated — ``pull_request``, ``workflow_call``
+    # (release gate), ``workflow_dispatch`` and ``schedule`` always
+    # run regardless of commit message.
     if: |
       !(
         github.event_name == 'push' &&
-        github.ref == 'refs/heads/main' &&
-        startsWith(github.event.head_commit.message || '', 'skip-main-ci:')
+        startsWith(github.event.head_commit.message || '', 'skip-ci:')
       )
     name: test (${{ matrix.os }}, py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # macos-latest is macos-14 arm64 (Apple Silicon, M2); it
-        # validates the darwin-arm64 opencv-contrib-python wheel —
-        # an architecture the rest of the Linux matrix doesn't
-        # exercise.  macos-13 (x86_64 Intel) is added only on full
-        # matrix runs because Intel macOS is niche and the arm64
-        # variant already catches almost all darwin-specific bugs.
+        # Linux (amd64 + arm64) across every supported Python version
+        # is the primary coverage surface.  A single macOS cell is
+        # added via ``include`` to validate the darwin-arm64
+        # opencv-contrib-python wheel — Intel macOS (x86_64) is not
+        # a supported target (modern macOS users are on Apple
+        # Silicon) and would double the macOS billing cost for
+        # negligible additional coverage.
         #
         # macOS runners DO NOT expose GPUs; any MNN Metal path is
         # expected to fall back to MNN CPU or to OpenCV.  See
         # ``mnn-tests.yml`` for explicit MNN-enabled validation.
-        os: ${{ fromJSON((github.event_name == 'workflow_call' || github.ref == 'refs/heads/main' || github.base_ref == 'main') && '["ubuntu-latest","ubuntu-24.04-arm","macos-latest","macos-13"]' || '["ubuntu-latest","ubuntu-24.04-arm","macos-latest"]') }}
-        python-version: ${{ fromJSON((github.event_name == 'workflow_call' || github.ref == 'refs/heads/main' || github.base_ref == 'main') && '["3.10","3.11","3.12","3.13","3.14"]' || '["3.13"]') }}
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+        python-version:
+          - '3.10'
+          - '3.11'
+          - '3.12'
+          - '3.13'
+          - '3.14'
+        include:
+          - os: macos-latest
+            python-version: '3.13'
 
     steps:
       - name: Check out code
@@ -87,4 +117,3 @@ jobs:
         with:
           name: python-package-distributions
           path: dist/
-
