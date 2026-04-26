@@ -1,0 +1,61 @@
+# Milestone 3, task 3.1 — end-to-end profile baseline.
+#
+# Purpose:
+#   Measure per-stage timings (CNN detect / SR / cpu_decode / total)
+#   for the MNN path on the five ``tests/fixtures/real-phone-v[34]``
+#   samples, so Milestone 3 can pick optimisations based on data
+#   instead of assumptions.
+#
+# Build:
+#   podman build -f dev/wechatqrcode-mnn-poc/Containerfile.m3_profile \
+#       -t qrstream-mnn-m3-profile .
+#
+# Run (writes report to results/m3_profile_baseline.json):
+#   podman run --rm \
+#       -v "$(pwd)/dev/wechatqrcode-mnn-poc/results:/out:Z" \
+#       qrstream-mnn-m3-profile
+#
+# Separate runs with/without --use-mnn are already performed by the
+# CMD below, producing two JSON files.
+
+FROM fedora:latest
+
+RUN dnf install -y --setopt=install_weak_deps=False \
+        python3.13 python3.13-devel python3-pip \
+        gcc gcc-c++ make cmake \
+        mesa-libGL libglvnd-glx glib2 libgomp \
+        libSM libXext libXrender zlib \
+        git \
+    && dnf clean all
+
+WORKDIR /app
+
+ENV UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+
+RUN pip install --no-cache-dir uv
+
+COPY . .
+
+RUN uv sync --dev --python /usr/bin/python3.13 \
+    && uv pip install MNN zxing-cpp
+
+RUN test -f src/qrstream/detector/models/detect.mnn \
+    || (echo "ERROR: Package-data MNN models missing." >&2 && exit 1)
+
+CMD ["sh", "-c", "\
+    set -e ; \
+    echo '=== MNN baseline profile (use_mnn=True) ===' ; \
+    uv run python dev/wechatqrcode-mnn-poc/scripts/profile_e2e.py \
+        --samples-root tests/fixtures \
+        --output /out/m3_profile_baseline_mnn.json \
+        --workers 4 \
+        --use-mnn ; \
+    echo '' ; \
+    echo '=== OpenCV baseline profile (use_mnn=False) ===' ; \
+    uv run python dev/wechatqrcode-mnn-poc/scripts/profile_e2e.py \
+        --samples-root tests/fixtures \
+        --output /out/m3_profile_baseline_opencv.json \
+        --workers 4 \
+"]

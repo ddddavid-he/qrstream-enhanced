@@ -1,0 +1,88 @@
+{
+  "config": {
+    "workers": 4,
+    "use_mnn": false,
+    "samples_requested": [
+      "v061",
+      "v070",
+      "v073-10kB",
+      "v073-100kB",
+      "v073-300kB",
+      "IMG_9425"
+    ]
+  },
+  "samples": {
+    "v061": {
+      "video_path": "tests/fixtures/real-phone-v3/v061.mp4",
+      "use_mnn": false,
+      "workers": 4,
+      "extract_wall_s": 3.864,
+      "decode_wall_s": 0.002,
+      "total_wall_s": 3.866,
+      "payload_bytes": 30720,
+      "payload_sha256": "4a440b6da851a9a2e35eacca95b7b2fe29e3560c169b0a57211fccc2f5469443",
+      "sha256_match": true,
+      "num_unique_blocks_from_extract": 51
+    },
+    "v070": {
+      "video_path": "tests/fixtures/real-phone-v3/v070.mp4",
+      "use_mnn": false,
+      "workers": 4,
+      "extract_wall_s": 19.231,
+      "decode_wall_s": 0.014,
+      "total_wall_s": 19.245,
+      "payload_bytes": 307200,
+      "payload_sha256": "2a20b62e35bf4b3a7f5fa4854397eeafea99d1efb8db38737cda4df55a4d5b8d",
+      "sha256_match": true,
+      "num_unique_blocks_from_extract": 465
+    },
+    "v073-10kB": {
+      "video_path": "tests/fixtures/real-phone-v4/v073-10kB.mp4",
+      "use_mnn": false,
+      "workers": 4,
+      "extract_wall_s": 1.188,
+      "decode_wall_s": 0.001,
+      "total_wall_s": 1.189,
+      "payload_bytes": 10240,
+      "payload_sha256": "897d28b6b6e8540e08cb2e10f790a7cd40c84d56840e03349fef4a05a95ee8a4",
+      "sha256_match": true,
+      "num_unique_blocks_from_extract": 16
+    },
+    "v073-100kB": {
+      "video_path": "tests/fixtures/real-phone-v4/v073-100kB.mp4",
+      "use_mnn": false,
+      "workers": 4,
+      "extract_wall_s": 2.674,
+      "decode_wall_s": 0.005,
+      "total_wall_s": 2.679,
+      "payload_bytes": 102400,
+      "payload_sha256": "6fbf396baedd1233f4c8486e8a4a4cc43b9a1283e19ae4dcb3cd27c4ad4dbed2",
+      "sha256_match": true,
+      "num_unique_blocks_from_extract": 137
+    },
+    "v073-300kB": {
+      "video_path": "tests/fixtures/real-phone-v4/v073-300kB.mp4",
+      "use_mnn": false,
+      "workers": 4,
+      "extract_wall_s": 8.976,
+      "decode_wall_s": 0.013,
+      "total_wall_s": 8.988,
+      "payload_bytes": 307200,
+      "payload_sha256": "115e32de92187eb5cc544e04b5bb5ed953577d6c75489d8e4c1f2b1c374380fb",
+      "sha256_match": true,
+      "num_unique_blocks_from_extract": 420
+    },
+    "IMG_9425": {
+      "video_path": "/Users/ddddavid/Downloads/testcase/IMG_9425.MOV",
+      "use_mnn": false,
+      "workers": 4,
+      "extract_wall_s": 26.131,
+      "decode_wall_s": 0.005,
+      "total_wall_s": 26.136,
+      "payload_bytes": 146642,
+      "payload_sha256": "3a3a30b00b3cbaa9ad88ef54f881c1c310a58f40212d6c29c1c5947b7fca7968",
+      "sha256_match": null,
+      "num_unique_blocks_from_extract": 201
+    }
+  }
+}

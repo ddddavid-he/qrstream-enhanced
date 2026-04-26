@@ -1,0 +1,279 @@
+{
+  "samples": {
+    "v061": {
+      "video": "tests/fixtures/real-phone-v3/v061.mp4",
+      "extract_wall_s": 4.03,
+      "sha256_match": true,
+      "total_crops": 229,
+      "success_at_attempt": {
+        "1": 147,
+        "2": 4,
+        "3": 0,
+        "4": 0
+      },
+      "miss_all_4": 78,
+      "success_rate": 0.659,
+      "prep_ms": {
+        "n": 229,
+        "p50": 0.042,
+        "p95": 0.071,
+        "mean": 0.047,
+        "sum_ms": 10.7,
+        "max": 0.175
+      },
+      "attempts": {
+        "1_LocalAverage": {
+          "n": 229,
+          "p50": 12.659,
+          "p95": 15.054,
+          "mean": 12.373,
+          "sum_ms": 2833.4,
+          "max": 16.269
+        },
+        "2_GlobalHistogram": {
+          "n": 82,
+          "p50": 10.171,
+          "p95": 13.69,
+          "mean": 10.03,
+          "sum_ms": 822.5,
+          "max": 13.96
+        },
+        "3_AdaptiveThresh": {
+          "n": 78,
+          "p50": 11.616,
+          "p95": 15.468,
+          "mean": 11.735,
+          "sum_ms": 915.3,
+          "max": 16.374
+        },
+        "4_Inverted": {
+          "n": 78,
+          "p50": 10.352,
+          "p95": 13.235,
+          "mean": 10.257,
+          "sum_ms": 800.0,
+          "max": 14.014
+        }
+      },
+      "total_attempt_ms_sum": 5371.2,
+      "avg_ms_per_crop": 23.455
+    },
+    "v070": {
+      "video": "tests/fixtures/real-phone-v3/v070.mp4",
+      "extract_wall_s": 32.576,
+      "sha256_match": true,
+      "total_crops": 1161,
+      "success_at_attempt": {
+        "1": 673,
+        "2": 29,
+        "3": 11,
+        "4": 0
+      },
+      "miss_all_4": 448,
+      "success_rate": 0.614,
+      "prep_ms": {
+        "n": 1161,
+        "p50": 0.084,
+        "p95": 0.192,
+        "mean": 0.145,
+        "sum_ms": 168.9,
+        "max": 4.791
+      },
+      "attempts": {
+        "1_LocalAverage": {
+          "n": 1161,
+          "p50": 20.899,
+          "p95": 30.576,
+          "mean": 20.977,
+          "sum_ms": 24354.3,
+          "max": 48.623
+        },
+        "2_GlobalHistogram": {
+          "n": 488,
+          "p50": 16.778,
+          "p95": 24.408,
+          "mean": 16.178,
+          "sum_ms": 7894.8,
+          "max": 33.428
+        },
+        "3_AdaptiveThresh": {
+          "n": 459,
+          "p50": 23.539,
+          "p95": 35.113,
+          "mean": 22.452,
+          "sum_ms": 10305.3,
+          "max": 44.994
+        },
+        "4_Inverted": {
+          "n": 448,
+          "p50": 14.685,
+          "p95": 20.504,
+          "mean": 14.045,
+          "sum_ms": 6292.4,
+          "max": 27.331
+        }
+      },
+      "total_attempt_ms_sum": 48846.8,
+      "avg_ms_per_crop": 42.073
+    },
+    "v073-10kB": {
+      "video": "tests/fixtures/real-phone-v4/v073-10kB.mp4",
+      "extract_wall_s": 1.115,
+      "sha256_match": true,
+      "total_crops": 48,
+      "success_at_attempt": {
+        "1": 48,
+        "2": 0,
+        "3": 0,
+        "4": 0
+      },
+      "miss_all_4": 0,
+      "success_rate": 1.0,
+      "prep_ms": {
+        "n": 48,
+        "p50": 0.056,
+        "p95": 0.151,
+        "mean": 0.071,
+        "sum_ms": 3.4,
+        "max": 0.373
+      },
+      "attempts": {
+        "1_LocalAverage": {
+          "n": 48,
+          "p50": 13.346,
+          "p95": 14.398,
+          "mean": 13.623,
+          "sum_ms": 653.9,
+          "max": 41.418
+        },
+        "2_GlobalHistogram": {
+          "n": 0
+        },
+        "3_AdaptiveThresh": {
+          "n": 0
+        },
+        "4_Inverted": {
+          "n": 0
+        }
+      },
+      "total_attempt_ms_sum": 653.9,
+      "avg_ms_per_crop": 13.623
+    },
+    "v073-100kB": {
+      "video": "tests/fixtures/real-phone-v4/v073-100kB.mp4",
+      "extract_wall_s": 2.228,
+      "sha256_match": true,
+      "total_crops": 216,
+      "success_at_attempt": {
+        "1": 191,
+        "2": 1,
+        "3": 0,
+        "4": 0
+      },
+      "miss_all_4": 24,
+      "success_rate": 0.889,
+      "prep_ms": {
+        "n": 216,
+        "p50": 0.045,
+        "p95": 0.094,
+        "mean": 0.051,
+        "sum_ms": 11.1,
+        "max": 0.228
+      },
+      "attempts": {
+        "1_LocalAverage": {
+          "n": 216,
+          "p50": 11.068,
+          "p95": 13.196,
+          "mean": 11.204,
+          "sum_ms": 2420.1,
+          "max": 14.841
+        },
+        "2_GlobalHistogram": {
+          "n": 25,
+          "p50": 10.591,
+          "p95": 12.523,
+          "mean": 9.891,
+          "sum_ms": 247.3,
+          "max": 12.596
+        },
+        "3_AdaptiveThresh": {
+          "n": 24,
+          "p50": 11.409,
+          "p95": 14.547,
+          "mean": 11.342,
+          "sum_ms": 272.2,
+          "max": 14.735
+        },
+        "4_Inverted": {
+          "n": 24,
+          "p50": 8.498,
+          "p95": 10.941,
+          "mean": 8.401,
+          "sum_ms": 201.6,
+          "max": 10.971
+        }
+      },
+      "total_attempt_ms_sum": 3141.2,
+      "avg_ms_per_crop": 14.543
+    },
+    "v073-300kB": {
+      "video": "tests/fixtures/real-phone-v4/v073-300kB.mp4",
+      "extract_wall_s": 10.612,
+      "sha256_match": true,
+      "total_crops": 844,
+      "success_at_attempt": {
+        "1": 673,
+        "2": 19,
+        "3": 2,
+        "4": 0
+      },
+      "miss_all_4": 150,
+      "success_rate": 0.822,
+      "prep_ms": {
+        "n": 844,
+        "p50": 0.052,
+        "p95": 0.104,
+        "mean": 0.073,
+        "sum_ms": 61.5,
+        "max": 3.224
+      },
+      "attempts": {
+        "1_LocalAverage": {
+          "n": 844,
+          "p50": 12.136,
+          "p95": 14.887,
+          "mean": 12.306,
+          "sum_ms": 10385.9,
+          "max": 21.363
+        },
+        "2_GlobalHistogram": {
+          "n": 171,
+          "p50": 11.228,
+          "p95": 15.269,
+          "mean": 11.113,
+          "sum_ms": 1900.3,
+          "max": 19.178
+        },
+        "3_AdaptiveThresh": {
+          "n": 152,
+          "p50": 12.024,
+          "p95": 16.844,
+          "mean": 12.145,
+          "sum_ms": 1846.0,
+          "max": 27.782
+        },
+        "4_Inverted": {
+          "n": 150,
+          "p50": 8.817,
+          "p95": 12.487,
+          "mean": 8.934,
+          "sum_ms": 1340.1,
+          "max": 14.838
+        }
+      },
+      "total_attempt_ms_sum": 15472.3,
+      "avg_ms_per_crop": 18.332
+    }
+  }
+}

@@ -1,0 +1,50 @@
+# Milestone 3, task 3.1 — MNN batch output layout probe.
+#
+# Purpose:
+#   Before implementing a real ``detect_batch`` in MNNQrDetector, we
+#   must confirm how MNN's ``DetectionOutput`` operator lays out its
+#   output for batch_size > 1.  M0 recorded that batch=1 produces
+#   dim=6 (no batch_idx).  This container runs a minimal script to
+#   inspect the shape and raw contents at batch_size in {1, 2, 4, 8}.
+#
+# Build:
+#   podman build -f dev/wechatqrcode-mnn-poc/Containerfile.m3_probe \
+#       -t qrstream-mnn-m3-probe .
+#
+# Run:
+#   podman run --rm -v \
+#       "$(pwd)/dev/wechatqrcode-mnn-poc/results:/out:Z" \
+#       qrstream-mnn-m3-probe
+#
+# Output is both streamed to stdout and written to
+# ``dev/wechatqrcode-mnn-poc/results/mnn_batch_probe.json``.
+
+FROM fedora:latest
+
+RUN dnf install -y --setopt=install_weak_deps=False \
+        python3.13 python3.13-devel python3-pip \
+        gcc gcc-c++ make cmake \
+        mesa-libGL libglvnd-glx glib2 libgomp \
+        libSM libXext libXrender zlib \
+    && dnf clean all
+
+WORKDIR /app
+
+ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+
+# Use python3.13 explicitly — MNN currently publishes no cp314 wheel
+# and Fedora's "pip" defaults to the system Python (3.14 on fedora:latest).
+RUN python3.13 -m ensurepip --upgrade \
+    && python3.13 -m pip install --no-cache-dir --upgrade pip \
+    && python3.13 -m pip install --no-cache-dir numpy MNN
+
+COPY dev/wechatqrcode-mnn-poc/models/mnn/detect.mnn /app/detect.mnn
+COPY dev/wechatqrcode-mnn-poc/scripts/probe_mnn_batch_output.py /app/probe.py
+
+CMD ["sh", "-c", "\
+    python3.13 /app/probe.py \
+        --model /app/detect.mnn \
+        --output /out/mnn_batch_probe.json \
+        --backend CPU \
+        --batch-sizes 1,2,4,8 \
+"]

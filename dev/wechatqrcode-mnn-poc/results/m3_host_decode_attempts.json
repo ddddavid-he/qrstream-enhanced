@@ -1,0 +1,337 @@
+{
+  "samples": {
+    "v061": {
+      "video": "tests/fixtures/real-phone-v3/v061.mp4",
+      "extract_wall_s": 3.736,
+      "sha256_match": true,
+      "total_crops": 229,
+      "success_at_attempt": {
+        "1": 146,
+        "2": 4,
+        "3": 1,
+        "4": 0
+      },
+      "miss_all_4": 78,
+      "success_rate": 0.659,
+      "prep_ms": {
+        "n": 229,
+        "p50": 0.038,
+        "p95": 0.073,
+        "mean": 0.045,
+        "sum_ms": 10.3,
+        "max": 0.213
+      },
+      "attempts": {
+        "1_LocalAverage": {
+          "n": 229,
+          "p50": 12.568,
+          "p95": 14.819,
+          "mean": 12.584,
+          "sum_ms": 2881.6,
+          "max": 45.851
+        },
+        "2_GlobalHistogram": {
+          "n": 83,
+          "p50": 10.606,
+          "p95": 13.339,
+          "mean": 10.788,
+          "sum_ms": 895.4,
+          "max": 44.763
+        },
+        "3_AdaptiveThresh": {
+          "n": 79,
+          "p50": 11.553,
+          "p95": 14.422,
+          "mean": 11.087,
+          "sum_ms": 875.8,
+          "max": 16.231
+        },
+        "4_Inverted": {
+          "n": 78,
+          "p50": 10.135,
+          "p95": 13.123,
+          "mean": 10.644,
+          "sum_ms": 830.3,
+          "max": 13.505
+        }
+      },
+      "total_attempt_ms_sum": 5483.2,
+      "avg_ms_per_crop": 23.944
+    },
+    "v070": {
+      "video": "tests/fixtures/real-phone-v3/v070.mp4",
+      "extract_wall_s": 23.927,
+      "sha256_match": true,
+      "total_crops": 1168,
+      "success_at_attempt": {
+        "1": 673,
+        "2": 38,
+        "3": 5,
+        "4": 0
+      },
+      "miss_all_4": 452,
+      "success_rate": 0.613,
+      "prep_ms": {
+        "n": 1168,
+        "p50": 0.095,
+        "p95": 0.135,
+        "mean": 0.131,
+        "sum_ms": 153.0,
+        "max": 42.832
+      },
+      "attempts": {
+        "1_LocalAverage": {
+          "n": 1168,
+          "p50": 20.992,
+          "p95": 22.906,
+          "mean": 19.741,
+          "sum_ms": 23057.0,
+          "max": 108.008
+        },
+        "2_GlobalHistogram": {
+          "n": 495,
+          "p50": 17.178,
+          "p95": 21.38,
+          "mean": 16.114,
+          "sum_ms": 7976.3,
+          "max": 45.865
+        },
+        "3_AdaptiveThresh": {
+          "n": 457,
+          "p50": 21.477,
+          "p95": 27.403,
+          "mean": 19.978,
+          "sum_ms": 9130.1,
+          "max": 107.997
+        },
+        "4_Inverted": {
+          "n": 452,
+          "p50": 13.437,
+          "p95": 19.475,
+          "mean": 14.601,
+          "sum_ms": 6599.5,
+          "max": 22.07
+        }
+      },
+      "total_attempt_ms_sum": 46762.9,
+      "avg_ms_per_crop": 40.037
+    },
+    "v073-10kB": {
+      "video": "tests/fixtures/real-phone-v4/v073-10kB.mp4",
+      "extract_wall_s": 1.688,
+      "sha256_match": true,
+      "total_crops": 48,
+      "success_at_attempt": {
+        "1": 48,
+        "2": 0,
+        "3": 0,
+        "4": 0
+      },
+      "miss_all_4": 0,
+      "success_rate": 1.0,
+      "prep_ms": {
+        "n": 48,
+        "p50": 0.045,
+        "p95": 0.192,
+        "mean": 1.114,
+        "sum_ms": 53.5,
+        "max": 50.665
+      },
+      "attempts": {
+        "1_LocalAverage": {
+          "n": 48,
+          "p50": 12.514,
+          "p95": 48.056,
+          "mean": 17.565,
+          "sum_ms": 843.1,
+          "max": 106.297
+        },
+        "2_GlobalHistogram": {
+          "n": 0
+        },
+        "3_AdaptiveThresh": {
+          "n": 0
+        },
+        "4_Inverted": {
+          "n": 0
+        }
+      },
+      "total_attempt_ms_sum": 843.1,
+      "avg_ms_per_crop": 17.565
+    },
+    "v073-100kB": {
+      "video": "tests/fixtures/real-phone-v4/v073-100kB.mp4",
+      "extract_wall_s": 2.805,
+      "sha256_match": true,
+      "total_crops": 217,
+      "success_at_attempt": {
+        "1": 193,
+        "2": 2,
+        "3": 0,
+        "4": 0
+      },
+      "miss_all_4": 22,
+      "success_rate": 0.899,
+      "prep_ms": {
+        "n": 217,
+        "p50": 0.039,
+        "p95": 0.081,
+        "mean": 0.909,
+        "sum_ms": 197.2,
+        "max": 47.103
+      },
+      "attempts": {
+        "1_LocalAverage": {
+          "n": 217,
+          "p50": 12.103,
+          "p95": 13.223,
+          "mean": 12.564,
+          "sum_ms": 2726.3,
+          "max": 131.841
+        },
+        "2_GlobalHistogram": {
+          "n": 24,
+          "p50": 10.903,
+          "p95": 13.586,
+          "mean": 10.586,
+          "sum_ms": 254.1,
+          "max": 13.655
+        },
+        "3_AdaptiveThresh": {
+          "n": 22,
+          "p50": 10.509,
+          "p95": 13.896,
+          "mean": 10.716,
+          "sum_ms": 235.8,
+          "max": 14.534
+        },
+        "4_Inverted": {
+          "n": 22,
+          "p50": 9.08,
+          "p95": 10.879,
+          "mean": 8.886,
+          "sum_ms": 195.5,
+          "max": 11.422
+        }
+      },
+      "total_attempt_ms_sum": 3411.6,
+      "avg_ms_per_crop": 15.722
+    },
+    "v073-300kB": {
+      "video": "tests/fixtures/real-phone-v4/v073-300kB.mp4",
+      "extract_wall_s": 8.421,
+      "sha256_match": true,
+      "total_crops": 847,
+      "success_at_attempt": {
+        "1": 677,
+        "2": 20,
+        "3": 2,
+        "4": 0
+      },
+      "miss_all_4": 148,
+      "success_rate": 0.825,
+      "prep_ms": {
+        "n": 847,
+        "p50": 0.037,
+        "p95": 0.073,
+        "mean": 0.203,
+        "sum_ms": 171.5,
+        "max": 84.351
+      },
+      "attempts": {
+        "1_LocalAverage": {
+          "n": 847,
+          "p50": 12.302,
+          "p95": 13.625,
+          "mean": 12.379,
+          "sum_ms": 10484.9,
+          "max": 146.352
+        },
+        "2_GlobalHistogram": {
+          "n": 170,
+          "p50": 10.969,
+          "p95": 13.77,
+          "mean": 10.569,
+          "sum_ms": 1796.6,
+          "max": 14.921
+        },
+        "3_AdaptiveThresh": {
+          "n": 150,
+          "p50": 9.81,
+          "p95": 13.719,
+          "mean": 10.548,
+          "sum_ms": 1582.2,
+          "max": 14.891
+        },
+        "4_Inverted": {
+          "n": 148,
+          "p50": 8.86,
+          "p95": 11.277,
+          "mean": 8.852,
+          "sum_ms": 1310.1,
+          "max": 12.219
+        }
+      },
+      "total_attempt_ms_sum": 15173.9,
+      "avg_ms_per_crop": 17.915
+    },
+    "IMG_9425": {
+      "video": "/Users/ddddavid/Downloads/testcase/IMG_9425.MOV",
+      "extract_wall_s": 25.742,
+      "sha256_match": null,
+      "total_crops": 935,
+      "success_at_attempt": {
+        "1": 706,
+        "2": 26,
+        "3": 3,
+        "4": 0
+      },
+      "miss_all_4": 200,
+      "success_rate": 0.786,
+      "prep_ms": {
+        "n": 935,
+        "p50": 0.038,
+        "p95": 0.073,
+        "mean": 0.089,
+        "sum_ms": 83.4,
+        "max": 40.681
+      },
+      "attempts": {
+        "1_LocalAverage": {
+          "n": 935,
+          "p50": 9.244,
+          "p95": 11.761,
+          "mean": 9.339,
+          "sum_ms": 8732.3,
+          "max": 50.998
+        },
+        "2_GlobalHistogram": {
+          "n": 229,
+          "p50": 4.534,
+          "p95": 11.373,
+          "mean": 5.766,
+          "sum_ms": 1320.5,
+          "max": 48.464
+        },
+        "3_AdaptiveThresh": {
+          "n": 203,
+          "p50": 1.527,
+          "p95": 11.185,
+          "mean": 5.054,
+          "sum_ms": 1026.0,
+          "max": 45.494
+        },
+        "4_Inverted": {
+          "n": 200,
+          "p50": 1.139,
+          "p95": 9.197,
+          "mean": 3.744,
+          "sum_ms": 748.8,
+          "max": 48.293
+        }
+      },
+      "total_attempt_ms_sum": 11827.6,
+      "avg_ms_per_crop": 12.65
+    }
+  }
+}

@@ -1,0 +1,371 @@
+{
+  "config": {
+    "workers": 4,
+    "use_mnn": true,
+    "samples_requested": [
+      "v061",
+      "v070",
+      "v073-10kB",
+      "v073-100kB",
+      "v073-300kB",
+      "IMG_9425"
+    ]
+  },
+  "samples": {
+    "v061": {
+      "video_path": "tests/fixtures/real-phone-v3/v061.mp4",
+      "use_mnn": true,
+      "workers": 4,
+      "extract_wall_s": 3.381,
+      "decode_wall_s": 0.0,
+      "total_wall_s": 3.382,
+      "payload_bytes": 30720,
+      "payload_sha256": "4a440b6da851a9a2e35eacca95b7b2fe29e3560c169b0a57211fccc2f5469443",
+      "sha256_match": true,
+      "num_unique_blocks_from_extract": 51,
+      "stages": {
+        "cnn_detect_ms": {
+          "n": 200,
+          "p50": 4.515,
+          "p95": 6.904,
+          "p99": 218.401,
+          "mean": 9.457,
+          "sum_ms": 1891.4,
+          "min": 1.616,
+          "max": 261.22
+        },
+        "sr_ms": {
+          "n": 0
+        },
+        "cpu_decode_ms": {
+          "n": 230,
+          "p50": 13.546,
+          "p95": 27.663,
+          "p99": 45.702,
+          "mean": 17.093,
+          "sum_ms": 3931.5,
+          "min": 11.608,
+          "max": 54.748
+        },
+        "total_detect_ms": {
+          "n": 200,
+          "p50": 17.647,
+          "p95": 54.795,
+          "p99": 263.369,
+          "mean": 32.292,
+          "sum_ms": 6458.3,
+          "min": 2.173,
+          "max": 371.557
+        }
+      },
+      "counters": {
+        "frames_scanned": 200,
+        "frames_with_decode": 150,
+        "sr_triggered_count": 0
+      },
+      "cumulative_ms": {
+        "cnn_detect": 1891.4,
+        "sr": 0,
+        "cpu_decode": 3931.5,
+        "total_detect": 6458.3
+      }
+    },
+    "v070": {
+      "video_path": "tests/fixtures/real-phone-v3/v070.mp4",
+      "use_mnn": true,
+      "workers": 4,
+      "extract_wall_s": 20.156,
+      "decode_wall_s": 0.005,
+      "total_wall_s": 20.161,
+      "payload_bytes": 307200,
+      "payload_sha256": "2a20b62e35bf4b3a7f5fa4854397eeafea99d1efb8db38737cda4df55a4d5b8d",
+      "sha256_match": true,
+      "num_unique_blocks_from_extract": 464,
+      "stages": {
+        "cnn_detect_ms": {
+          "n": 965,
+          "p50": 4.715,
+          "p95": 7.179,
+          "p99": 56.295,
+          "mean": 6.049,
+          "sum_ms": 5837.7,
+          "min": 1.996,
+          "max": 271.86
+        },
+        "sr_ms": {
+          "n": 0
+        },
+        "cpu_decode_ms": {
+          "n": 1168,
+          "p50": 22.502,
+          "p95": 43.321,
+          "p99": 46.032,
+          "mean": 27.009,
+          "sum_ms": 31546.9,
+          "min": 2.208,
+          "max": 177.481
+        },
+        "total_detect_ms": {
+          "n": 965,
+          "p50": 26.845,
+          "p95": 76.404,
+          "p99": 135.454,
+          "mean": 40.185,
+          "sum_ms": 38778.1,
+          "min": 3.032,
+          "max": 635.98
+        }
+      },
+      "counters": {
+        "frames_scanned": 965,
+        "frames_with_decode": 712,
+        "sr_triggered_count": 0
+      },
+      "cumulative_ms": {
+        "cnn_detect": 5837.7,
+        "sr": 0,
+        "cpu_decode": 31546.9,
+        "total_detect": 38778.1
+      }
+    },
+    "v073-10kB": {
+      "video_path": "tests/fixtures/real-phone-v4/v073-10kB.mp4",
+      "use_mnn": true,
+      "workers": 4,
+      "extract_wall_s": 1.724,
+      "decode_wall_s": 0.0,
+      "total_wall_s": 1.724,
+      "payload_bytes": 10240,
+      "payload_sha256": "897d28b6b6e8540e08cb2e10f790a7cd40c84d56840e03349fef4a05a95ee8a4",
+      "sha256_match": true,
+      "num_unique_blocks_from_extract": 16,
+      "stages": {
+        "cnn_detect_ms": {
+          "n": 80,
+          "p50": 3.049,
+          "p95": 185.073,
+          "p99": 270.078,
+          "mean": 30.117,
+          "sum_ms": 2409.4,
+          "min": 1.686,
+          "max": 270.078
+        },
+        "sr_ms": {
+          "n": 0
+        },
+        "cpu_decode_ms": {
+          "n": 48,
+          "p50": 12.825,
+          "p95": 56.427,
+          "p99": 95.717,
+          "mean": 17.821,
+          "sum_ms": 855.4,
+          "min": 11.694,
+          "max": 95.717
+        },
+        "total_detect_ms": {
+          "n": 80,
+          "p50": 15.538,
+          "p95": 285.191,
+          "p99": 337.253,
+          "mean": 55.259,
+          "sum_ms": 4420.7,
+          "min": 1.842,
+          "max": 337.253
+        }
+      },
+      "counters": {
+        "frames_scanned": 80,
+        "frames_with_decode": 48,
+        "sr_triggered_count": 0
+      },
+      "cumulative_ms": {
+        "cnn_detect": 2409.4,
+        "sr": 0,
+        "cpu_decode": 855.4,
+        "total_detect": 4420.7
+      }
+    },
+    "v073-100kB": {
+      "video_path": "tests/fixtures/real-phone-v4/v073-100kB.mp4",
+      "use_mnn": true,
+      "workers": 4,
+      "extract_wall_s": 2.654,
+      "decode_wall_s": 0.001,
+      "total_wall_s": 2.656,
+      "payload_bytes": 102400,
+      "payload_sha256": "6fbf396baedd1233f4c8486e8a4a4cc43b9a1283e19ae4dcb3cd27c4ad4dbed2",
+      "sha256_match": true,
+      "num_unique_blocks_from_extract": 137,
+      "stages": {
+        "cnn_detect_ms": {
+          "n": 220,
+          "p50": 4.092,
+          "p95": 46.098,
+          "p99": 256.091,
+          "mean": 12.651,
+          "sum_ms": 2783.2,
+          "min": 1.829,
+          "max": 302.578
+        },
+        "sr_ms": {
+          "n": 0
+        },
+        "cpu_decode_ms": {
+          "n": 219,
+          "p50": 12.206,
+          "p95": 24.618,
+          "p99": 45.861,
+          "mean": 14.394,
+          "sum_ms": 3152.2,
+          "min": 11.096,
+          "max": 134.771
+        },
+        "total_detect_ms": {
+          "n": 220,
+          "p50": 16.382,
+          "p95": 125.892,
+          "p99": 440.886,
+          "mean": 31.936,
+          "sum_ms": 7026.0,
+          "min": 2.469,
+          "max": 497.554
+        }
+      },
+      "counters": {
+        "frames_scanned": 220,
+        "frames_with_decode": 197,
+        "sr_triggered_count": 0
+      },
+      "cumulative_ms": {
+        "cnn_detect": 2783.2,
+        "sr": 0,
+        "cpu_decode": 3152.2,
+        "total_detect": 7026.0
+      }
+    },
+    "v073-300kB": {
+      "video_path": "tests/fixtures/real-phone-v4/v073-300kB.mp4",
+      "use_mnn": true,
+      "workers": 4,
+      "extract_wall_s": 7.783,
+      "decode_wall_s": 0.004,
+      "total_wall_s": 7.787,
+      "payload_bytes": 307200,
+      "payload_sha256": "115e32de92187eb5cc544e04b5bb5ed953577d6c75489d8e4c1f2b1c374380fb",
+      "sha256_match": true,
+      "num_unique_blocks_from_extract": 389,
+      "stages": {
+        "cnn_detect_ms": {
+          "n": 784,
+          "p50": 4.509,
+          "p95": 5.893,
+          "p99": 122.79,
+          "mean": 7.281,
+          "sum_ms": 5708.1,
+          "min": 1.689,
+          "max": 368.12
+        },
+        "sr_ms": {
+          "n": 0
+        },
+        "cpu_decode_ms": {
+          "n": 849,
+          "p50": 12.623,
+          "p95": 25.611,
+          "p99": 27.326,
+          "mean": 14.526,
+          "sum_ms": 12332.5,
+          "min": 1.874,
+          "max": 85.733
+        },
+        "total_detect_ms": {
+          "n": 784,
+          "p50": 17.086,
+          "p95": 48.824,
+          "p99": 185.61,
+          "mean": 24.743,
+          "sum_ms": 19398.5,
+          "min": 2.479,
+          "max": 652.026
+        }
+      },
+      "counters": {
+        "frames_scanned": 784,
+        "frames_with_decode": 697,
+        "sr_triggered_count": 0
+      },
+      "cumulative_ms": {
+        "cnn_detect": 5708.1,
+        "sr": 0,
+        "cpu_decode": 12332.5,
+        "total_detect": 19398.5
+      }
+    },
+    "IMG_9425": {
+      "video_path": "/Users/ddddavid/Downloads/testcase/IMG_9425.MOV",
+      "use_mnn": true,
+      "workers": 4,
+      "extract_wall_s": 24.963,
+      "decode_wall_s": 0.002,
+      "total_wall_s": 24.965,
+      "payload_bytes": 146642,
+      "payload_sha256": "3a3a30b00b3cbaa9ad88ef54f881c1c310a58f40212d6c29c1c5947b7fca7968",
+      "sha256_match": null,
+      "num_unique_blocks_from_extract": 202,
+      "stages": {
+        "cnn_detect_ms": {
+          "n": 782,
+          "p50": 4.883,
+          "p95": 7.583,
+          "p99": 47.078,
+          "mean": 7.379,
+          "sum_ms": 5770.5,
+          "min": 1.603,
+          "max": 311.198
+        },
+        "sr_ms": {
+          "n": 57,
+          "p50": 36.644,
+          "p95": 46.954,
+          "p99": 54.69,
+          "mean": 34.59,
+          "sum_ms": 1971.6,
+          "min": 1.244,
+          "max": 54.69
+        },
+        "cpu_decode_ms": {
+          "n": 945,
+          "p50": 9.407,
+          "p95": 33.966,
+          "p99": 50.943,
+          "mean": 11.212,
+          "sum_ms": 10595.5,
+          "min": 0.182,
+          "max": 86.715
+        },
+        "total_detect_ms": {
+          "n": 782,
+          "p50": 14.507,
+          "p95": 76.355,
+          "p99": 115.016,
+          "mean": 24.297,
+          "sum_ms": 19000.4,
+          "min": 11.365,
+          "max": 490.234
+        }
+      },
+      "counters": {
+        "frames_scanned": 782,
+        "frames_with_decode": 733,
+        "sr_triggered_count": 57
+      },
+      "cumulative_ms": {
+        "cnn_detect": 5770.5,
+        "sr": 1971.6,
+        "cpu_decode": 10595.5,
+        "total_detect": 19000.4
+      }
+    }
+  }
+}

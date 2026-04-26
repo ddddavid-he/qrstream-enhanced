@@ -1,0 +1,131 @@
+{
+  "mnn_version": "3.5.0",
+  "model_path": "/app/detect.mnn",
+  "backend": "CPU",
+  "input_fixed_hw": [
+    384,
+    384
+  ],
+  "probes": [
+    {
+      "batch_size": 1,
+      "input_shape": [
+        1,
+        1,
+        384,
+        384
+      ],
+      "output_shape": [
+        1,
+        1,
+        1,
+        6
+      ],
+      "output_numel": 6,
+      "output_head_flat": [
+        1.0,
+        0.4231,
+        0.1997,
+        0.2714,
+        0.7893,
+        0.7187
+      ],
+      "parse_attempts": {
+        "dim=6": {
+          "implied_rows": 1,
+          "first_rows": [
+            [
+              1.0,
+              0.4231,
+              0.1997,
+              0.2714,
+              0.7893,
+              0.7187
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "batch_size": 2,
+      "input_shape": [
+        2,
+        1,
+        384,
+        384
+      ],
+      "output_shape": [
+        1,
+        1,
+        0,
+        6
+      ],
+      "output_numel": 0,
+      "output_head_flat": [],
+      "parse_attempts": {
+        "dim=6": {
+          "implied_rows": 0,
+          "first_rows": []
+        },
+        "dim=7": {
+          "implied_rows": 0,
+          "first_rows": []
+        }
+      }
+    },
+    {
+      "batch_size": 4,
+      "input_shape": [
+        4,
+        1,
+        384,
+        384
+      ],
+      "output_shape": [
+        1,
+        1,
+        0,
+        6
+      ],
+      "output_numel": 0,
+      "output_head_flat": [],
+      "parse_attempts": {
+        "dim=6": {
+          "implied_rows": 0,
+          "first_rows": []
+        },
+        "dim=7": {
+          "implied_rows": 0,
+          "first_rows": []
+        }
+      }
+    },
+    {
+      "batch_size": 8,
+      "input_shape": [
+        8,
+        1,
+        384,
+        384
+      ],
+      "output_shape": [
+        1,
+        1,
+        0,
+        6
+      ],
+      "output_numel": 0,
+      "output_head_flat": [],
+      "parse_attempts": {
+        "dim=6": {
+          "implied_rows": 0,
+          "first_rows": []
+        },
+        "dim=7": {
+          "implied_rows": 0,
+          "first_rows": []
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "mnn_version": "3.5.0",
+  "model_path": "/app/detect.mnn",
+  "inputs": {
+    "data": [
+      1,
+      1,
+      384,
+      384
+    ]
+  },
+  "outputs": {
+    "detection_output": [
+      1,
+      1,
+      0,
+      6
+    ]
+  }
+}

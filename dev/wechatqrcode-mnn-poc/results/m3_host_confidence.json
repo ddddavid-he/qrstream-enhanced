@@ -1,0 +1,710 @@
+{
+  "samples": {
+    "v061": {
+      "video": "tests/fixtures/real-phone-v3/v061.mp4",
+      "wall_s": 3.595,
+      "sha_ok": true,
+      "total_decode_calls": 229,
+      "no_conf_calls": 41,
+      "histogram": [
+        {
+          "bin_lo": 0.95,
+          "attempts": 1,
+          "successes": 1,
+          "hit_rate": 1.0,
+          "mean_ms": 45.17,
+          "sum_ms": 45.2
+        },
+        {
+          "bin_lo": 1.0,
+          "attempts": 187,
+          "successes": 150,
+          "hit_rate": 0.802,
+          "mean_ms": 18.78,
+          "sum_ms": 3512.8
+        }
+      ],
+      "threshold_scenarios": [
+        {
+          "threshold": 0.0,
+          "kept_calls": 188,
+          "dropped_calls": 0,
+          "kept_successes": 151,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 3557.9,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.3,
+          "kept_calls": 188,
+          "dropped_calls": 0,
+          "kept_successes": 151,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 3557.9,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.4,
+          "kept_calls": 188,
+          "dropped_calls": 0,
+          "kept_successes": 151,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 3557.9,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.5,
+          "kept_calls": 188,
+          "dropped_calls": 0,
+          "kept_successes": 151,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 3557.9,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.6,
+          "kept_calls": 188,
+          "dropped_calls": 0,
+          "kept_successes": 151,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 3557.9,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.7,
+          "kept_calls": 188,
+          "dropped_calls": 0,
+          "kept_successes": 151,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 3557.9,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.8,
+          "kept_calls": 188,
+          "dropped_calls": 0,
+          "kept_successes": 151,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 3557.9,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.9,
+          "kept_calls": 188,
+          "dropped_calls": 0,
+          "kept_successes": 151,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 3557.9,
+          "lost_hit_rate": 0.0
+        }
+      ]
+    },
+    "v070": {
+      "video": "tests/fixtures/real-phone-v3/v070.mp4",
+      "wall_s": 22.244,
+      "sha_ok": true,
+      "total_decode_calls": 1163,
+      "no_conf_calls": 227,
+      "histogram": [
+        {
+          "bin_lo": 0.3,
+          "attempts": 1,
+          "successes": 0,
+          "hit_rate": 0.0,
+          "mean_ms": 35.21,
+          "sum_ms": 35.2
+        },
+        {
+          "bin_lo": 0.95,
+          "attempts": 45,
+          "successes": 0,
+          "hit_rate": 0.0,
+          "mean_ms": 62.0,
+          "sum_ms": 2790.0
+        },
+        {
+          "bin_lo": 1.0,
+          "attempts": 890,
+          "successes": 714,
+          "hit_rate": 0.802,
+          "mean_ms": 31.84,
+          "sum_ms": 28334.2
+        }
+      ],
+      "threshold_scenarios": [
+        {
+          "threshold": 0.0,
+          "kept_calls": 936,
+          "dropped_calls": 0,
+          "kept_successes": 714,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 31159.4,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.3,
+          "kept_calls": 936,
+          "dropped_calls": 0,
+          "kept_successes": 714,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 31159.4,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.4,
+          "kept_calls": 935,
+          "dropped_calls": 1,
+          "kept_successes": 714,
+          "dropped_successes": 0,
+          "saved_decode_ms": 35.2,
+          "kept_decode_ms": 31124.2,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.5,
+          "kept_calls": 935,
+          "dropped_calls": 1,
+          "kept_successes": 714,
+          "dropped_successes": 0,
+          "saved_decode_ms": 35.2,
+          "kept_decode_ms": 31124.2,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.6,
+          "kept_calls": 935,
+          "dropped_calls": 1,
+          "kept_successes": 714,
+          "dropped_successes": 0,
+          "saved_decode_ms": 35.2,
+          "kept_decode_ms": 31124.2,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.7,
+          "kept_calls": 935,
+          "dropped_calls": 1,
+          "kept_successes": 714,
+          "dropped_successes": 0,
+          "saved_decode_ms": 35.2,
+          "kept_decode_ms": 31124.2,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.8,
+          "kept_calls": 935,
+          "dropped_calls": 1,
+          "kept_successes": 714,
+          "dropped_successes": 0,
+          "saved_decode_ms": 35.2,
+          "kept_decode_ms": 31124.2,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.9,
+          "kept_calls": 935,
+          "dropped_calls": 1,
+          "kept_successes": 714,
+          "dropped_successes": 0,
+          "saved_decode_ms": 35.2,
+          "kept_decode_ms": 31124.2,
+          "lost_hit_rate": 0.0
+        }
+      ]
+    },
+    "v073-10kB": {
+      "video": "tests/fixtures/real-phone-v4/v073-10kB.mp4",
+      "wall_s": 1.696,
+      "sha_ok": true,
+      "total_decode_calls": 48,
+      "no_conf_calls": 2,
+      "histogram": [
+        {
+          "bin_lo": 1.0,
+          "attempts": 46,
+          "successes": 46,
+          "hit_rate": 1.0,
+          "mean_ms": 16.96,
+          "sum_ms": 780.3
+        }
+      ],
+      "threshold_scenarios": [
+        {
+          "threshold": 0.0,
+          "kept_calls": 46,
+          "dropped_calls": 0,
+          "kept_successes": 46,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 780.3,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.3,
+          "kept_calls": 46,
+          "dropped_calls": 0,
+          "kept_successes": 46,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 780.3,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.4,
+          "kept_calls": 46,
+          "dropped_calls": 0,
+          "kept_successes": 46,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 780.3,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.5,
+          "kept_calls": 46,
+          "dropped_calls": 0,
+          "kept_successes": 46,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 780.3,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.6,
+          "kept_calls": 46,
+          "dropped_calls": 0,
+          "kept_successes": 46,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 780.3,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.7,
+          "kept_calls": 46,
+          "dropped_calls": 0,
+          "kept_successes": 46,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 780.3,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.8,
+          "kept_calls": 46,
+          "dropped_calls": 0,
+          "kept_successes": 46,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 780.3,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.9,
+          "kept_calls": 46,
+          "dropped_calls": 0,
+          "kept_successes": 46,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 780.3,
+          "lost_hit_rate": 0.0
+        }
+      ]
+    },
+    "v073-100kB": {
+      "video": "tests/fixtures/real-phone-v4/v073-100kB.mp4",
+      "wall_s": 2.836,
+      "sha_ok": true,
+      "total_decode_calls": 218,
+      "no_conf_calls": 15,
+      "histogram": [
+        {
+          "bin_lo": 1.0,
+          "attempts": 203,
+          "successes": 192,
+          "hit_rate": 0.946,
+          "mean_ms": 14.28,
+          "sum_ms": 2899.3
+        }
+      ],
+      "threshold_scenarios": [
+        {
+          "threshold": 0.0,
+          "kept_calls": 203,
+          "dropped_calls": 0,
+          "kept_successes": 192,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 2899.3,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.3,
+          "kept_calls": 203,
+          "dropped_calls": 0,
+          "kept_successes": 192,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 2899.3,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.4,
+          "kept_calls": 203,
+          "dropped_calls": 0,
+          "kept_successes": 192,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 2899.3,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.5,
+          "kept_calls": 203,
+          "dropped_calls": 0,
+          "kept_successes": 192,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 2899.3,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.6,
+          "kept_calls": 203,
+          "dropped_calls": 0,
+          "kept_successes": 192,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 2899.3,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.7,
+          "kept_calls": 203,
+          "dropped_calls": 0,
+          "kept_successes": 192,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 2899.3,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.8,
+          "kept_calls": 203,
+          "dropped_calls": 0,
+          "kept_successes": 192,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 2899.3,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.9,
+          "kept_calls": 203,
+          "dropped_calls": 0,
+          "kept_successes": 192,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 2899.3,
+          "lost_hit_rate": 0.0
+        }
+      ]
+    },
+    "v073-300kB": {
+      "video": "tests/fixtures/real-phone-v4/v073-300kB.mp4",
+      "wall_s": 8.138,
+      "sha_ok": true,
+      "total_decode_calls": 846,
+      "no_conf_calls": 78,
+      "histogram": [
+        {
+          "bin_lo": 0.95,
+          "attempts": 26,
+          "successes": 0,
+          "hit_rate": 0.0,
+          "mean_ms": 36.51,
+          "sum_ms": 949.2
+        },
+        {
+          "bin_lo": 1.0,
+          "attempts": 742,
+          "successes": 696,
+          "hit_rate": 0.938,
+          "mean_ms": 14.93,
+          "sum_ms": 11076.4
+        }
+      ],
+      "threshold_scenarios": [
+        {
+          "threshold": 0.0,
+          "kept_calls": 768,
+          "dropped_calls": 0,
+          "kept_successes": 696,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 12025.7,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.3,
+          "kept_calls": 768,
+          "dropped_calls": 0,
+          "kept_successes": 696,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 12025.7,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.4,
+          "kept_calls": 768,
+          "dropped_calls": 0,
+          "kept_successes": 696,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 12025.7,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.5,
+          "kept_calls": 768,
+          "dropped_calls": 0,
+          "kept_successes": 696,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 12025.7,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.6,
+          "kept_calls": 768,
+          "dropped_calls": 0,
+          "kept_successes": 696,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 12025.7,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.7,
+          "kept_calls": 768,
+          "dropped_calls": 0,
+          "kept_successes": 696,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 12025.7,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.8,
+          "kept_calls": 768,
+          "dropped_calls": 0,
+          "kept_successes": 696,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 12025.7,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.9,
+          "kept_calls": 768,
+          "dropped_calls": 0,
+          "kept_successes": 696,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 12025.7,
+          "lost_hit_rate": 0.0
+        }
+      ]
+    },
+    "IMG_9425": {
+      "video": "/Users/ddddavid/Downloads/testcase/IMG_9425.MOV",
+      "wall_s": 25.323,
+      "sha_ok": null,
+      "total_decode_calls": 938,
+      "no_conf_calls": 48,
+      "histogram": [
+        {
+          "bin_lo": 0.2,
+          "attempts": 10,
+          "successes": 0,
+          "hit_rate": 0.0,
+          "mean_ms": 5.58,
+          "sum_ms": 55.8
+        },
+        {
+          "bin_lo": 0.25,
+          "attempts": 20,
+          "successes": 0,
+          "hit_rate": 0.0,
+          "mean_ms": 6.34,
+          "sum_ms": 126.8
+        },
+        {
+          "bin_lo": 0.3,
+          "attempts": 28,
+          "successes": 0,
+          "hit_rate": 0.0,
+          "mean_ms": 7.16,
+          "sum_ms": 200.5
+        },
+        {
+          "bin_lo": 0.35,
+          "attempts": 11,
+          "successes": 0,
+          "hit_rate": 0.0,
+          "mean_ms": 5.48,
+          "sum_ms": 60.3
+        },
+        {
+          "bin_lo": 0.4,
+          "attempts": 15,
+          "successes": 0,
+          "hit_rate": 0.0,
+          "mean_ms": 7.73,
+          "sum_ms": 116.0
+        },
+        {
+          "bin_lo": 0.45,
+          "attempts": 12,
+          "successes": 0,
+          "hit_rate": 0.0,
+          "mean_ms": 6.66,
+          "sum_ms": 79.9
+        },
+        {
+          "bin_lo": 0.5,
+          "attempts": 7,
+          "successes": 1,
+          "hit_rate": 0.143,
+          "mean_ms": 19.04,
+          "sum_ms": 133.3
+        },
+        {
+          "bin_lo": 0.55,
+          "attempts": 2,
+          "successes": 0,
+          "hit_rate": 0.0,
+          "mean_ms": 9.89,
+          "sum_ms": 19.8
+        },
+        {
+          "bin_lo": 0.6,
+          "attempts": 2,
+          "successes": 0,
+          "hit_rate": 0.0,
+          "mean_ms": 15.96,
+          "sum_ms": 31.9
+        },
+        {
+          "bin_lo": 0.95,
+          "attempts": 11,
+          "successes": 0,
+          "hit_rate": 0.0,
+          "mean_ms": 37.33,
+          "sum_ms": 410.6
+        },
+        {
+          "bin_lo": 1.0,
+          "attempts": 772,
+          "successes": 737,
+          "hit_rate": 0.955,
+          "mean_ms": 12.79,
+          "sum_ms": 9870.8
+        }
+      ],
+      "threshold_scenarios": [
+        {
+          "threshold": 0.0,
+          "kept_calls": 890,
+          "dropped_calls": 0,
+          "kept_successes": 738,
+          "dropped_successes": 0,
+          "saved_decode_ms": 0,
+          "kept_decode_ms": 11105.6,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.3,
+          "kept_calls": 860,
+          "dropped_calls": 30,
+          "kept_successes": 738,
+          "dropped_successes": 0,
+          "saved_decode_ms": 182.6,
+          "kept_decode_ms": 10923.0,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.4,
+          "kept_calls": 821,
+          "dropped_calls": 69,
+          "kept_successes": 738,
+          "dropped_successes": 0,
+          "saved_decode_ms": 443.4,
+          "kept_decode_ms": 10662.2,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.5,
+          "kept_calls": 794,
+          "dropped_calls": 96,
+          "kept_successes": 738,
+          "dropped_successes": 0,
+          "saved_decode_ms": 639.2,
+          "kept_decode_ms": 10466.4,
+          "lost_hit_rate": 0.0
+        },
+        {
+          "threshold": 0.6,
+          "kept_calls": 785,
+          "dropped_calls": 105,
+          "kept_successes": 737,
+          "dropped_successes": 1,
+          "saved_decode_ms": 792.3,
+          "kept_decode_ms": 10313.3,
+          "lost_hit_rate": 0.0014
+        },
+        {
+          "threshold": 0.7,
+          "kept_calls": 783,
+          "dropped_calls": 107,
+          "kept_successes": 737,
+          "dropped_successes": 1,
+          "saved_decode_ms": 824.2,
+          "kept_decode_ms": 10281.4,
+          "lost_hit_rate": 0.0014
+        },
+        {
+          "threshold": 0.8,
+          "kept_calls": 783,
+          "dropped_calls": 107,
+          "kept_successes": 737,
+          "dropped_successes": 1,
+          "saved_decode_ms": 824.2,
+          "kept_decode_ms": 10281.4,
+          "lost_hit_rate": 0.0014
+        },
+        {
+          "threshold": 0.9,
+          "kept_calls": 783,
+          "dropped_calls": 107,
+          "kept_successes": 737,
+          "dropped_successes": 1,
+          "saved_decode_ms": 824.2,
+          "kept_decode_ms": 10281.4,
+          "lost_hit_rate": 0.0014
+        }
+      ]
+    }
+  }
+}

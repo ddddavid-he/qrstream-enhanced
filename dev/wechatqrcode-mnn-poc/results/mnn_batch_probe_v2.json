@@ -1,0 +1,225 @@
+{
+  "mnn_version": "3.5.0",
+  "model_path": "/app/detect.mnn",
+  "backend": "CPU",
+  "probes": [
+    {
+      "batch_size": 1,
+      "input_shape_before_resize": [
+        1,
+        1,
+        384,
+        384
+      ],
+      "input_shape_after_resize": [
+        1,
+        1,
+        384,
+        384
+      ],
+      "output_shape": [
+        1,
+        1,
+        1,
+        6
+      ],
+      "output_numel": 6,
+      "output_raw_flat": [
+        1.0,
+        0.4231,
+        0.1997,
+        0.2714,
+        0.7893,
+        0.7187
+      ],
+      "parse_attempts": {
+        "dim=6": {
+          "implied_rows": 1,
+          "all_rows": [
+            [
+              1.0,
+              0.4231,
+              0.1997,
+              0.2714,
+              0.7893,
+              0.7187
+            ]
+          ]
+        }
+      },
+      "probe_idx": 0
+    },
+    {
+      "batch_size": 2,
+      "input_shape_before_resize": [
+        1,
+        1,
+        384,
+        384
+      ],
+      "input_shape_after_resize": [
+        2,
+        1,
+        384,
+        384
+      ],
+      "output_shape": [
+        1,
+        1,
+        0,
+        6
+      ],
+      "output_numel": 0,
+      "output_raw_flat": [],
+      "parse_attempts": {},
+      "probe_idx": 1
+    },
+    {
+      "batch_size": 1,
+      "input_shape_before_resize": [
+        1,
+        1,
+        384,
+        384
+      ],
+      "input_shape_after_resize": [
+        1,
+        1,
+        384,
+        384
+      ],
+      "output_shape": [
+        1,
+        1,
+        1,
+        6
+      ],
+      "output_numel": 6,
+      "output_raw_flat": [
+        1.0,
+        0.4231,
+        0.1997,
+        0.2714,
+        0.7893,
+        0.7187
+      ],
+      "parse_attempts": {
+        "dim=6": {
+          "implied_rows": 1,
+          "all_rows": [
+            [
+              1.0,
+              0.4231,
+              0.1997,
+              0.2714,
+              0.7893,
+              0.7187
+            ]
+          ]
+        }
+      },
+      "probe_idx": 2
+    },
+    {
+      "batch_size": 4,
+      "input_shape_before_resize": [
+        1,
+        1,
+        384,
+        384
+      ],
+      "input_shape_after_resize": [
+        4,
+        1,
+        384,
+        384
+      ],
+      "output_shape": [
+        1,
+        1,
+        0,
+        6
+      ],
+      "output_numel": 0,
+      "output_raw_flat": [],
+      "parse_attempts": {},
+      "probe_idx": 3
+    }
+  ],
+  "sequential_batch1_on_one_session": [
+    {
+      "frame_seed": 100,
+      "output_shape": [
+        1,
+        1,
+        1,
+        6
+      ],
+      "output_flat": [
+        1.0,
+        0.4231,
+        0.1997,
+        0.2714,
+        0.7893,
+        0.7187
+      ]
+    },
+    {
+      "frame_seed": 101,
+      "output_shape": [
+        1,
+        1,
+        1,
+        6
+      ],
+      "output_flat": [
+        1.0,
+        0.4443,
+        0.0138,
+        0.1408,
+        0.7532,
+        0.8553
+      ]
+    },
+    {
+      "frame_seed": 102,
+      "output_shape": [
+        1,
+        1,
+        2,
+        6
+      ],
+      "output_flat": [
+        1.0,
+        0.7622,
+        0.1161,
+        0.292,
+        0.7439,
+        0.72,
+        1.0,
+        0.2003,
+        0.2913,
+        0.3477,
+        0.6377,
+        0.6788
+      ]
+    },
+    {
+      "frame_seed": 103,
+      "output_shape": [
+        1,
+        1,
+        1,
+        6
+      ],
+      "output_flat": [
+        1.0,
+        0.4543,
+        0.1475,
+        0.2497,
+        0.7089,
+        0.7212
+      ]
+    }
+  ]
+}
