@@ -18,8 +18,22 @@
 - **M0 完成**：两个 Caffe 模型已转成 `.mnn`，输出与 OpenCV DNN 对齐；Apple M4 Pro 上 MNN Metal **detector 单次推理**比 WeChatQRCode 全套快 7~126 倍（详见 `results/m0_report.md`；注意这是 detect-only 比值，不是 end-to-end）
 - **M1 完成**：`DetectorRouter` 已真正接入 `ThreadPoolExecutor` worker，`--mnn` 显式开关生效；Linux + MNN CPU 端到端 decode 通过（详见 `results/m1_report.md`）
 - **M1.5 完成**：修复 `MNNQrDetector` tight-crop 丢 quiet-zone 导致的 0% 解码命中，端到端 MNN CPU –21% / MNN Metal –45%；`DetectorRouter` 加自适应 `opencv_fallback`；MNN 路径下跳过 sandbox（详见 `results/quiet_zone_fix_report.md`、`results/adaptive_fallback_report.md`）
-- **M1.75 规划中**：替换 `MNNQrDetector._cpu_decode` 里的 OpenCV WeChatQRCode 整套 pipeline 为轻量 QR 解码器（预期把每帧 ~74 ms 压到 ~12 ms，end-to-end 再提速 2–3×）——详见 Milestone 1.75。这是 **M5 batch pipeline 的前置条件**。
-- 第一条 PoC 主线 `Caffe -> MNN` 已完整验证，后续进入 M1.75（decode 路径替换）→ M2（打包）→ M5（batch）
+- **M1.75b 完成**：`_cpu_decode` 完全切换到 `zxing-cpp` 多路二值化策略（4 次尝试：`LocalAverage` → `GlobalHistogram` → `cv2.adaptiveThreshold` 预处理 → 反色重试），彻底移除 MNN 路径对 `WeChatQRCode` 的依赖。调研数据：zxing-cpp 多路命中率 87.3%（vs WeChatQR 87.5%，差距 0.2% / 9 帧 / 755），avg decode 17 ms（vs WeChatQR 33 ms → **1.9× 加速**），`overhead=1.5` 不受影响。`zxing-cpp` 升级为核心依赖（`pyproject.toml` `dependencies`）。`Containerfile.m175` 全量回归 282 fast + 4 slow 全绿。
+- 第一条 PoC 主线 `Caffe -> MNN` 已完整验证，后续进入 M2（打包）→ M5（batch）
+
+#### 未来改进：C++ Finder Pattern 增强
+
+当前 zxing-cpp 多路策略与 WeChatQR 的 0.2% 识别率差距（9/755 帧）来自微信团队的 C++ 级 Finder Pattern 增强，这些无法通过 Python 预处理层复刻：
+
+1. **连通域辅助检测 (UnicomBlock BFS)**：在二值化图上做 4-邻域 BFS 连通域分析，用面积比（`sqrt(外黑圈/24)` ≈ `sqrt(白圈/16)` ≈ `sqrt(中心点/9)`）验证候选 Finder Pattern，比纯 1D 行扫描对倾斜/遮挡更鲁棒。
+2. **Spill State 容错匹配**：标准 ZXing 严格要求 1:1:3:1:1 比例，微信允许边界溢出（`n:1:3:1:1` / `1:1:3:1:n`），当 Finder Pattern 外黑边与图像边缘合并时仍能检测。
+3. **多偏移交叉验证**：在中心点 ±1/2/3 倍 tolerateModuleSize 处各做一次 vertical + horizontal cross-check（共 7 个候选位置取前 3），提高对畸变 QR 的容忍度。
+4. **K-Means 聚类选组**：候选 Finder Pattern 超过 10 个时，用 `(count, moduleSize)` 特征做 K-Means 分簇后在簇内穷举三元组，配合等腰直角三角形余弦定理验证。
+
+**如果未来需要弥合这 0.2% 差距**，推荐路径：
+- 方案 A：向 zxing-cpp 上游提 PR，把微信的连通域检测移植到 zxing-cpp 的 `FinderPatternFinder`（C++ 层面，社区受益）
+- 方案 B：在 Python 层用 `cv2.connectedComponentsWithStats()` 做二次候选过滤（性能代价 ~2ms/crop，精度收益有限）
+- 方案 C：等 zxing-cpp 自身迭代——其 Finder Pattern 检测逻辑一直在改进中（v3.0 相比 v2.x 已有明显提升）
 
 ### 为什么优先选 MNN
 
@@ -209,7 +223,7 @@ IMG_9425.MOV 端到端（SHA256 匹配源文件）：
 | MNN CPU | 30.05 s | **23.67 s** (–21.2%) |
 | MNN Metal | 48.31 s | **26.34 s** (–45.5%) |
 
-#### Milestone 1.75：替换 `MNNQrDetector._cpu_decode` 的 ZXing 路径（下一步优先级最高）
+#### Milestone 1.75：替换 `MNNQrDetector._cpu_decode` 的 ZXing 路径 ✅ 已完成
 
 ##### 背景 — 为什么 end-to-end 远不如 M0 单帧数字亮眼
 

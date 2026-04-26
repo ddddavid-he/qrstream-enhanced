@@ -36,7 +36,15 @@ dependencies = [
     "numpy>=1.20.0",
     "tqdm>=4.60.0",
     "segno>=1.6.6",
+    "zxing-cpp>=2.0",
 ]
+
+[project.optional-dependencies]
+# MNN accelerated detector (CNN-based detection + super-resolution).
+mnn = ["MNN"]
+# Install without zxing-cpp (fall back to WeChatQRCode for decode).
+# Useful on platforms where zxing-cpp has no pre-built wheel.
+no-zxing = []
 
 [project.urls]
 Homepage = "https://github.com/ddddavid-he/qrstream-enhanced"

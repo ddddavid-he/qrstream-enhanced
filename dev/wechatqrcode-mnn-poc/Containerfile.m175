@@ -1,0 +1,81 @@
+# Milestone 1.75: CPU decoder candidate survey + replacement.
+#
+# Reuses the Milestone 1 base setup (fedora + uv + MNN) and adds:
+#   * probe_cpu_decoders.py — evaluates cv2.QRCodeDetector vs
+#     cv2.wechat_qrcode_WeChatQRCode on MNN-cropped regions
+#   * Optional: zxing-cpp candidate (pip install zxing-cpp)
+#   * Runs the full fast + slow test suite as regression gate
+#
+# Build:
+#   podman build -f dev/wechatqrcode-mnn-poc/Containerfile.m175 \
+#       -t qrstream-mnn-m175 .
+#
+# Run survey + tests:
+#   podman run --rm qrstream-mnn-m175
+#
+# Run survey only:
+#   podman run --rm qrstream-mnn-m175 sh -c \
+#     'uv run python dev/wechatqrcode-mnn-poc/scripts/probe_cpu_decoders.py \
+#        --output dev/wechatqrcode-mnn-poc/results/cpu_decoder_survey.md'
+#
+# Extract results:
+#   podman run --rm -v $(pwd)/dev/wechatqrcode-mnn-poc/results:/out:Z \
+#       qrstream-mnn-m175 sh -c \
+#       'cp dev/wechatqrcode-mnn-poc/results/*.md /out/ 2>/dev/null; \
+#        cp dev/wechatqrcode-mnn-poc/results/*.json /out/ 2>/dev/null'
+#
+# Interactive shell:
+#   podman run --rm -it qrstream-mnn-m175 bash
+
+FROM fedora:latest
+
+RUN dnf install -y --setopt=install_weak_deps=False \
+        python3.13 python3.13-devel python3-pip \
+        gcc gcc-c++ make cmake \
+        mesa-libGL libglvnd-glx glib2 libgomp \
+        libSM libXext libXrender zlib \
+        git \
+    && dnf clean all
+
+WORKDIR /app
+
+ENV UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+
+RUN pip install --no-cache-dir uv
+
+COPY . .
+
+RUN uv sync --dev --python /usr/bin/python3.13 \
+    && uv pip install MNN zxing-cpp
+
+# Verify MNN models are present
+RUN test -f dev/wechatqrcode-mnn-poc/models/mnn/detect.mnn \
+    && test -f dev/wechatqrcode-mnn-poc/models/mnn/sr.mnn \
+    || (echo "ERROR: MNN models missing." >&2 && exit 1)
+
+# Default: run the CPU decoder survey, then the full test suite.
+CMD ["sh", "-c", "\
+    set -e ; \
+    echo '=== MNN import smoke ===' ; \
+    uv run python -c 'import MNN; print(\"MNN version:\", MNN.version())' ; \
+    uv run python -c 'import zxingcpp; print(\"zxing-cpp: imported OK\")' ; \
+    echo '' ; \
+    echo '=== M1.75 CPU Decoder Survey ===' ; \
+    uv run python dev/wechatqrcode-mnn-poc/scripts/probe_cpu_decoders.py \
+        --output dev/wechatqrcode-mnn-poc/results/cpu_decoder_survey.md \
+        --json dev/wechatqrcode-mnn-poc/results/cpu_decoder_survey.json ; \
+    echo '' ; \
+    echo '=== M1.75 cpu_decode contract tests ===' ; \
+    uv run pytest tests/test_cpu_decode_contract.py -v ; \
+    echo '' ; \
+    echo '=== detector integration (fast) ===' ; \
+    uv run pytest tests/test_detector_integration.py tests/test_detector.py -v ; \
+    echo '' ; \
+    echo '=== detector integration (slow — MNN CPU end-to-end) ===' ; \
+    uv run pytest tests/test_detector_integration.py -v -m slow ; \
+    echo '' ; \
+    echo '=== full fast suite (regression gate) ===' ; \
+    uv run pytest tests/ \
+"]
