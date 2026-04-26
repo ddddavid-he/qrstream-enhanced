@@ -1,0 +1,64 @@
+# M3 archive final regression gate.
+#
+# Runs the full fast + slow suite on the feature/wechatqrcode-research branch
+# right before it is renamed to archive/feature-wechatqrcode-research.
+#
+# Build:
+#   podman build -f dev/wechatqrcode-mnn-poc/Containerfile.m3_archive \
+#       -t qrstream-mnn-m3-archive .
+#
+# Run:
+#   podman run --rm qrstream-mnn-m3-archive
+
+FROM fedora:latest
+
+RUN dnf install -y --setopt=install_weak_deps=False \
+        python3.13 python3.13-devel python3-pip \
+        gcc gcc-c++ make cmake \
+        mesa-libGL libglvnd-glx glib2 libgomp \
+        libSM libXext libXrender zlib \
+        git \
+    && dnf clean all
+
+WORKDIR /app
+
+ENV UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+
+RUN pip install --no-cache-dir uv
+
+COPY . .
+
+RUN uv sync --dev --python /usr/bin/python3.13 \
+    && uv pip install MNN zxing-cpp
+
+# Verify MNN models survived the archive process
+RUN test -f src/qrstream/detector/models/detect.mnn \
+    && test -f src/qrstream/detector/models/sr.mnn \
+    || (echo "ERROR: Package-data MNN models missing." >&2 && exit 1)
+
+CMD ["sh", "-c", "\
+    set -e ; \
+    echo '=== Archive gate: import smoke ===' ; \
+    uv run python -c 'import MNN; import zxingcpp; print(\"MNN + zxing-cpp OK\")' ; \
+    echo '' ; \
+    echo '=== Archive gate: new M3 knobs present ===' ; \
+    uv run python -c '\
+from qrstream.cli import build_parser ; \
+ap = build_parser() ; \
+args = ap.parse_args([\"decode\",\"in.mp4\",\"-o\",\"out.bin\",\
+                     \"--mnn\",\"--decode-attempts\",\"1\",\
+                     \"--mnn-confidence-threshold\",\"0.95\"]) ; \
+assert args.decode_attempts == 1 ; \
+assert args.mnn_confidence_threshold == 0.95 ; \
+print(\"CLI knobs OK:\",args.decode_attempts,args.mnn_confidence_threshold)' ; \
+    echo '' ; \
+    echo '=== Archive gate: full fast suite ===' ; \
+    uv run pytest tests/ -q ; \
+    echo '' ; \
+    echo '=== Archive gate: slow suite (MNN CPU end-to-end) ===' ; \
+    uv run pytest tests/ -q -m slow ; \
+    echo '' ; \
+    echo '=== Archive gate: PASSED — ready to rename to archive/ ===' \
+"]
