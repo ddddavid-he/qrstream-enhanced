@@ -60,6 +60,19 @@ def _zxing_cpp_available() -> bool:
 from qrstream.detector.mnn_detector import MNNQrDetector, _HAS_ZXING_CPP
 
 
+def _make_plain(decode_attempts: int = 1) -> MNNQrDetector:
+    """Construct a bare MNNQrDetector for exercising ``_decode_zxing_cpp``.
+
+    ``_decode_zxing_cpp`` only reads ``self._decode_attempts`` off the
+    instance; we skip the MNN model init (``_ensure_init``) because the
+    decode-only tests never run detection.  Uses ``__new__`` + direct
+    attribute assignment to bypass the constructor's path resolution.
+    """
+    inst = MNNQrDetector.__new__(MNNQrDetector)
+    inst._decode_attempts = decode_attempts
+    return inst
+
+
 # ── zxing-cpp multi-binarization tests ───────────────────────────
 
 
@@ -68,29 +81,43 @@ from qrstream.detector.mnn_detector import MNNQrDetector, _HAS_ZXING_CPP
     reason="zxing-cpp not installed",
 )
 class TestDecodeZxingCpp:
-    """The zxing-cpp multi-binarization decoder must handle all inputs."""
+    """The zxing-cpp decoder must handle all inputs.
+
+    Since M3 §3.2 the decoder is an instance method (so ``decode_attempts``
+    can be configured per-detector).  The tests exercise the default
+    single-attempt path unless otherwise specified.
+    """
+
+    def _make_detector(self, decode_attempts=1):
+        return _make_plain(decode_attempts)
 
     def test_decodes_clean_qr_bgr(self):
         img = _make_qr_image("ZXING TEST 456")
-        result = MNNQrDetector._decode_zxing_cpp(img)
+        result = _make_plain(3)._decode_zxing_cpp(img)
         assert result == "ZXING TEST 456"
 
     def test_decodes_grayscale_input(self):
         img = _make_qr_image("ZXING GRAY")
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        result = MNNQrDetector._decode_zxing_cpp(gray)
+        result = _make_plain(3)._decode_zxing_cpp(gray)
         assert result == "ZXING GRAY"
 
     def test_returns_none_on_noise(self):
         noise = np.random.randint(0, 255, (100, 100, 3), dtype=np.uint8)
-        assert MNNQrDetector._decode_zxing_cpp(noise) is None
+        assert _make_plain(3)._decode_zxing_cpp(noise) is None
 
     def test_handles_non_contiguous(self):
         img = _make_qr_image("ZXING CONTIG")
         sliced = img[10:190, 10:190]
         assert not sliced.flags["C_CONTIGUOUS"]
-        result = MNNQrDetector._decode_zxing_cpp(sliced)
+        result = _make_plain(3)._decode_zxing_cpp(sliced)
         assert result is None or isinstance(result, str)
+
+    def test_single_attempt_default_still_decodes_clean_qr(self):
+        """The M3 single-attempt default must decode clean inputs."""
+        img = _make_qr_image("SINGLE ATTEMPT OK")
+        result = _make_plain(1)._decode_zxing_cpp(img)
+        assert result == "SINGLE ATTEMPT OK"
 
 
 # ── _cpu_decode decision tree ────────────────────────────────────
@@ -102,6 +129,9 @@ class TestCpuDecodeDecisionTree:
     def _make_detector(self) -> MNNQrDetector:
         """Create a detector without initialising MNN sessions."""
         det = MNNQrDetector.__new__(MNNQrDetector)
+        # Needed because _cpu_decode / _decode_zxing_cpp read this
+        # off self as of M3 §3.2.
+        det._decode_attempts = 3  # exercise the full chain in tests
         return det
 
     @pytest.mark.skipif(

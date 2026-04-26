@@ -54,6 +54,8 @@ class DetectorRouter(QRDetector):
         use_sr: bool = True,
         opencv_fallback: bool = True,
         *,
+        decode_attempts: int = 1,
+        mnn_confidence_threshold: float = 0.0,
         adaptive_fallback: bool = True,
         adaptive_warmup: int = 64,
         adaptive_window: int = 256,
@@ -61,10 +63,23 @@ class DetectorRouter(QRDetector):
         adaptive_enable_rate: float = 0.05,
         adaptive_probe_interval: int = 64,
     ) -> None:
+        if decode_attempts not in (1, 2, 3):
+            raise ValueError(
+                f"decode_attempts must be 1, 2, or 3, got {decode_attempts!r}"
+            )
+        if not (isinstance(mnn_confidence_threshold, (int, float))
+                and not isinstance(mnn_confidence_threshold, bool)
+                and 0.0 <= float(mnn_confidence_threshold) < 1.0):
+            raise ValueError(
+                f"mnn_confidence_threshold must be a float in [0.0, 1.0), "
+                f"got {mnn_confidence_threshold!r}"
+            )
         self._use_mnn = use_mnn
         self._mnn_model_dir = mnn_model_dir
         self._mnn_backend = mnn_backend
         self._use_sr = use_sr
+        self._decode_attempts = decode_attempts
+        self._mnn_confidence_threshold = float(mnn_confidence_threshold)
         # When True, a no-detect result from MNN triggers an OpenCV
         # re-scan on the same frame.  When False, MNN's verdict is
         # final — this is the low-latency mode for videos where
@@ -285,6 +300,8 @@ class DetectorRouter(QRDetector):
                     model_dir=self._mnn_model_dir,
                     backend=self._mnn_backend,
                     use_sr=self._use_sr,
+                    decode_attempts=self._decode_attempts,
+                    confidence_threshold=self._mnn_confidence_threshold,
                 )
                 if det.is_available():
                     self._mnn_detector = det

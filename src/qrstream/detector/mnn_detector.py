@@ -119,6 +119,14 @@ _SR_MAX_SIZE = 160
 # headroom for bbox jitter.
 _QUIET_ZONE_PAD_RATIO = 0.15
 
+# Minimum min(h, w) for a crop to be worth running the OpenCV
+# adaptive-threshold attempt (M3 §3.2-AB).  Below this size the
+# adaptive block size ``bs = w // 10`` collapses to <9 px and the
+# binarizer loses its locality advantage, so the attempt becomes
+# pure cost for ~zero rescue benefit.  80 px gates out the small
+# crops while keeping the path alive for large-frame survivors.
+_ADAPTIVE_THRESH_MIN_SIZE = 80
+
 # Sentinel used by per-thread lazy-init guards to distinguish
 # "not yet attempted" from "attempted but failed (cached None)".
 _UNINIT = object()
@@ -142,9 +150,67 @@ class MNNQrDetector(QRDetector):
         model_dir: str | Path | None = None,
         backend: MNNBackend | str | None = None,
         use_sr: bool = True,
+        decode_attempts: int = 1,
+        confidence_threshold: float = 0.0,
     ) -> None:
+        """Build the detector.
+
+        Args:
+            model_dir: Override the model search path.  ``None`` triggers
+                the standard resolution order (env var → package data
+                → dev tree).
+            backend: MNN backend selection.  ``None`` auto-selects.
+            use_sr: Apply super-resolution on small crops before decode.
+            confidence_threshold: SSD detector confidence cutoff in
+                ``[0.0, 1.0)``.  bboxes whose detector confidence falls
+                below this value are dropped before any quiet-zone
+                padding / SR / zxing-cpp decode work happens.  ``0.0``
+                (default) keeps every positive detection — i.e. the
+                pre-M3 behaviour.  Higher values trade a small amount
+                of crop-level recall for less wasted decode latency on
+                low-confidence bboxes (which empirically almost never
+                decode).  See ``results/m3_confidence_report.md`` and
+                the ``QRSTREAM_MNN_CONFIDENCE_THRESHOLD`` env var
+                override for A/B testing.
+            decode_attempts: Number of zxing-cpp binarizer strategies to
+                try per crop.  Must be 1, 2, or 3:
+
+                - ``1`` (default): LocalAverage only.  zxing-cpp's
+                  ``try_invert`` / ``try_rotate`` / ``try_downscale``
+                  defaults already cover inversion / rotation / scaling
+                  variants inside this single call.  On real-phone
+                  recordings this delivers -2 to -3.7 pp crop-level hit
+                  loss vs 4-attempt, but **zero unique-block loss**
+                  after LT decoding — see ``results/m3_report.md``.
+
+                - ``2``: add GlobalHistogram fallback.  Recovers ~0.3 pp
+                  of crop-level rate on hard samples; unique-block
+                  recovery unchanged.
+
+                - ``3``: add OpenCV adaptive-threshold fallback on
+                  crops with ``min(h, w) >= 80``.  Matches WeChatQR's
+                  AdaptiveThresholdMean binarizer, adds ~0.1 pp on
+                  very large crops; cost is significant (~12-22 ms
+                  per attempt-3 invocation).
+
+                The ``QRSTREAM_DECODE_MAX_ATTEMPT`` env var overrides
+                this argument when set (for A/B testing).
+        """
+        if decode_attempts not in (1, 2, 3):
+            raise ValueError(
+                f"decode_attempts must be 1, 2, or 3, got {decode_attempts!r}"
+            )
+        if not (isinstance(confidence_threshold, (int, float))
+                and not isinstance(confidence_threshold, bool)
+                and 0.0 <= float(confidence_threshold) < 1.0):
+            raise ValueError(
+                f"confidence_threshold must be a float in [0.0, 1.0), "
+                f"got {confidence_threshold!r}"
+            )
         self._model_dir = Path(model_dir) if model_dir else _resolve_model_dir()
         self._use_sr = use_sr
+        self._decode_attempts = decode_attempts
+        self._confidence_threshold = float(confidence_threshold)
         self._init_lock = threading.Lock()
         self._initialized = False
         self._init_error: str | None = None
@@ -474,6 +540,24 @@ class MNNQrDetector(QRDetector):
 
         output_data = output_data[:expected_len].reshape(num_detections, dim)
 
+        # Resolve effective confidence threshold: env var > instance attr.
+        # Env var is parsed defensively — invalid values fall back to
+        # the instance setting so a typo can't accidentally drop every
+        # detection.
+        import os
+        env_thr_raw = os.environ.get("QRSTREAM_MNN_CONFIDENCE_THRESHOLD", "")
+        if env_thr_raw:
+            try:
+                env_thr = float(env_thr_raw)
+                if 0.0 <= env_thr < 1.0:
+                    conf_threshold = env_thr
+                else:
+                    conf_threshold = self._confidence_threshold
+            except ValueError:
+                conf_threshold = self._confidence_threshold
+        else:
+            conf_threshold = self._confidence_threshold
+
         bboxes = []
         for row in range(num_detections):
             det = output_data[row]
@@ -487,6 +571,15 @@ class MNNQrDetector(QRDetector):
                 x0_n, y0_n, x1_n, y1_n = det[2], det[3], det[4], det[5]
 
             if class_id != 1 or confidence <= 1e-5:
+                continue
+
+            # Apply the M3 confidence floor (default 0.0 = no-op).
+            # Empirically (results/m3_host_confidence.json), bboxes
+            # below ~0.95 confidence essentially never decode on the
+            # MNN+zxing path, so dropping them saves ~3-5% wall clock
+            # at zero unique-block cost.  Default 0.0 preserves the
+            # pre-M3 behaviour for users who haven't opted in.
+            if conf_threshold > 0.0 and confidence < conf_threshold:
                 continue
 
             # Convert normalized coords to original image pixel coords
@@ -571,19 +664,28 @@ class MNNQrDetector(QRDetector):
     def _cpu_decode(self, region: np.ndarray) -> str | None:
         """Decode a QR code from a cropped image region.
 
-        Strategy (M1.75b — WeChatQRCode-free):
-          zxing-cpp with multi-binarization retry (4 attempts):
-            1. LocalAverage binarizer
-            2. GlobalHistogram binarizer
-            3. OpenCV adaptive threshold preprocessing
-            4. Inverted image
+        Strategy (M3 §3.2 — profile-driven single-path default):
+          Default is **1 attempt only**: a single zxing-cpp
+          ``read_barcodes`` call with ``Binarizer.LocalAverage``.
+          zxing-cpp's defaults (``try_invert=True``,
+          ``try_rotate=True``, ``try_downscale=True``) already explore
+          the inverted, rotated, and down-scaled variants of the crop
+          internally, so a single call covers what WeChatQR splits
+          across 4 separate binarizers.
 
-          This replaces the prior zxing→WeChatQR two-tier fallback.
-          Multi-binarization closes the 2.7% gap to within 0.2% of
-          WeChatQR on real phone recordings (87.3% vs 87.5%), and
-          the remaining misses are frames that are unrecoverable by
-          any decoder (confirmed by WeChatQR data — its "extra" hits
-          are <0.3% of crops, well within LT redundancy margin).
+          Users who need the extra coverage (at significant latency
+          cost) can raise ``decode_attempts`` in
+          :class:`MNNQrDetector` / :class:`DetectorRouter` or via the
+          ``--decode-attempts`` CLI flag:
+
+          - ``1`` (default): LocalAverage only
+          - ``2``: add GlobalHistogram fallback
+          - ``3``: add OpenCV adaptive-threshold fallback (crops with
+            ``min(h, w) >= 80``)
+
+          The ``QRSTREAM_DECODE_MAX_ATTEMPT`` env var overrides the
+          instance setting when set to "1", "2", or "3" (for A/B
+          testing and CI).
 
         When zxing-cpp is not installed, returns None for every crop
         (MNN path becomes detect-only; DetectorRouter's opencv_fallback
@@ -596,24 +698,25 @@ class MNNQrDetector(QRDetector):
             return self._decode_zxing_cpp(region)
         return None
 
-    @staticmethod
-    def _decode_zxing_cpp(region: np.ndarray) -> str | None:
-        """Decode using zxing-cpp with multi-binarization retry.
+    def _decode_zxing_cpp(self, region: np.ndarray) -> str | None:
+        """Decode via zxing-cpp with a configurable attempt chain.
 
-        Mirrors WeChatQRCode's core strategy of trying multiple
-        binarization approaches on the same crop.  WeChatQR uses
-        4 C++ binarizers (Hybrid → FastWindow → SimpleAdaptive →
-        AdaptiveThresholdMean) + inversion retry.  We replicate this
-        via zxing-cpp's ``binarizer`` kwarg + OpenCV preprocessing:
+        Number of attempts is driven by ``self._decode_attempts`` (1 by
+        default), overridable via the ``QRSTREAM_DECODE_MAX_ATTEMPT``
+        env var.  See :meth:`_cpu_decode` for strategy rationale and
+        ``results/m3_report.md`` for the measurements that support a
+        single-attempt default.
 
-          1. LocalAverage (zxing-cpp default — similar to HybridBinarizer)
-          2. GlobalHistogram (fast, works for uniform illumination)
-          3. Gaussian adaptive threshold via OpenCV (matches WeChatQR's
-             AdaptiveThresholdMeanBinarizer which calls cv::adaptiveThreshold)
-          4. Inverted image (matches WeChatQR's getInvertedMatrix retry)
+        Empirical data (host macOS M4 Pro, 6 samples, 3 444 crops):
 
-        Each attempt costs ~2–3 ms on a typical crop; in the common
-        case attempt 1 succeeds and the others never run.
+          - **Attempt 1 alone** (current default): 70.9 % crop-level
+            hit rate, **100 % payload SHA256 match** vs the 4-attempt
+            baseline across all 6 samples, **no loss in unique-block
+            recovery**.  Median ``_cpu_decode`` mean = 13 ms/call.
+          - Attempt 2 adds 0.3 pp at ~10 ms extra per miss.
+          - Attempt 3 adds another 0.0–0.3 pp at ~15 ms extra per miss.
+          - Attempt 4 (inverted image) rescues 0 crops — **deleted**:
+            zxing-cpp's ``try_invert=True`` default already covers it.
         """
         try:
             if region.ndim == 3:
@@ -626,11 +729,21 @@ class MNNQrDetector(QRDetector):
             if not gray.flags["C_CONTIGUOUS"]:
                 gray = np.ascontiguousarray(gray)
 
-            # ── Attempt 1: LocalAverage (default) ─────────────────
+            # Resolve the effective attempt budget: env var > instance attr.
+            import os
+            env_override = os.environ.get("QRSTREAM_DECODE_MAX_ATTEMPT", "")
+            if env_override in ("1", "2", "3"):
+                max_attempts = int(env_override)
+            else:
+                max_attempts = getattr(self, "_decode_attempts", 1)
+
+            # ── Attempt 1: LocalAverage (default, with try_invert) ─
             results = _zxingcpp.read_barcodes(gray)
             for r in results:
                 if r.text:
                     return r.text
+            if max_attempts <= 1:
+                return None
 
             # ── Attempt 2: GlobalHistogram ─────────────────────────
             try:
@@ -643,12 +756,15 @@ class MNNQrDetector(QRDetector):
             except (AttributeError, TypeError):
                 # Older zxing-cpp without Binarizer enum — skip
                 pass
+            if max_attempts <= 2:
+                return None
 
-            # ── Attempt 3: OpenCV adaptive threshold preprocessing ─
-            # Replicates WeChatQR's AdaptiveThresholdMeanBinarizer
-            # which calls cv::adaptiveThreshold(ADAPTIVE_THRESH_GAUSSIAN_C).
+            # ── Attempt 3: OpenCV adaptive threshold (conditional) ─
+            # Gate on min(h, w) >= 80 so the adaptive block size has
+            # enough pixels to carry local statistics.  Smaller crops
+            # see essentially zero rescue benefit from this path.
             h, w = gray.shape[:2]
-            if h >= 25 and w >= 25:
+            if min(h, w) >= _ADAPTIVE_THRESH_MIN_SIZE:
                 bs = w // 10
                 bs = bs + (bs % 2) - 1  # must be odd and >= 3
                 if bs >= 3:
@@ -662,13 +778,6 @@ class MNNQrDetector(QRDetector):
                     for r in results:
                         if r.text:
                             return r.text
-
-            # ── Attempt 4: Inverted image ──────────────────────────
-            inverted = cv2.bitwise_not(gray)
-            results = _zxingcpp.read_barcodes(inverted)
-            for r in results:
-                if r.text:
-                    return r.text
 
         except Exception:
             logger.debug("MNNQrDetector._decode_zxing_cpp failed", exc_info=True)

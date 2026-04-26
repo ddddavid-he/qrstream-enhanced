@@ -77,7 +77,9 @@ def _validate_isolation_mode(mode: str) -> None:
 def extract_qr_from_video(video_path: str, sample_rate: int = 0,
                            verbose: bool = False, workers: int | None = None,
                            use_mnn: bool = False,
-                           *, detect_isolation: str = "on"):
+                           *, detect_isolation: str = "on",
+                           decode_attempts: int = 1,
+                           mnn_confidence_threshold: float = 0.0):
     """Extract unique QR code payloads from a video file.
 
     Uses an LT decoder internally for early termination: stops scanning
@@ -98,12 +100,39 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
             of subprocess helpers so a native crash in
             ``cv2.wechat_qrcode_WeChatQRCode`` degrades to a single
             dropped frame. ``'off'`` runs detection in-process.
+        decode_attempts: Number of zxing-cpp binarizer strategies to
+            try per crop on the MNN path (ignored when ``use_mnn=False``).
+            ``1`` (default): fastest, covers ~70% hit rate with zxing's
+            built-in try_invert / try_rotate / try_downscale; validated
+            to produce byte-identical payloads vs the 4-attempt variant
+            on real-phone recordings.  ``2`` / ``3`` trade latency for
+            ~0.3 pp extra crop-level coverage each.  See
+            ``dev/wechatqrcode-mnn-poc/results/m3_report.md``.
+        mnn_confidence_threshold: SSD detector confidence floor in
+            ``[0.0, 1.0)`` for the MNN path (ignored when
+            ``use_mnn=False``).  Default ``0.0`` keeps every positive
+            detection.  Setting ``0.95`` typically saves 3-5 % wall
+            clock on real-phone captures by skipping zxing-cpp work
+            on bboxes that empirically never decode.  See
+            ``results/m3_confidence_report.md`` and the
+            ``QRSTREAM_MNN_CONFIDENCE_THRESHOLD`` env var.
 
     Returns a list of raw block byte strings.
     """
     import qrstream._video_io as _vio
 
     _validate_isolation_mode(detect_isolation)
+    if decode_attempts not in (1, 2, 3):
+        raise ValueError(
+            f"decode_attempts must be 1, 2, or 3, got {decode_attempts!r}"
+        )
+    if not (isinstance(mnn_confidence_threshold, (int, float))
+            and not isinstance(mnn_confidence_threshold, bool)
+            and 0.0 <= float(mnn_confidence_threshold) < 1.0):
+        raise ValueError(
+            f"mnn_confidence_threshold must be a float in [0.0, 1.0), "
+            f"got {mnn_confidence_threshold!r}"
+        )
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -122,9 +151,17 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
     if use_mnn:
         try:
             from .detector import DetectorRouter
-            qr_router = DetectorRouter(use_mnn=True)
+            qr_router = DetectorRouter(
+                use_mnn=True,
+                decode_attempts=decode_attempts,
+                mnn_confidence_threshold=mnn_confidence_threshold,
+            )
             if verbose:
-                print(f"MNN detector enabled: {qr_router.name}")
+                print(
+                    f"MNN detector enabled: {qr_router.name} "
+                    f"(decode_attempts={decode_attempts}, "
+                    f"confidence_threshold={mnn_confidence_threshold})"
+                )
         except Exception as e:
             if verbose:
                 print(f"MNN detector init failed ({e}), using OpenCV fallback")

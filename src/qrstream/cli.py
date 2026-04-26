@@ -98,7 +98,8 @@ def cmd_decode(args):
     blocks = extract_qr_from_video(
         args.video, args.sample_rate, args.verbose, args.workers,
         use_mnn=args.use_mnn,
-        detect_isolation=args.detect_isolation)
+        detect_isolation=args.detect_isolation,
+        decode_attempts=args.decode_attempts)
 
     if not blocks:
         print("No QR codes detected. Check that the video clearly shows QR codes.")
@@ -185,6 +186,28 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                      help='Enable MNN-accelerated QR detection '
                           '(auto-selects Metal on Apple, CPU elsewhere; '
                           'falls back to OpenCV WeChatQRCode on failure)')
+    dec.add_argument(
+        '--decode-attempts', type=int, choices=[1, 2, 3], default=1,
+        help='Number of zxing-cpp binarizer strategies to try per crop '
+             'on the MNN path (ignored without --mnn).  '
+             '1 (default): LocalAverage only — fastest; zxing-cpp already '
+             'applies try_invert / try_rotate / try_downscale internally, '
+             'so this single call covers most cases.  '
+             '2: add GlobalHistogram fallback.  '
+             '3: add OpenCV adaptive-threshold fallback (for crops with '
+             'min(h,w) >= 80 px).  '
+             'See dev/wechatqrcode-mnn-poc/results/m3_report.md for the '
+             'data behind the single-attempt default.')
+    dec.add_argument(
+        '--mnn-confidence-threshold', type=float, default=0.0,
+        metavar='T',
+        help='Drop SSD detections with confidence < T on the MNN path '
+             '(ignored without --mnn).  Range [0.0, 1.0); default 0.0 '
+             'keeps every detection.  Setting 0.95 typically saves '
+             '3-5%% wall clock on real-phone captures by skipping '
+             'zxing-cpp work on bboxes that empirically never decode. '
+             'Override via QRSTREAM_MNN_CONFIDENCE_THRESHOLD env var. '
+             'See dev/wechatqrcode-mnn-poc/results/m3_confidence_report.md.')
     dec.add_argument('-v', '--verbose', action='store_true',
                      help='Print detailed progress')
     dec.add_argument(
