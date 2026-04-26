@@ -51,11 +51,12 @@ def _mnn_available() -> bool:
 
 def _mnn_models_available() -> bool:
     """Return True iff both .mnn model files exist in the repo."""
-    from qrstream.detector.mnn_detector import _DEFAULT_MODEL_DIR
+    from qrstream.detector.mnn_detector import _resolve_model_dir, _DETECT_MODEL_NAME, _SR_MODEL_NAME
 
+    model_dir = _resolve_model_dir()
     return (
-        (_DEFAULT_MODEL_DIR / "detect.mnn").exists()
-        and (_DEFAULT_MODEL_DIR / "sr.mnn").exists()
+        (model_dir / _DETECT_MODEL_NAME).exists()
+        and (model_dir / _SR_MODEL_NAME).exists()
     )
 
 
@@ -583,3 +584,42 @@ class TestExtractWithMnnEnabled:
         assert stats["mnn_attempts"] == len(frames), (
             f"expected {len(frames)} MNN attempts, stats={stats}"
         )
+
+
+# ── detect_batch integration ─────────────────────────────────────
+
+
+class TestDetectBatchIntegration:
+    """``detect_batch`` must behave identically to sequential ``detect``."""
+
+    def test_batch_with_fake_mnn_matches_sequential(self):
+        """Batch call via router with injected fake MNN must match
+        per-frame results (same stats, same verdicts)."""
+        router = DetectorRouter(use_mnn=True, opencv_fallback=False)
+        fake = _FakeDetector(text=None)
+        router._mnn_detector = fake
+        router._mnn_init_attempted = True
+
+        frames = [np.zeros((64, 64, 3), dtype=np.uint8) for _ in range(6)]
+        batch_results = router.detect_batch(frames)
+
+        assert len(batch_results) == 6
+        stats = router.get_stats()
+        assert stats["mnn_attempts"] == 6
+        assert stats["mnn_fallbacks"] == 6
+        # opencv_fallback=False → no OpenCV calls
+        assert stats["opencv_attempts"] == 0
+
+    def test_batch_with_mnn_hit_short_circuits(self):
+        router = DetectorRouter(use_mnn=True, opencv_fallback=True)
+        fake = _FakeDetector(text="test-payload")
+        router._mnn_detector = fake
+        router._mnn_init_attempted = True
+
+        frames = [np.zeros((32, 32, 3), dtype=np.uint8) for _ in range(3)]
+        results = router.detect_batch(frames)
+
+        assert all(r.text == "test-payload" for r in results)
+        stats = router.get_stats()
+        assert stats["mnn_success"] == 3
+        assert stats["opencv_attempts"] == 0

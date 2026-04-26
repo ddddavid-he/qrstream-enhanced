@@ -290,3 +290,73 @@ class TestPadBboxForQuietZone:
         # they stay degenerate and the caller can skip them.
         assert _pad_bbox(50, 50, 50, 60, 100, 100, 0.15) == (50, 50, 50, 60)
         assert _pad_bbox(50, 50, 40, 60, 100, 100, 0.15) == (50, 50, 40, 60)
+
+
+# ── detect_batch (M2 / M5 pre-requisite) ────────────────────────
+
+
+class TestDetectBatch:
+    """``detect_batch`` on the base class, router, and OpenCV detector.
+
+    M2 adds a default ``detect_batch`` implementation to ``QRDetector``
+    that delegates to ``detect()`` sequentially.  These tests lock in
+    the contract: batch results must equal frame-by-frame results.
+    """
+
+    def test_opencv_batch_matches_sequential(self):
+        det = OpenCVWeChatDetector()
+        frames = [np.zeros((80 + i * 10, 100, 3), dtype=np.uint8) for i in range(4)]
+        seq = [det.detect(f) for f in frames]
+        batch = det.detect_batch(frames)
+        assert len(batch) == len(seq)
+        for b, s in zip(batch, seq):
+            assert b.text == s.text
+            assert b.backend == s.backend
+
+    def test_router_batch_matches_sequential(self):
+        router = DetectorRouter(use_mnn=False)
+        frames = [np.zeros((60, 60, 3), dtype=np.uint8) for _ in range(5)]
+        seq = [router.detect(f) for f in frames]
+        batch = router.detect_batch(frames)
+        assert len(batch) == len(seq)
+        for b, s in zip(batch, seq):
+            assert b.text == s.text
+
+    def test_router_batch_stats_consistent(self):
+        """Batch detection must update stats the same as sequential."""
+        router = DetectorRouter(use_mnn=False)
+        frames = [np.zeros((40, 40, 3), dtype=np.uint8) for _ in range(3)]
+        router.detect_batch(frames)
+        stats = router.get_stats()
+        assert stats["opencv_attempts"] == 3
+
+    def test_batch_empty_input(self):
+        det = OpenCVWeChatDetector()
+        assert det.detect_batch([]) == []
+
+    def test_batch_single_frame(self):
+        det = OpenCVWeChatDetector()
+        frame = np.zeros((50, 50, 3), dtype=np.uint8)
+        batch = det.detect_batch([frame])
+        assert len(batch) == 1
+        assert batch[0].text is None
+
+
+# ── Model path resolution (M2 packaging) ────────────────────────
+
+
+class TestModelPathResolution:
+    """Verify model path search order works correctly."""
+
+    def test_resolve_model_dir_returns_path(self):
+        from qrstream.detector.mnn_detector import _resolve_model_dir
+        from pathlib import Path
+        result = _resolve_model_dir()
+        assert isinstance(result, Path)
+
+    def test_explicit_model_dir_overrides_default(self):
+        """MNNQrDetector(model_dir=...) must use the given path."""
+        from qrstream.detector.mnn_detector import MNNQrDetector
+        det = MNNQrDetector(model_dir="/nonexistent/test/path")
+        from pathlib import Path
+        assert det._model_dir == Path("/nonexistent/test/path")

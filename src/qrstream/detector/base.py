@@ -68,6 +68,22 @@ class QRDetector(abc.ABC):
         """
         ...
 
+    def detect_batch(self, frames: list[np.ndarray]) -> list[DetectResult]:
+        """Attempt QR detection on multiple frames.
+
+        Default implementation loops over :meth:`detect` sequentially.
+        Subclasses that support true batch inference (e.g. MNN with
+        ``resizeTensor((N,1,H,W))``) may override this for throughput
+        gains — see Milestone 5 planning in ``README.md``.
+
+        Args:
+            frames: List of BGR uint8 frames, each ``(H, W, 3)``.
+
+        Returns:
+            A list of :class:`DetectResult`, one per input frame.
+        """
+        return [self.detect(f) for f in frames]
+
     @abc.abstractmethod
     def is_available(self) -> bool:
         """Return True if the backend is loaded and ready to run."""

@@ -47,16 +47,45 @@ except ImportError:
     _zxingcpp = None  # type: ignore[assignment]
     _HAS_ZXING_CPP = False
 
-# Default model paths relative to the models directory.
+# Default model paths.
+#
 # These .mnn files are produced by MNNConvert from the original
 # Caffe models — see ``dev/wechatqrcode-mnn-poc/Containerfile.m0``
-# for the conversion recipe.  We look under ``models/mnn/`` by
-# default (matching the M0 container's layout), so developers can
-# drop new converted models in without touching this path.
-_DEFAULT_MODEL_DIR = (
+# for the conversion recipe.
+#
+# Search order for model files:
+#   1. Explicit ``model_dir`` argument to MNNQrDetector
+#   2. ``QRSTREAM_MNN_MODEL_DIR`` environment variable
+#   3. Package data:  ``src/qrstream/detector/models/``
+#      (bundled inside the installed wheel)
+#   4. Development tree: ``dev/wechatqrcode-mnn-poc/models/mnn/``
+#      (for local development before ``pip install``)
+_PACKAGE_MODEL_DIR = Path(__file__).resolve().parent / "models"
+_DEV_MODEL_DIR = (
     Path(__file__).resolve().parent.parent.parent.parent
     / "dev" / "wechatqrcode-mnn-poc" / "models" / "mnn"
 )
+
+
+def _resolve_model_dir() -> Path:
+    """Resolve the model directory using the search order above."""
+    import os
+
+    env_dir = os.environ.get("QRSTREAM_MNN_MODEL_DIR")
+    if env_dir:
+        p = Path(env_dir)
+        if (p / _DETECT_MODEL_NAME).exists():
+            return p
+
+    if (_PACKAGE_MODEL_DIR / _DETECT_MODEL_NAME).exists():
+        return _PACKAGE_MODEL_DIR
+
+    if (_DEV_MODEL_DIR / _DETECT_MODEL_NAME).exists():
+        return _DEV_MODEL_DIR
+
+    # Return the package directory as default even if model is missing;
+    # the caller will get a clear "model not found" error later.
+    return _PACKAGE_MODEL_DIR
 
 _DETECT_MODEL_NAME = "detect.mnn"
 _SR_MODEL_NAME = "sr.mnn"
@@ -114,7 +143,7 @@ class MNNQrDetector(QRDetector):
         backend: MNNBackend | str | None = None,
         use_sr: bool = True,
     ) -> None:
-        self._model_dir = Path(model_dir) if model_dir else _DEFAULT_MODEL_DIR
+        self._model_dir = Path(model_dir) if model_dir else _resolve_model_dir()
         self._use_sr = use_sr
         self._init_lock = threading.Lock()
         self._initialized = False
@@ -252,7 +281,11 @@ class MNNQrDetector(QRDetector):
                 return self._init_error is None
 
             if not is_mnn_available():
-                self._init_error = "MNN not installed"
+                self._init_error = (
+                    "MNN Python bindings not installed. "
+                    "Install with: pip install 'qrstream[mnn]'  "
+                    "(or: pip install MNN)"
+                )
                 logger.warning("MNNQrDetector: %s", self._init_error)
                 self._initialized = True
                 return False
@@ -270,7 +303,15 @@ class MNNQrDetector(QRDetector):
             # Detector model is required
             detect_path = self._model_dir / _DETECT_MODEL_NAME
             if not detect_path.exists():
-                self._init_error = f"Detector model not found: {detect_path}"
+                self._init_error = (
+                    f"Detector model not found: {detect_path}. "
+                    f"Searched: package={_PACKAGE_MODEL_DIR}, "
+                    f"dev={_DEV_MODEL_DIR}. "
+                    f"You can set QRSTREAM_MNN_MODEL_DIR to override. "
+                    f"To convert models, run the M0 container: "
+                    f"podman build -f dev/wechatqrcode-mnn-poc/Containerfile.m0 "
+                    f"-t qrstream-mnn-m0 ."
+                )
                 logger.warning("MNNQrDetector: %s", self._init_error)
                 self._initialized = True
                 return False

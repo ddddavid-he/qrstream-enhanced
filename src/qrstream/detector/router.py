@@ -209,6 +209,16 @@ class DetectorRouter(QRDetector):
                 self._stats["opencv_success"] += 1
         return result
 
+    def detect_batch(self, frames: list[np.ndarray]) -> list[DetectResult]:
+        """Detect QR codes in a batch of frames.
+
+        Routes each frame through :meth:`detect` so all fallback,
+        adaptive, and stats logic is preserved.  True batch inference
+        will be added in Milestone 5 when ``MNNQrDetector`` overrides
+        ``detect_batch`` with a single multi-frame ``runSession`` call.
+        """
+        return [self.detect(f) for f in frames]
+
     # ── Adaptive controller ──────────────────────────────────────
 
     def _record_rescue_observation(self, rescued: bool) -> None:
@@ -283,16 +293,20 @@ class DetectorRouter(QRDetector):
                     )
                 else:
                     self._mnn_init_error = (
-                        "MNN detector not available (models missing or MNN not installed)"
+                        "MNN detector not available (models missing or MNN "
+                        "not installed). Install: pip install 'qrstream[mnn]'"
                     )
                     logger.warning(
-                        "DetectorRouter: %s, using OpenCV fallback",
+                        "DetectorRouter: %s — falling back to OpenCV",
                         self._mnn_init_error,
                     )
             except ImportError as e:
-                self._mnn_init_error = f"MNN import failed: {e}"
+                self._mnn_init_error = (
+                    f"MNN import failed: {e}. "
+                    f"Install: pip install 'qrstream[mnn]'"
+                )
                 logger.warning(
-                    "DetectorRouter: %s, using OpenCV fallback",
+                    "DetectorRouter: %s — falling back to OpenCV",
                     self._mnn_init_error,
                 )
             except Exception as e:
