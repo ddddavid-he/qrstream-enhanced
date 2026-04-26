@@ -1,12 +1,13 @@
 # WeChatQRCode -> MNN PoC
 
-> 🗄️ **ARCHIVED (2026-04-26)** — 本分支已冻结，**不会合入 `dev`**。
+> 🗄️ **已冻结 (2026-04-26)** — 本分支 (`feature/wechatqrcode-research`) 保留在原名下
+> 不再推进，**不会合入 `dev`**。
 >
 > 最终结论：端到端加速 ≈ 1.05×（远低于立项预期的 2–7×），根因见
 > [`results/m3_final_report.md`](results/m3_final_report.md)。`--mnn` 仍保留为 opt-in 开关，
 > 默认路径保持 `OpenCV WeChatQRCode`。
 >
-> **先读 [`results/m3_final_report.md`](results/m3_final_report.md)**（收官总结 + 重启 PoC 的触发条件）。
+> **先读 [`results/m3_final_report.md`](results/m3_final_report.md)**（收官总结 + 解冻触发条件）。
 > 本 README 后续内容保留原始研究/设计记录，供未来重启参考，**不代表当前推荐做法**。
 
 ---

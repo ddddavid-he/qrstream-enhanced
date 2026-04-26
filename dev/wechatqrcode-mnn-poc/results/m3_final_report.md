@@ -1,9 +1,9 @@
 # M3 / 收官报告 — `feature/wechatqrcode-research`
 
-> **状态**: 🗄️ ARCHIVED（分支冻结，不再合入 `dev`）
+> **状态**: 🗄️ 冻结（分支保留在 `feature/wechatqrcode-research`，不再推进，不合入 `dev`）
 > **日期**: 2026-04-26
 > **覆盖里程碑**: M0 → M1 → M1.5 → M1.75 → M2 → M3
-> **最终结论**: 端到端 ≈ 1.05× 加速，不足以取代 OpenCV WeChatQRCode 成为默认检测后端；整条 `feature/wechatqrcode-research` 分支**不合入 dev**，以 archive 形式保留供未来在 CUDA / 批推理可用时回溯。
+> **最终结论**: 端到端 ≈ 1.05× 加速，不足以取代 OpenCV WeChatQRCode 成为默认检测后端；整条 `feature/wechatqrcode-research` 分支**不合入 dev**，保留在原名下供未来在 CUDA / 批推理可用时回溯。
 
 ---
 
@@ -118,14 +118,15 @@ MNN 成功把 `WeChatQRCode` 两个 Caffe CNN 迁移到 MNN runtime、在 Apple 
 
 ---
 
-## 7. 如何从 archive 恢复工作
+## 7. 如何从冻结状态恢复工作
 
-本分支按 `archive/feature-wechatqrcode-research` 重命名冻结（对齐 `BRANCHING.md` §历史分支兼容策略）。恢复步骤：
+本分支**保留在 `feature/wechatqrcode-research` 原名下不再推进**，不重命名到
+`archive/*`。恢复步骤：
 
 ```bash
-git fetch origin archive/feature-wechatqrcode-research
+git fetch origin feature/wechatqrcode-research
 git checkout -b feature/wechatqrcode-research-v2 \
-    archive/feature-wechatqrcode-research
+    origin/feature/wechatqrcode-research
 # 然后 rebase 到最新 dev
 git rebase origin/dev
 ```

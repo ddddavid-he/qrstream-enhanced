@@ -49,9 +49,11 @@ feature/* ──PR──▶ dev ──merge──▶ main ──tag v*──▶ 
   | `dev/performance-enhance` | `archive/dev-performance-enhance` |
   | `dev/threadpool-refactor` | `archive/dev-threadpool-refactor` |
 
-- 2026-04-26 追加归档：`feature/wechatqrcode-research` → `archive/feature-wechatqrcode-research`。
-  该分支是 WeChatQRCode → MNN 的 PoC 研究，端到端加速仅 ~1.05×
-  （远低于立项预期的 2–7×），**不合入 `dev`**，以 archive 形式保留。
+- 2026-04-26 冻结说明：`feature/wechatqrcode-research` 是 WeChatQRCode
+  → MNN 的 PoC 研究，端到端加速仅 ~1.05×（远低于立项预期的 2–7×），
+  **不合入 `dev`**。分支**保留在原 `feature/wechatqrcode-research`
+  名下不再推进**（不重命名到 `archive/*`），以便未来在 CUDA 硬件落地
+  等触发条件满足时直接 `git checkout` 解冻继续工作。
   完整收官报告：`dev/wechatqrcode-mnn-poc/results/m3_final_report.md`。
 
 - 后续新工作分支不再使用 `dev/*` 命名，统一改用 `feature/*` /
