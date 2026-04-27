@@ -56,6 +56,22 @@ def _validate_isolation_mode(mode: str) -> None:
             f"detect_isolation must be 'on' or 'off', got {mode!r}"
         )
 
+
+_DEFAULT_SANDBOX_POOL_CAP = 8
+_DEFAULT_SANDBOX_CRASH_ABORT_THRESHOLD = 3
+
+
+def _default_sandbox_pool_size(workers: int) -> int:
+    """Choose a bounded default helper-pool size for crash isolation."""
+    cpu_count = os.cpu_count() or 1
+    return max(1, min(workers, cpu_count, _DEFAULT_SANDBOX_POOL_CAP))
+
+
+def _default_sandbox_crash_abort_threshold(pool_size: int) -> int:
+    """Scale the crash-burst abort threshold with helper concurrency."""
+    return max(_DEFAULT_SANDBOX_CRASH_ABORT_THRESHOLD, pool_size)
+
+
 # Maximum frames the reader thread may prefetch ahead of the worker pool
 # for the main scan / targeted recovery.  Kept small so we don't balloon
 # memory usage when decode falls behind frame-read (e.g. on files where
@@ -703,9 +719,21 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
     sandbox = None
     original_dispatch = _dispatch_detect
     if detect_isolation == "on":
+        sandbox_pool_size = _default_sandbox_pool_size(workers)
+        crash_abort_threshold = _default_sandbox_crash_abort_threshold(
+            sandbox_pool_size)
         try:
-            sandbox = qr_sandbox.SandboxedDetector(pool_size=3)
+            sandbox = qr_sandbox.SandboxedDetector(
+                pool_size=sandbox_pool_size,
+                crash_abort_threshold=crash_abort_threshold,
+            )
             _dispatch_detect = sandbox.detect
+            if verbose:
+                print(
+                    "Using sandboxed detector: "
+                    f"helpers={sandbox_pool_size}, "
+                    f"crash_abort_threshold={crash_abort_threshold}"
+                )
         except Exception as exc:
             print(
                 f"[sandbox] failed to initialise ({exc}); "

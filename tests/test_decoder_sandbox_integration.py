@@ -101,6 +101,67 @@ def test_extract_rejects_invalid_isolation_mode(tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    ("workers", "expected_pool_size", "expected_abort_threshold"),
+    [
+        (1, 1, 3),
+        (2, 2, 3),
+        (16, 8, 8),
+    ],
+)
+def test_extract_scales_default_sandbox_pool_and_abort_threshold(
+    monkeypatch, tmp_path, workers,
+    expected_pool_size, expected_abort_threshold,
+):
+    observed = {}
+
+    class _FakeVideoCapture:
+        def isOpened(self):
+            return True
+
+        def get(self, prop):
+            if prop == _decoder_mod.cv2.CAP_PROP_FPS:
+                return 30.0
+            if prop == _decoder_mod.cv2.CAP_PROP_FRAME_COUNT:
+                return 0
+            return 0
+
+        def release(self):
+            return None
+
+    class _CaptureSandbox:
+        def __init__(self, *args, **kwargs):
+            observed.update(kwargs)
+            self.crash_count = 0
+
+        def detect(self, *_args, **_kwargs):
+            return None
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        _decoder_mod.cv2, "VideoCapture", lambda *_a, **_kw: _FakeVideoCapture()
+    )
+    monkeypatch.setattr(
+        _decoder_mod, "_probe_sample_rate",
+        lambda *_a, **_kw: (1, [], 0, 0, 0.0, 1.0),
+    )
+    monkeypatch.setattr(_decoder_mod, "_read_frames", lambda *_a, **_kw: iter(()))
+    monkeypatch.setattr(
+        _decoder_mod.qr_sandbox, "SandboxedDetector", _CaptureSandbox
+    )
+
+    blocks = extract_qr_from_video(
+        str(tmp_path / "fake.mp4"), sample_rate=0, verbose=False,
+        workers=workers, detect_isolation='on',
+    )
+
+    assert blocks == []
+    assert observed["pool_size"] == expected_pool_size
+    assert observed["crash_abort_threshold"] == expected_abort_threshold
+
+
 @pytest.mark.slow
 def test_extract_falls_back_when_sandbox_init_fails(monkeypatch):
     if not FIXTURE.exists():
