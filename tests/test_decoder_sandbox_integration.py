@@ -102,15 +102,17 @@ def test_extract_rejects_invalid_isolation_mode(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("workers", "expected_pool_size", "expected_abort_threshold"),
+    ("workers", "cpu_count", "expected_pool_size",
+     "expected_abort_threshold"),
     [
-        (1, 1, 3),
-        (2, 2, 3),
-        (16, 8, 8),
+        (1, 16, 1, 3),
+        (2, 16, 2, 3),
+        (16, 16, 8, 8),
+        (16, 4, 4, 4),
     ],
 )
 def test_extract_scales_default_sandbox_pool_and_abort_threshold(
-    monkeypatch, tmp_path, workers,
+    monkeypatch, tmp_path, workers, cpu_count,
     expected_pool_size, expected_abort_threshold,
 ):
     observed = {}
@@ -140,6 +142,7 @@ def test_extract_scales_default_sandbox_pool_and_abort_threshold(
         def close(self):
             return None
 
+    monkeypatch.setattr(_decoder_mod.os, "cpu_count", lambda: cpu_count)
     monkeypatch.setattr(
         _decoder_mod.cv2, "VideoCapture", lambda *_a, **_kw: _FakeVideoCapture()
     )
