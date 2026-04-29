@@ -10,9 +10,10 @@ import os
 import struct
 import zlib
 import base64
+from collections import namedtuple
 from math import ceil, log
 from queue import Queue
-from threading import Thread
+from threading import Event, Thread
 from concurrent.futures import (
     Executor,
     ThreadPoolExecutor,
@@ -21,38 +22,44 @@ from concurrent.futures import (
     wait as _futures_wait,
 )
 
-
 import cv2
 import numpy as np
 from tqdm import tqdm
 
 from .lt_codec import PRNG, BlockGraph, DEFAULT_C, DEFAULT_DELTA
 from .protocol import unpack
-from .qr_utils import try_decode_qr, try_decode_qr_with_bbox, DETECTOR_CAN_CRASH
+from .qr_utils import try_decode_qr, try_decode_qr_with_bbox
 from . import qr_sandbox
 from . import protocol as _protocol_mod
 
 
-# Pre-sorted (version, capacity) tables for ``_infer_qr_modules``.
-# We materialise them once at import time so the per-frame inference
-# path is a tight scan over a 40-entry list rather than a dict probe
-# inside a Python loop.  We pin EC=M (level 1) to match the qrstream
-# encoder default.
-_QR_CAP_BYTE_M: list[tuple[int, int]] = sorted(
-    (
-        (version, _protocol_mod._QR_CAPACITY[(version, 1)])
-        for version in range(1, 41)
-    ),
-    key=lambda x: x[0],
-)
-_QR_CAP_ALPHA_M: list[tuple[int, int]] = sorted(
-    (
-        (version, _protocol_mod._QR_CAPACITY_ALPHANUMERIC[(version, 1)])
-        for version in range(1, 41)
-    ),
-    key=lambda x: x[0],
-)
+# Capacity tables for ``_infer_qr_modules``, keyed by version,
+# materialised at import time.  EC=M (level 1) matches the qrstream
+# encoder default.  range(1, 41) is already ascending, so no sort.
+_QR_CAP_BYTE_M: list[tuple[int, int]] = [
+    (v, _protocol_mod._QR_CAPACITY[(v, 1)]) for v in range(1, 41)
+]
+_QR_CAP_ALPHA_M: list[tuple[int, int]] = [
+    (v, _protocol_mod._QR_CAPACITY_ALPHANUMERIC[(v, 1)]) for v in range(1, 41)
+]
 
+
+# ── Probe observation record ──────────────────────────────────────
+# Named tuple for the 10-field result from ``_worker_probe_detect``,
+# replacing positional indexing with readable field names throughout
+# the probe and adaptive-downscale pipeline.
+ProbeObservation = namedtuple("ProbeObservation", [
+    "frame_idx",
+    "block_bytes",
+    "seed",
+    "text_len",
+    "is_alpha",
+    "bbox_side",
+    "frame_h",
+    "frame_w",
+    "bbox_cx",
+    "bbox_cy",
+])
 
 _PROGRESS_BAR_THRESHOLD = 512
 
@@ -93,8 +100,26 @@ def _validate_isolation_mode(mode: str) -> None:
         )
 
 
+# ── Sandbox defaults ──────────────────────────────────────────────
 _DEFAULT_SANDBOX_POOL_CAP = 8
 _DEFAULT_SANDBOX_CRASH_ABORT_THRESHOLD = 3
+
+# ── Reader / progress constants ──────────────────────────────────
+# Maximum frames the reader thread may prefetch ahead of the worker
+# pool.  Kept small to avoid memory bloat when detection is idle.
+_READER_QUEUE_CAPACITY = 64
+
+# ── Probe window parameters ──────────────────────────────────────
+# Size of each contiguous probe window (frames).
+_PROBE_WINDOW_SIZE = 120
+# Gap between probe window centres as a fraction of the timeline.
+_PROBE_GAP_RATIO = 0.15
+# Per-seed detection probability target for sample_rate computation.
+_TARGET_DETECT_PROB = 0.95
+
+# ── CLAHE preprocessing ─────────────────────────────────────────
+_CLAHE_CLIP_LIMIT = 2.0
+_CLAHE_TILE_GRID_SIZE = (8, 8)
 
 
 def _default_sandbox_pool_size(workers: int) -> int:
@@ -106,13 +131,6 @@ def _default_sandbox_pool_size(workers: int) -> int:
 def _default_sandbox_crash_abort_threshold(pool_size: int) -> int:
     """Scale the crash-burst abort threshold with helper concurrency."""
     return max(_DEFAULT_SANDBOX_CRASH_ABORT_THRESHOLD, pool_size)
-
-
-# Maximum frames the reader thread may prefetch ahead of the worker pool
-# for the main scan / targeted recovery.  Kept small so we don't balloon
-# memory usage when decode falls behind frame-read (e.g. on files where
-# no QR codes are detectable and the pool is idle anyway).
-_READER_QUEUE_CAPACITY = 64
 
 
 class LTDecoder:
@@ -445,6 +463,21 @@ def _crop_frame(
     return frame[y0:y1, x0:x1]
 
 
+def _prepare_frame(
+    frame: np.ndarray,
+    crop_box: tuple[int, int, int, int] | None,
+    max_dim: int,
+) -> np.ndarray:
+    """Crop, downscale, and copy a frame for thread-safe detection.
+
+    Applies the full ``crop → downscale → contiguous copy`` pipeline
+    used by :func:`_read_frames` and :func:`_read_frame_ranges`.
+    """
+    frame = _crop_frame(frame, crop_box)
+    frame = _downscale_frame(frame, max_dim=max_dim)
+    return np.ascontiguousarray(frame).copy()
+
+
 def _derive_crop_box(
     probe_raw: list[tuple],
     frame_h: int,
@@ -460,20 +493,17 @@ def _derive_crop_box(
     - the QR centre varies too much (IQR > ``_CROP_STABILITY_THRESHOLD``
       × frame dimension in either axis).
 
-    ``probe_raw`` entries are 10-tuples from ``_worker_probe_detect``:
-    ``(frame_idx, block_bytes, seed, text_len, is_alpha,
-    bbox_side, fh, fw, bbox_cx, bbox_cy)``.
+    ``probe_raw`` entries are :class:`ProbeObservation` namedtuples from
+    ``_worker_probe_detect``.
     """
     cxs: list[float] = []
     cys: list[float] = []
     sides: list[float] = []
 
     for entry in probe_raw:
-        if len(entry) < 10:
-            continue
-        bbox_side = entry[5]
-        bbox_cx = entry[8]
-        bbox_cy = entry[9]
+        bbox_side = entry.bbox_side
+        bbox_cx = entry.bbox_cx
+        bbox_cy = entry.bbox_cy
         if bbox_side <= 0.0 or bbox_cx <= 0.0 or bbox_cy <= 0.0:
             continue
         cxs.append(bbox_cx)
@@ -691,8 +721,6 @@ def _multi_res_sweep(
             work_items.append((frame_idx, scaled, cand_ppm))
 
     # Dispatch all detections through the sandbox-safe hook.
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
     samples: list[tuple[float, bool]] = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_to_ppm = {}
@@ -727,39 +755,18 @@ def _worker_detect_qr(frame_data):
     per-thread ``WeChatQRCode`` detector is cached in
     :mod:`qrstream.qr_utils`' ``threading.local()``.
     """
-    from .protocol import base45_decode, cobs_decode
-
     frame_idx, frame = frame_data
     if frame is None:
         return (frame_idx, None, None)
 
     qr_data = _dispatch_detect(frame_idx, frame)
-
     if qr_data is None:
         return (frame_idx, None, None)
 
-    # Try decoding the QR payload via multiple strategies.  The flag
-    # bit 0x02 in the packed header tells us whether the payload is
-    # high-density encoded; however we don't have the header yet here
-    # (it lives inside the payload), so we try all strategies in
-    # order.  Strategies are cheap: each failed attempt is a single
-    # ASCII lookup + a constant-time rejection.
-    #   1) base45  (current default for high-density mode)
-    #   2) base64  (standard mode)
-    #   3) COBS/latin-1  (legacy pre-0.6 high-density mode)
-    for decode_fn in (
-        lambda d: _try_base45(d, base45_decode),
-        _try_base64,
-        lambda d: _try_cobs(d, cobs_decode),
-    ):
-        candidate = decode_fn(qr_data)
-        if candidate is None:
-            continue
-        try:
-            header, _ = unpack(candidate)
-            return (frame_idx, candidate, header.seed)
-        except (ValueError, struct.error):
-            continue
+    result = _try_decode_qr_payload(qr_data)
+    if result is not None:
+        block_bytes, seed, _ = result
+        return (frame_idx, block_bytes, seed)
 
     return (frame_idx, None, None)
 
@@ -789,7 +796,10 @@ def _worker_detect_qr_clahe(frame_data):
     try:
         ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
         y = ycrcb[:, :, 0]
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        clahe = cv2.createCLAHE(
+            clipLimit=_CLAHE_CLIP_LIMIT,
+            tileGridSize=_CLAHE_TILE_GRID_SIZE,
+        )
         ycrcb[:, :, 0] = clahe.apply(y)
         boosted = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
     except cv2.error:
@@ -802,21 +812,10 @@ def _worker_detect_qr_clahe(frame_data):
     if qr_data is None:
         return (frame_idx, None, None)
 
-    # Mirror the multi-strategy decode used by ``_worker_detect_qr``.
-    from .protocol import base45_decode, cobs_decode
-    for decode_fn in (
-        lambda d: _try_base45(d, base45_decode),
-        _try_base64,
-        lambda d: _try_cobs(d, cobs_decode),
-    ):
-        candidate = decode_fn(qr_data)
-        if candidate is None:
-            continue
-        try:
-            header, _ = unpack(candidate)
-            return (frame_idx, candidate, header.seed)
-        except (ValueError, struct.error):
-            continue
+    result = _try_decode_qr_payload(qr_data)
+    if result is not None:
+        block_bytes, seed, _ = result
+        return (frame_idx, block_bytes, seed)
 
     return (frame_idx, None, None)
 
@@ -824,28 +823,29 @@ def _worker_detect_qr_clahe(frame_data):
 def _worker_probe_detect(frame_data):
     """Probe-phase worker: detect QR + return bbox + decoded mode tag.
 
-    Returns ``(frame_idx, block_bytes, seed, qr_text_len,
-    is_alphanumeric, bbox_side_px, frame_h, frame_w,
-    bbox_cx, bbox_cy)``.
+    Returns a :class:`ProbeObservation` namedtuple with fields:
+    ``frame_idx, block_bytes, seed, text_len, is_alpha,
+    bbox_side, frame_h, frame_w, bbox_cx, bbox_cy``.
 
-    The trailing six fields feed :func:`_compute_adaptive_max_dim`
-    (module density) and :func:`_derive_crop_box` (centre stability).
+    The trailing fields feed :func:`_compute_adaptive_max_dim`
+    (module density), :func:`_derive_crop_box` (centre stability),
+    and :func:`_multi_res_sweep` (PPM threshold learning).
 
     Detection runs through the ``_dispatch_detect_with_bbox`` hook so
     crash isolation (``qr_sandbox.SandboxedDetector.detect_with_bbox``)
     applies to probe frames too.
     """
-    from .protocol import base45_decode, cobs_decode
-
     frame_idx, frame = frame_data
     if frame is None:
-        return (frame_idx, None, None, 0, False, 0.0, 0, 0, 0.0, 0.0)
+        return ProbeObservation(frame_idx, None, None, 0, False,
+                                0.0, 0, 0, 0.0, 0.0)
 
     h, w = frame.shape[:2]
 
     detected = _dispatch_detect_with_bbox(frame_idx, frame)
     if detected is None:
-        return (frame_idx, None, None, 0, False, 0.0, h, w, 0.0, 0.0)
+        return ProbeObservation(frame_idx, None, None, 0, False,
+                                0.0, h, w, 0.0, 0.0)
     qr_text, bbox = detected
 
     bbox_side = _bbox_side_pixels(bbox)
@@ -858,31 +858,49 @@ def _worker_probe_detect(frame_data):
     else:
         bbox_cx, bbox_cy = 0.0, 0.0
 
-    # Try the same decode strategies as the main worker so the probe
-    # both feeds the LT decoder *and* tags the encoding mode (which
-    # we need to look up the QR version → modules_per_side).
+    result = _try_decode_qr_payload(qr_text)
+    if result is not None:
+        block_bytes, seed, is_alpha = result
+        return ProbeObservation(frame_idx, block_bytes, seed,
+                                text_len, is_alpha, bbox_side, h, w,
+                                bbox_cx, bbox_cy)
+
+    # Detected but undecodable — still surface the bbox so we can
+    # estimate density even when the payload doesn't validate.
+    return ProbeObservation(frame_idx, None, None, text_len, True,
+                            bbox_side, h, w, bbox_cx, bbox_cy)
+
+
+def _try_decode_qr_payload(
+    qr_data: str,
+) -> tuple[bytes, int, bool] | None:
+    """Try all QR-payload decode strategies and return the first success.
+
+    Strategies (tried in order):
+      1) base45 (current default for high-density / alphanumeric mode)
+      2) base64 (standard byte mode)
+      3) COBS/latin-1 (legacy pre-0.6 high-density mode)
+
+    Returns ``(block_bytes, seed, is_alphanumeric)`` on success, or
+    ``None`` when no strategy produces a valid protocol block.
+    """
+    from .protocol import base45_decode, cobs_decode
+
     strategies = (
-        ("alpha", lambda d: _try_base45(d, base45_decode)),
-        ("byte",  _try_base64),
-        ("byte",  lambda d: _try_cobs(d, cobs_decode)),
+        (True,  lambda d: _try_base45(d, base45_decode)),
+        (False, _try_base64),
+        (False, lambda d: _try_cobs(d, cobs_decode)),
     )
-    for mode_tag, decode_fn in strategies:
-        candidate = decode_fn(qr_text)
+    for is_alpha, decode_fn in strategies:
+        candidate = decode_fn(qr_data)
         if candidate is None:
             continue
         try:
             header, _ = unpack(candidate)
+            return (candidate, header.seed, is_alpha)
         except (ValueError, struct.error):
             continue
-        is_alpha = (mode_tag == "alpha")
-        return (frame_idx, candidate, header.seed,
-                text_len, is_alpha, bbox_side, h, w,
-                bbox_cx, bbox_cy)
-
-    # Detected but undecodable — still surface the bbox so we can
-    # estimate density even when the payload doesn't validate.
-    return (frame_idx, None, None, text_len, True, bbox_side, h, w,
-            bbox_cx, bbox_cy)
+    return None
 
 
 def _try_base45(qr_data: str, base45_decode_fn) -> bytes | None:
@@ -943,9 +961,7 @@ def _read_frames(video_path, sample_rate, total_frames, start_frame=0,
         if not ret:
             break
         if (frame_idx - start_frame) % sample_rate == 0:
-            frame = _crop_frame(frame, crop_box)
-            frame = _downscale_frame(frame, max_dim=max_detect_dim)
-            frame = np.ascontiguousarray(frame).copy()
+            frame = _prepare_frame(frame, crop_box, max_detect_dim)
             yield (frame_idx, frame)
         frame_idx += 1
     cap.release()
@@ -970,9 +986,7 @@ def _read_frame_ranges(video_path, frame_ranges,
             ret, frame = cap.read()
             if not ret:
                 break
-            frame = _crop_frame(frame, crop_box)
-            frame = _downscale_frame(frame, max_dim=max_detect_dim)
-            frame = np.ascontiguousarray(frame).copy()
+            frame = _prepare_frame(frame, crop_box, max_detect_dim)
             yield (fidx, frame)
     cap.release()
 
@@ -1016,13 +1030,12 @@ def _compute_auto_sample_rate(detect_rate: float, avg_repeat: float,
     given ``detect_rate`` exceeds ``K_estimate × 1.5`` (the minimum
     for reliable LT convergence).
     """
-    TARGET_DETECT_PROB = 0.95
     p = detect_rate
 
     if p >= 0.99:
         rate = max(1, int(avg_repeat / 1.5))
     elif p > 0.01:
-        min_chances = log(1 - TARGET_DETECT_PROB) / log(1 - p)
+        min_chances = log(1 - _TARGET_DETECT_PROB) / log(1 - p)
         rate = max(1, int(avg_repeat / min_chances))
     else:
         rate = 1
@@ -1099,27 +1112,28 @@ def _probe_sample_rate(video_path: str, workers: int,
     the optimal sample_rate so that each QR code has enough detection
     chances to be reliably recovered.
 
-    Also derives a per-video adaptive downscale cap by inspecting the
-    QR's pixel size on the *original* probe frames (read at
-    ``_PROBE_MAX_DETECT_DIM``), so the main scan never throws away
-    QR-module pixels on high-resolution / high-version QR captures.
+    Also derives:
+    - A per-video adaptive downscale cap via multi-resolution PPM
+      learning (replaces the legacy fixed constant).
+    - A crop ROI from probe bbox centre stability.
 
     Returns:
         (sample_rate, probe_results, probe_count, leading_frames_probed,
-         detect_rate, avg_repeat, adaptive_max_dim)
+         detect_rate, avg_repeat, adaptive_max_dim, crop_box)
 
         ``adaptive_max_dim`` is ``None`` when the probe gathered no
         usable bbox observations; callers should fall back to
         ``_MAX_DETECT_DIM`` in that case.
+        ``crop_box`` is ``None`` when the QR centre is unstable or
+        insufficient data is available.
     """
-    PROBE_WINDOW_SIZE = 120
-    PROBE_GAP_RATIO = 0.15
-
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
 
-    probe_ranges = _build_probe_ranges(total_frames, PROBE_WINDOW_SIZE, PROBE_GAP_RATIO)
+    probe_ranges = _build_probe_ranges(
+        total_frames, _PROBE_WINDOW_SIZE, _PROBE_GAP_RATIO,
+    )
     # Read probe frames at the source resolution (clamped to
     # _PROBE_MAX_DETECT_DIM, which is generous enough for 8K input
     # but stops us from feeding *truly* outsized arrays through the
@@ -1156,11 +1170,13 @@ def _probe_sample_rate(video_path: str, workers: int,
     pbar.close()
 
     # Sort by frame index
-    probe_raw.sort(key=lambda x: x[0])
+    probe_raw.sort(key=lambda x: x.frame_idx)
 
     # Strip the bbox / mode metadata before downstream code (which
     # expects the historical (frame_idx, block_bytes, seed) tuple).
-    probe_results = [(t[0], t[1], t[2]) for t in probe_raw]
+    probe_results = [
+        (t.frame_idx, t.block_bytes, t.seed) for t in probe_raw
+    ]
 
     # ── Learn per-video ppm threshold via multi-resolution sweep ──
     # Extract video-level constants from probe observations.
@@ -1195,8 +1211,8 @@ def _probe_sample_rate(video_path: str, workers: int,
     # observation with valid fh/fw).
     probe_fh, probe_fw = 0, 0
     for entry in probe_raw:
-        if len(entry) >= 8 and entry[6] > 0 and entry[7] > 0:
-            probe_fh, probe_fw = entry[6], entry[7]
+        if entry.frame_h > 0 and entry.frame_w > 0:
+            probe_fh, probe_fw = entry.frame_h, entry.frame_w
             break
     crop_box = _derive_crop_box(probe_raw, probe_fh, probe_fw)
     if verbose:
@@ -1272,15 +1288,15 @@ def _extract_probe_video_constants(
     """
     obs: list[tuple[int, float, int]] = []
     for entry in probe_raw:
-        if len(entry) < 8:
+        if entry.bbox_side <= 0.0 or entry.text_len <= 0:
             continue
-        _, _, _, text_len, is_alpha, bbox_side, fh, fw = entry[:8]
-        if bbox_side <= 0.0 or text_len <= 0 or fh <= 0 or fw <= 0:
+        if entry.frame_h <= 0 or entry.frame_w <= 0:
             continue
-        modules = _infer_qr_modules(text_len, is_alpha)
+        modules = _infer_qr_modules(entry.text_len, entry.is_alpha)
         if modules is None:
             continue
-        obs.append((max(fh, fw), bbox_side, modules))
+        obs.append((max(entry.frame_h, entry.frame_w),
+                    entry.bbox_side, modules))
 
     if not obs:
         return None
@@ -1303,10 +1319,8 @@ def _adaptive_max_dim_from_probe(
 ) -> int | None:
     """Aggregate probe-worker observations into a single max-detect-dim.
 
-    ``probe_raw`` items are
-    ``(frame_idx, block_bytes, seed, qr_text_len, is_alphanumeric,
-    bbox_side_px, frame_h, frame_w)`` tuples emitted by
-    :func:`_worker_probe_detect`.
+    ``probe_raw`` items are :class:`ProbeObservation` namedtuples emitted
+    by :func:`_worker_probe_detect`.
 
     When ``learned_ppm`` is provided (from :func:`_learn_ppm_threshold`),
     it replaces the static fallback constant to set the target module
@@ -1323,21 +1337,21 @@ def _adaptive_max_dim_from_probe(
 
     suggestions: list[int] = []
     for entry in probe_raw:
-        if len(entry) < 8:
+        if entry.bbox_side <= 0.0 or entry.text_len <= 0:
             continue
-        _, _, _, text_len, is_alpha, bbox_side, fh, fw = entry[:8]
-        if bbox_side <= 0.0 or text_len <= 0 or fh <= 0 or fw <= 0:
+        if entry.frame_h <= 0 or entry.frame_w <= 0:
             continue
-        modules = _infer_qr_modules(text_len, is_alpha)
+        modules = _infer_qr_modules(entry.text_len, entry.is_alpha)
         if modules is None:
             continue
         synth_bbox = np.array(
-            [[0.0, 0.0], [bbox_side, 0.0],
-             [bbox_side, bbox_side], [0.0, bbox_side]],
+            [[0.0, 0.0], [entry.bbox_side, 0.0],
+             [entry.bbox_side, entry.bbox_side], [0.0, entry.bbox_side]],
             dtype=np.float32,
         )
         target = _compute_adaptive_max_dim(
-            fh, fw, synth_bbox, modules, target_ppm=target_ppm,
+            entry.frame_h, entry.frame_w, synth_bbox, modules,
+            target_ppm=target_ppm,
         )
         if target is not None:
             suggestions.append(target)
@@ -1756,8 +1770,6 @@ def _prefetch_iter(source_iter, capacity: int = _READER_QUEUE_CAPACITY):
     exits on the next queue put, so it does not keep reading the
     entire video file for nothing.
     """
-    from threading import Event
-
     _SENTINEL = object()
     q: Queue = Queue(maxsize=capacity)
     stop_event = Event()
@@ -1890,15 +1902,18 @@ def _decode_into_decoder(blocks, verbose=False) -> LTDecoder | None:
                     unit="blk", dynamic_ncols=True,
                     mininterval=0.1)
 
+    def _update_pbar():
+        if pbar is not None:
+            pbar.update(1)
+            if decoder.initialized:
+                pbar.set_postfix_str(
+                    f"got={decoder.num_recovered}/{decoder.K}")
+
     try:
         for i, block_bytes in enumerate(blocks):
             try:
                 done, compressed = decoder.decode_bytes(block_bytes)
-                if pbar is not None:
-                    pbar.update(1)
-                    if decoder.initialized:
-                        pbar.set_postfix_str(
-                            f"got={decoder.num_recovered}/{decoder.K}")
+                _update_pbar()
                 if done:
                     if verbose:
                         print(f"  Decoded after {i + 1}/{len(blocks)} blocks "
@@ -1906,19 +1921,11 @@ def _decode_into_decoder(blocks, verbose=False) -> LTDecoder | None:
                               f"compressed={compressed}, v={decoder.protocol_version})")
                     return decoder
             except ValueError as e:
-                if pbar is not None:
-                    pbar.update(1)
-                    if decoder.initialized:
-                        pbar.set_postfix_str(
-                            f"got={decoder.num_recovered}/{decoder.K}")
+                _update_pbar()
                 if verbose:
                     print(f"  Block {i} error, skipping: {e}")
             except Exception as e:
-                if pbar is not None:
-                    pbar.update(1)
-                    if decoder.initialized:
-                        pbar.set_postfix_str(
-                            f"got={decoder.num_recovered}/{decoder.K}")
+                _update_pbar()
                 if verbose:
                     print(f"  Block {i} error: {e}")
     finally:
