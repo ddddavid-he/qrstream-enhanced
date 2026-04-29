@@ -376,6 +376,10 @@ _PPM_SWEEP_FRACTIONS = (1.0, 0.7, 0.5, 0.35)
 # to keep the cost manageable (~60 frames out of 360).
 _PPM_SWEEP_SUBSAMPLE = 6
 
+# Recovery escalation: L2 boosts the main-scan max_dim by this factor.
+# L3 always uses full source resolution (src_max).
+_RECOVERY_ESCALATION_BOOST = 1.5
+
 
 def _downscale_frame(
     frame: np.ndarray, max_dim: int = _MAX_DETECT_DIM
@@ -1217,6 +1221,9 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
 
     src_fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    src_max = max(src_w, src_h)
     duration = total_frames / src_fps if src_fps > 0 else 0
     cap.release()
 
@@ -1374,7 +1381,8 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
                 video_path, total_frames, src_fps, workers,
                 seen_seeds, unique_blocks, decoded_count, no_detect_count,
                 lt_decoder, avg_repeat, verbose, seed_frame_map,
-                max_detect_dim=active_max_dim)
+                max_detect_dim=active_max_dim,
+                src_max=src_max)
 
         return unique_blocks
     finally:
@@ -1424,9 +1432,21 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
                        seen_seeds, unique_blocks, decoded_count,
                        no_detect_count, lt_decoder, avg_repeat, verbose,
                        seed_frame_map: dict[int, int] | None = None,
-                       max_detect_dim: int = _MAX_DETECT_DIM):
-    """Targeted recovery: read only the video segments where missing seeds
-    are expected to appear, scanning every frame in those segments.
+                       max_detect_dim: int = _MAX_DETECT_DIM,
+                       src_max: int | None = None):
+    """Multi-level recovery: escalate resolution on missing-seed frames.
+
+    Runs up to three recovery levels with increasing ``max_detect_dim``
+    to rescue frames the main scan missed due to insufficient ppm or
+    contrast:
+
+    - **L1** (same resolution + CLAHE): rescues contrast-bound frames.
+    - **L2** (1.5× resolution): moderate ppm boost for near-miss frames.
+    - **L3** (full source resolution): maximum ppm, last resort.
+
+    Each level scans only the video segments where missing seeds are
+    expected.  If the LT decoder converges after any level, remaining
+    levels are skipped.
 
     Uses observed (seed, frame_idx) mapping from probe and main scan to
     build a linear model for estimating missing seed positions. Falls back
@@ -1435,24 +1455,21 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
     if seed_frame_map is None:
         seed_frame_map = {}
 
-    # Figure out total encoded block count from the max seed we've seen
     if not seen_seeds:
         return unique_blocks, decoded_count, no_detect_count
 
     max_seed = max(seen_seeds)
-    # frames_per_qr = how many video frames each QR code is shown
     frames_per_qr = max(1, avg_repeat)
 
-    # Identify missing seeds (seeds we never detected)
     all_seeds = set(range(1, max_seed + 1))
     missing_seeds = all_seeds - seen_seeds
 
     if not missing_seeds:
         return unique_blocks, decoded_count, no_detect_count
 
-    # Calculate frame ranges for missing seeds using observed mapping
+    # Build frame ranges for missing seeds.
     frame_ranges = []
-    margin = max(2, int(frames_per_qr * 0.5))  # extra frames for safety
+    margin = max(2, int(frames_per_qr * 0.5))
 
     for seed in sorted(missing_seeds):
         center = _estimate_frame_for_seed(
@@ -1461,39 +1478,79 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
         end = min(total_frames - 1, center + int(frames_per_qr) + margin)
         frame_ranges.append((start, end))
 
-    # Merge overlapping ranges
     frame_ranges = _merge_ranges(frame_ranges)
-
     target_frames = sum(e - s + 1 for s, e in frame_ranges)
+
+    # Determine effective src_max for escalation.
+    if src_max is None or src_max <= 0:
+        src_max = max_detect_dim  # no escalation possible
+
+    # Build escalation levels, deduplicating identical max_dims.
+    l2_dim = min(src_max, int(max_detect_dim * _RECOVERY_ESCALATION_BOOST))
+    levels: list[tuple[int, object, str]] = [
+        (max_detect_dim, _worker_detect_qr_clahe, "L1-clahe"),
+    ]
+    if l2_dim > max_detect_dim:
+        levels.append((l2_dim, _worker_detect_qr, "L2-boost"))
+    if src_max > l2_dim:
+        levels.append((src_max, _worker_detect_qr, "L3-full"))
+
     print(f"Targeted recovery: {len(missing_seeds)} missing seeds, "
-          f"reading {target_frames} frames in {len(frame_ranges)} segments")
+          f"{target_frames} frames in {len(frame_ranges)} segments, "
+          f"{len(levels)} escalation level(s)")
 
-    # Read and process targeted frames.
-    # Force frequent refreshes and explicitly include percent so the progress
-    # bar remains informative even for short targeted scans.
-    pbar = tqdm(total=target_frames, desc="Recover",
-                unit="f", dynamic_ncols=True,
-                mininterval=0, miniters=1,
-                bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:3.0f}%]")
+    for level_dim, worker_fn, level_name in levels:
+        if lt_decoder.done:
+            break
 
-    early_done = False
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        decoded_count, no_detect_count, early_done = _stream_scan(
-            executor,
-            _read_frame_ranges(video_path, frame_ranges,
-                               max_detect_dim=max_detect_dim),
-            seen_seeds, unique_blocks,
-            decoded_count, no_detect_count, lt_decoder, pbar, verbose,
-            seed_frame_map, workers,
-            worker_fn=_worker_detect_qr_clahe)
-        if early_done and verbose:
-            tqdm.write("  Targeted recovery: all blocks recovered!")
+        # Re-evaluate missing seeds after previous levels.
+        current_missing = all_seeds - seen_seeds
+        if not current_missing:
+            break
 
-    pbar.close()
+        # Rebuild frame ranges for currently-missing seeds only.
+        level_ranges = []
+        for seed in sorted(current_missing):
+            center = _estimate_frame_for_seed(
+                seed, seed_frame_map, frames_per_qr, total_frames)
+            start = max(0, center - margin)
+            end = min(total_frames - 1, center + int(frames_per_qr) + margin)
+            level_ranges.append((start, end))
+        level_ranges = _merge_ranges(level_ranges)
+        level_frames = sum(e - s + 1 for s, e in level_ranges)
 
-    status = " (complete)" if early_done else ""
+        if verbose:
+            print(f"  {level_name}: max_dim={level_dim}, "
+                  f"{len(current_missing)} missing seeds, "
+                  f"{level_frames} frames")
+
+        pbar = tqdm(total=level_frames, desc=f"Recover({level_name})",
+                    unit="f", dynamic_ncols=True,
+                    mininterval=0, miniters=1,
+                    bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:3.0f}%]")
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            decoded_count, no_detect_count, early_done = _stream_scan(
+                executor,
+                _read_frame_ranges(video_path, level_ranges,
+                                   max_detect_dim=level_dim),
+                seen_seeds, unique_blocks,
+                decoded_count, no_detect_count, lt_decoder, pbar, verbose,
+                seed_frame_map, workers,
+                worker_fn=worker_fn)
+            if early_done and verbose:
+                tqdm.write(f"  {level_name}: all blocks recovered!")
+
+        pbar.close()
+
+        if early_done:
+            break
+
+    status = " (complete)" if lt_decoder.done else ""
+    final_missing = len(all_seeds - seen_seeds)
     print(f"Targeted recovery done{status}: "
-          f"{decoded_count} unique blocks, {no_detect_count} missed")
+          f"{decoded_count} unique blocks, {no_detect_count} missed"
+          + (f", {final_missing} seeds still missing" if final_missing > 0 else ""))
 
     return unique_blocks, decoded_count, no_detect_count
 
