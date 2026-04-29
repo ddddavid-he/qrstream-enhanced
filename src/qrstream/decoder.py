@@ -1006,20 +1006,43 @@ def _build_probe_ranges(total_frames: int, window_size: int = 120,
     return _merge_ranges(ranges)
 
 
-def _compute_auto_sample_rate(detect_rate: float, avg_repeat: float) -> int:
-    """Compute a conservative sample rate from one probe window."""
+def _compute_auto_sample_rate(detect_rate: float, avg_repeat: float,
+                              total_frames: int = 0,
+                              K_estimate: int = 0) -> int:
+    """Compute a conservative sample rate from one probe window.
+
+    When ``K_estimate`` and ``total_frames`` are provided, clamps the
+    result so the expected number of unique seeds collected at the
+    given ``detect_rate`` exceeds ``K_estimate × 1.5`` (the minimum
+    for reliable LT convergence).
+    """
     TARGET_DETECT_PROB = 0.95
     p = detect_rate
 
     if p >= 0.99:
-        return max(1, int(avg_repeat / 1.5))
-    if p > 0.01:
+        rate = max(1, int(avg_repeat / 1.5))
+    elif p > 0.01:
         min_chances = log(1 - TARGET_DETECT_PROB) / log(1 - p)
-        return max(1, int(avg_repeat / min_chances))
-    return 1
+        rate = max(1, int(avg_repeat / min_chances))
+    else:
+        rate = 1
+
+    # Conservative clamp: ensure enough frames are scanned to collect
+    # K × 1.5 unique seeds at the observed detect rate.
+    if K_estimate > 0 and total_frames > 0 and p > 0.01:
+        min_unique_needed = int(K_estimate * 1.5)
+        # Each sampled frame yields ~p unique seeds (simplified; actual
+        # dedup lowers this, but overestimating frames needed is safe).
+        min_frames_needed = min_unique_needed / p
+        max_rate = max(1, int(total_frames / min_frames_needed))
+        if rate > max_rate:
+            rate = max_rate
+
+    return rate
 
 
-def _analyze_probe_window(window_results):
+def _analyze_probe_window(window_results, total_frames: int = 0,
+                          K_estimate: int = 0):
     """Analyze one contiguous probe window independently."""
     frame_count = len(window_results)
     if frame_count == 0:
@@ -1053,7 +1076,11 @@ def _analyze_probe_window(window_results):
     avg_repeat = sum(seed_runs) / len(seed_runs) if seed_runs else 1.0
     sample_rate = None
     if len(distinct_seeds) >= 2:
-        sample_rate = _compute_auto_sample_rate(detect_rate, avg_repeat)
+        sample_rate = _compute_auto_sample_rate(
+            detect_rate, avg_repeat,
+            total_frames=total_frames,
+            K_estimate=K_estimate,
+        )
 
     return {
         'frame_count': frame_count,
@@ -1181,10 +1208,27 @@ def _probe_sample_rate(video_path: str, workers: int,
         elif probe_fh > 0:
             print(f"Crop ROI: disabled (unstable QR position or insufficient data)")
 
+    # ── Extract K estimate from probe-decoded blocks ────────────
+    # The first successfully decoded block's header contains
+    # block_count (= K), which we use to clamp sample_rate.
+    K_estimate = 0
+    for _, block_bytes, seed in probe_results:
+        if block_bytes is not None:
+            try:
+                hdr, _ = unpack(block_bytes, skip_crc=True)
+                K_estimate = hdr.block_count
+                break
+            except (ValueError, struct.error):
+                continue
+
     window_stats = []
     for start, end in probe_ranges:
         window_results = [result for result in probe_results if start <= result[0] <= end]
-        stats = _analyze_probe_window(window_results)
+        stats = _analyze_probe_window(
+            window_results,
+            total_frames=total_frames,
+            K_estimate=K_estimate,
+        )
         window_stats.append((start, end, stats))
 
     valid_windows = [entry for entry in window_stats if entry[2]['sample_rate'] is not None]
@@ -1470,7 +1514,7 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
                 pbar.update(remaining)
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            decoded_count, no_detect_count, early_done = _stream_scan(
+            decoded_count, no_detect_count, early_done, detect_count = _stream_scan(
                 executor, _tracking_frame_iter(),
                 seen_seeds, unique_blocks,
                 decoded_count, no_detect_count, lt_decoder, pbar, verbose,
@@ -1481,10 +1525,12 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
 
         pbar.close()
 
-        total_processed = decoded_count + no_detect_count
+        total_sampled = detect_count + no_detect_count
+        hit_rate_str = f"{detect_count * 100 // total_sampled}%" if total_sampled else "n/a"
         status = " (early termination)" if early_done else ""
         print(f"Extraction done{status}: {total_frames} frames "
-              f"({total_processed} sampled, sample_rate={sample_rate}), "
+              f"({total_sampled} sampled, sample_rate={sample_rate}, "
+              f"hit={hit_rate_str}), "
               f"{decoded_count} unique blocks, "
               f"{no_detect_count} missed")
 
@@ -1656,7 +1702,7 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
                     bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:3.0f}%]")
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            decoded_count, no_detect_count, early_done = _stream_scan(
+            decoded_count, no_detect_count, early_done, _ = _stream_scan(
                 executor,
                 _read_frame_ranges(video_path, level_ranges,
                                    max_detect_dim=level_dim,
@@ -1768,6 +1814,7 @@ def _stream_scan(executor: Executor, frame_iter, seen_seeds, unique_blocks,
 
     early_done = False
     IN_FLIGHT = max(workers * 2, 4)
+    detect_count = 0  # ALL successful detections (unique + duplicate)
 
     prefetched = _prefetch_iter(frame_iter)
     pending: set = set()
@@ -1792,6 +1839,7 @@ def _stream_scan(executor: Executor, frame_iter, seen_seeds, unique_blocks,
             fidx, block_bytes, seed = fut.result()
             pbar.update(1)
             if block_bytes is not None and seed is not None:
+                detect_count += 1
                 if seed_frame_map is not None and seed not in seed_frame_map:
                     seed_frame_map[seed] = fidx
                 if seed not in seen_seeds:
@@ -1813,8 +1861,8 @@ def _stream_scan(executor: Executor, frame_iter, seen_seeds, unique_blocks,
                             f"progress={pct:.1f}%")
             else:
                 no_detect_count += 1
-            total_seen = decoded_count + no_detect_count
-            hit_pct = (decoded_count * 100 // total_seen) if total_seen else 0
+            total_seen = detect_count + no_detect_count
+            hit_pct = (detect_count * 100 // total_seen) if total_seen else 0
             pbar.set_postfix_str(f"hit={hit_pct}%, uniq={decoded_count}")
 
             # Keep the pool topped up — one in, one out.
@@ -1826,7 +1874,7 @@ def _stream_scan(executor: Executor, frame_iter, seen_seeds, unique_blocks,
     for fut in pending:
         fut.cancel()
 
-    return decoded_count, no_detect_count, early_done
+    return decoded_count, no_detect_count, early_done, detect_count
 
 
 def _decode_into_decoder(blocks, verbose=False) -> LTDecoder | None:
