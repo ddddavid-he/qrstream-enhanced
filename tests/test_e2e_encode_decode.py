@@ -51,7 +51,8 @@ def _sha256(path: pathlib.Path) -> str:
 
 def _encode_decode_verify(raw: bytes, tmp_path: pathlib.Path,
                            label: str = "file",
-                           compress: bool = True) -> None:
+                           compress: bool = True,
+                           qr_version: int = 25) -> None:
     """Complete pipeline: raw bytes → MP4 → recovered bytes → assert SHA256."""
     from qrstream.encoder import encode_to_video
     from qrstream.decoder import extract_qr_from_video, decode_blocks_to_file
@@ -63,7 +64,8 @@ def _encode_decode_verify(raw: bytes, tmp_path: pathlib.Path,
     src.write_bytes(raw)
     src_hash = _sha256(src)
 
-    encode_to_video(str(src), str(mp4), compress=compress, verbose=False)
+    encode_to_video(str(src), str(mp4), compress=compress,
+                    qr_version=qr_version, verbose=False)
     assert mp4.exists() and mp4.stat().st_size > 0, \
         f"encode_to_video produced no output for {label}"
 
@@ -128,3 +130,42 @@ class TestE2EEncodeDecode:
         k = ceil(len(raw) / bs)
         _encode_decode_verify(raw[:k * bs], tmp_path, "exact_boundary",
                                compress=False)
+
+    # ── QR version sweep ──────────────────────────────────────────
+
+    @pytest.mark.parametrize(
+        "qr_version,payload_size",
+        [
+            # Low version: small modules-per-side (4*10+17=57), sparse
+            # density.  Encoder produces small frames, decoder should
+            # comfortably stay near source resolution.
+            (10, 5_000),
+            # Mid version: the qrstream default; baseline density.
+            (20, 15_000),
+            # High version: 4*30+17=137 modules per side.  This is the
+            # density band where the legacy 1080-cap downscale would
+            # crush sub-3 px/module on captures, exercising the
+            # adaptive _MAX_DETECT_DIM logic on a clean (non-camera)
+            # encoder output.
+            (30, 30_000),
+            # Max version: 4*40+17=177 modules.  Stress the protocol
+            # capacity tables and the inferred-modules branch of
+            # _adaptive_max_dim_from_probe.
+            (40, 50_000),
+        ],
+        ids=["v10-5k", "v20-15k", "v30-30k", "v40-50k"],
+    )
+    def test_qr_version_roundtrip(self, tmp_path, qr_version, payload_size):
+        """Roundtrip under multiple QR versions.
+
+        Confirms encode/decode integrity across the QR-version range
+        (low/mid/high/max) and indirectly exercises the adaptive
+        downscale path: probe-derived ``modules_per_side`` is only
+        correct when ``_infer_qr_modules`` matches the encoder's
+        chosen version.
+        """
+        raw = _random_bytes(payload_size, seed=qr_version)
+        _encode_decode_verify(
+            raw, tmp_path, f"v{qr_version}-{payload_size}",
+            compress=False, qr_version=qr_version,
+        )

@@ -148,7 +148,7 @@ def test_extract_scales_default_sandbox_pool_and_abort_threshold(
     )
     monkeypatch.setattr(
         _decoder_mod, "_probe_sample_rate",
-        lambda *_a, **_kw: (1, [], 0, 0, 0.0, 1.0),
+        lambda *_a, **_kw: (1, [], 0, 0, 0.0, 1.0, None),
     )
     monkeypatch.setattr(_decoder_mod, "_read_frames", lambda *_a, **_kw: iter(()))
     monkeypatch.setattr(
