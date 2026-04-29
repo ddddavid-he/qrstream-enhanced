@@ -69,7 +69,21 @@ def _in_process_detect(_frame_idx: int, frame: "np.ndarray") -> str | None:
     return try_decode_qr(frame)
 
 
+def _in_process_detect_with_bbox(
+    _frame_idx: int, frame: "np.ndarray"
+) -> tuple | None:
+    """In-process default for the bbox-returning dispatch hook.
+
+    Returns ``(text, bbox_ndarray) | None``.  ``extract_qr_from_video``
+    swaps this for ``SandboxedDetector.detect_with_bbox`` when
+    ``detect_isolation == 'on'`` so probe-frame WeChat crashes degrade
+    to a single dropped frame instead of killing the decode process.
+    """
+    return try_decode_qr_with_bbox(frame)
+
+
 _dispatch_detect = _in_process_detect
+_dispatch_detect_with_bbox = _in_process_detect_with_bbox
 
 
 def _validate_isolation_mode(mode: str) -> None:
@@ -556,14 +570,14 @@ def _worker_probe_detect(frame_data):
     :func:`_compute_adaptive_max_dim` so the main scan can pick a
     downscale target tuned to the source's QR module density.
 
-    Unlike :func:`_worker_detect_qr` this path *does not* go through
-    the sandbox dispatch hook — the probe runs only ~360 frames at
-    most and pulling the bbox out of WeChat would otherwise require
-    threading a parallel API through the multi-process sandbox IPC.
-    The trade-off: a probe-frame native crash will take down the
-    process.  In practice the probe operates on the middle of the
-    timeline (well past the lead-in) where camera-capture jitter is
-    lowest and crashes are correspondingly rare.
+    Detection runs through the ``_dispatch_detect_with_bbox`` hook so
+    crash isolation (``qr_sandbox.SandboxedDetector.detect_with_bbox``)
+    applies to probe frames too.  This matters in practice: arm64
+    phone-recording fixtures consistently segfault the WeChat
+    detector during probe — without sandbox routing the SIGSEGV
+    takes the entire decode process down (CI run on
+    ``ubuntu-24.04-arm`` reproduced this on
+    ``v3-v061-30KB-V25-60fps-phone``).
     """
     from .protocol import base45_decode, cobs_decode
 
@@ -573,7 +587,7 @@ def _worker_probe_detect(frame_data):
 
     h, w = frame.shape[:2]
 
-    detected = try_decode_qr_with_bbox(frame)
+    detected = _dispatch_detect_with_bbox(frame_idx, frame)
     if detected is None:
         return (frame_idx, None, None, 0, False, 0.0, h, w)
     qr_text, bbox = detected
@@ -974,7 +988,7 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
 
     Returns a list of raw block byte strings.
     """
-    global _dispatch_detect
+    global _dispatch_detect, _dispatch_detect_with_bbox
     _validate_isolation_mode(detect_isolation)
 
     cap = cv2.VideoCapture(video_path)
@@ -995,6 +1009,7 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
 
     sandbox = None
     original_dispatch = _dispatch_detect
+    original_dispatch_bbox = _dispatch_detect_with_bbox
     if detect_isolation == "on":
         sandbox_pool_size = _default_sandbox_pool_size(workers)
         crash_abort_threshold = _default_sandbox_crash_abort_threshold(
@@ -1005,6 +1020,7 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
                 crash_abort_threshold=crash_abort_threshold,
             )
             _dispatch_detect = sandbox.detect
+            _dispatch_detect_with_bbox = sandbox.detect_with_bbox
             if verbose:
                 print(
                     "Using sandboxed detector: "
@@ -1143,6 +1159,7 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
         return unique_blocks
     finally:
         _dispatch_detect = original_dispatch
+        _dispatch_detect_with_bbox = original_dispatch_bbox
         if sandbox is not None:
             crashes = sandbox.crash_count
             sandbox.close()

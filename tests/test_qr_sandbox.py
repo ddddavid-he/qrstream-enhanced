@@ -87,7 +87,9 @@ def _helper_loop_crash_on_sentinel(in_q, out_q):
             os._exit(134)
 
         try:
-            out_q.put((frame_idx, "ok" if decoded is not None else None))
+            out_q.put(
+                (frame_idx, "ok" if decoded is not None else None, None)
+            )
         except (BrokenPipeError, OSError):
             return
 
@@ -146,6 +148,49 @@ def test_detect_roundtrip_returns_same_as_inprocess():
     with SandboxedDetector(pool_size=1) as sb:
         got = sb.detect(0, img)
     assert got == expected
+
+
+def test_detect_with_bbox_returns_text_and_geometry():
+    """detect_with_bbox round-trips both the decoded text and a
+    sensible (4, 2) float32 bbox through the helper subprocess.
+
+    This is the primary regression guard for the arm64 segfault that
+    motivated routing the probe path through the sandbox: if the IPC
+    serialisation of the bbox tuple breaks, the adaptive-downscale
+    probe silently degrades to "no observations" and the legacy
+    1080-cap fallback kicks in.
+    """
+    img = _make_qr(b"bbox-roundtrip", version=10)
+    h, w = img.shape[:2]
+    expected_text = _expected_for(b"bbox-roundtrip")
+
+    with SandboxedDetector(pool_size=1) as sb:
+        got = sb.detect_with_bbox(0, img)
+
+    assert got is not None, "detect_with_bbox returned None on a clean QR"
+    text, bbox = got
+    assert text == expected_text
+    assert bbox is not None, "bbox should be populated on a clean QR"
+    assert bbox.shape == (4, 2)
+    assert bbox.dtype == np.float32
+    # Each corner must lie within the source frame; a degenerate
+    # all-zeros bbox would also satisfy "within frame" but would
+    # carry zero area, so check both.
+    assert (bbox[:, 0] >= 0).all() and (bbox[:, 0] <= w).all()
+    assert (bbox[:, 1] >= 0).all() and (bbox[:, 1] <= h).all()
+    side_x = float(np.linalg.norm(bbox[1] - bbox[0]))
+    side_y = float(np.linalg.norm(bbox[3] - bbox[0]))
+    assert side_x > 1.0 and side_y > 1.0, \
+        f"bbox is degenerate: {bbox.tolist()}"
+
+
+def test_detect_with_bbox_returns_none_on_blank_frame():
+    """Blank frames must surface as None rather than a (None, None)
+    tuple — callers branch on ``is None`` to skip no-detect frames."""
+    blank = np.full((400, 400, 3), 255, dtype=np.uint8)
+    with SandboxedDetector(pool_size=1) as sb:
+        got = sb.detect_with_bbox(0, blank)
+    assert got is None
 
 
 def test_multiple_frames_round_trip_concurrently():
