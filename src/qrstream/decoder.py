@@ -380,6 +380,19 @@ _PPM_SWEEP_SUBSAMPLE = 6
 # L3 always uses full source resolution (src_max).
 _RECOVERY_ESCALATION_BOOST = 1.5
 
+# ── Crop ROI parameters ──────────────────────────────────────────
+# Stability threshold for the bbox-derived crop ROI.  If the IQR of
+# the QR centre positions (in either axis) exceeds this fraction of
+# the frame dimension, the QR is moving too much and cropping is
+# disabled to avoid cutting the QR out of frame.
+_CROP_STABILITY_THRESHOLD = 0.15
+# Margin multiplier on the median bbox side to derive the crop rect.
+# 1.3 → crop rect is 30% larger than the QR to accommodate jitter
+# and the quiet-zone border.
+_CROP_MARGIN = 1.3
+# Minimum number of probe observations to derive a crop box.
+_CROP_MIN_OBSERVATIONS = 10
+
 
 def _downscale_frame(
     frame: np.ndarray, max_dim: int = _MAX_DETECT_DIM
@@ -414,6 +427,95 @@ def _bbox_side_pixels(bbox: np.ndarray) -> float:
     if min(lengths) <= 1.0:
         return 0.0
     return float(np.mean(lengths))
+
+
+def _crop_frame(
+    frame: np.ndarray,
+    crop_box: tuple[int, int, int, int] | None,
+) -> np.ndarray:
+    """Crop ``frame`` to ``(y0, y1, x0, x1)`` if a crop box is given.
+
+    Returns the original frame when ``crop_box`` is ``None``.  The
+    returned array is a view (no copy) — callers downstream already
+    force a ``.copy()`` before yielding to worker threads.
+    """
+    if crop_box is None:
+        return frame
+    y0, y1, x0, x1 = crop_box
+    return frame[y0:y1, x0:x1]
+
+
+def _derive_crop_box(
+    probe_raw: list[tuple],
+    frame_h: int,
+    frame_w: int,
+) -> tuple[int, int, int, int] | None:
+    """Derive a stable crop ROI from probe-phase bbox observations.
+
+    The crop box is centred on the median QR position and sized to
+    ``median_bbox_side × _CROP_MARGIN``, clamped to frame bounds.
+
+    Returns ``None`` (= don't crop) when:
+    - fewer than ``_CROP_MIN_OBSERVATIONS`` usable bbox observations,
+    - the QR centre varies too much (IQR > ``_CROP_STABILITY_THRESHOLD``
+      × frame dimension in either axis).
+
+    ``probe_raw`` entries are 10-tuples from ``_worker_probe_detect``:
+    ``(frame_idx, block_bytes, seed, text_len, is_alpha,
+    bbox_side, fh, fw, bbox_cx, bbox_cy)``.
+    """
+    cxs: list[float] = []
+    cys: list[float] = []
+    sides: list[float] = []
+
+    for entry in probe_raw:
+        if len(entry) < 10:
+            continue
+        bbox_side = entry[5]
+        bbox_cx = entry[8]
+        bbox_cy = entry[9]
+        if bbox_side <= 0.0 or bbox_cx <= 0.0 or bbox_cy <= 0.0:
+            continue
+        cxs.append(bbox_cx)
+        cys.append(bbox_cy)
+        sides.append(bbox_side)
+
+    if len(cxs) < _CROP_MIN_OBSERVATIONS:
+        return None
+
+    # Stability check: IQR of centre positions.
+    cxs_sorted = sorted(cxs)
+    cys_sorted = sorted(cys)
+    q1_idx = len(cxs_sorted) // 4
+    q3_idx = 3 * len(cxs_sorted) // 4
+    iqr_x = cxs_sorted[q3_idx] - cxs_sorted[q1_idx]
+    iqr_y = cys_sorted[q3_idx] - cys_sorted[q1_idx]
+
+    if iqr_x > frame_w * _CROP_STABILITY_THRESHOLD:
+        return None
+    if iqr_y > frame_h * _CROP_STABILITY_THRESHOLD:
+        return None
+
+    # Median centre and side.
+    med_cx = cxs_sorted[len(cxs_sorted) // 2]
+    med_cy = cys_sorted[len(cys_sorted) // 2]
+    sides_sorted = sorted(sides)
+    med_side = sides_sorted[len(sides_sorted) // 2]
+
+    # Build crop rect.
+    half = int(med_side * _CROP_MARGIN / 2)
+    cx_i, cy_i = int(med_cx), int(med_cy)
+
+    x0 = max(0, cx_i - half)
+    x1 = min(frame_w, cx_i + half)
+    y0 = max(0, cy_i - half)
+    y1 = min(frame_h, cy_i + half)
+
+    # Sanity: crop must be meaningful (at least half the bbox side).
+    if (x1 - x0) < med_side * 0.5 or (y1 - y0) < med_side * 0.5:
+        return None
+
+    return (y0, y1, x0, x1)
 
 
 def _infer_qr_modules(text_len: int, alphanumeric: bool) -> int | None:
@@ -723,36 +825,38 @@ def _worker_probe_detect(frame_data):
     """Probe-phase worker: detect QR + return bbox + decoded mode tag.
 
     Returns ``(frame_idx, block_bytes, seed, qr_text_len,
-    is_alphanumeric, bbox_side_px, frame_h, frame_w)``.
+    is_alphanumeric, bbox_side_px, frame_h, frame_w,
+    bbox_cx, bbox_cy)``.
 
-    The trailing four fields (``qr_text_len`` … ``frame_w``) feed
-    :func:`_compute_adaptive_max_dim` so the main scan can pick a
-    downscale target tuned to the source's QR module density.
+    The trailing six fields feed :func:`_compute_adaptive_max_dim`
+    (module density) and :func:`_derive_crop_box` (centre stability).
 
     Detection runs through the ``_dispatch_detect_with_bbox`` hook so
     crash isolation (``qr_sandbox.SandboxedDetector.detect_with_bbox``)
-    applies to probe frames too.  This matters in practice: arm64
-    phone-recording fixtures consistently segfault the WeChat
-    detector during probe — without sandbox routing the SIGSEGV
-    takes the entire decode process down (CI run on
-    ``ubuntu-24.04-arm`` reproduced this on
-    ``v3-v061-30KB-V25-60fps-phone``).
+    applies to probe frames too.
     """
     from .protocol import base45_decode, cobs_decode
 
     frame_idx, frame = frame_data
     if frame is None:
-        return (frame_idx, None, None, 0, False, 0.0, 0, 0)
+        return (frame_idx, None, None, 0, False, 0.0, 0, 0, 0.0, 0.0)
 
     h, w = frame.shape[:2]
 
     detected = _dispatch_detect_with_bbox(frame_idx, frame)
     if detected is None:
-        return (frame_idx, None, None, 0, False, 0.0, h, w)
+        return (frame_idx, None, None, 0, False, 0.0, h, w, 0.0, 0.0)
     qr_text, bbox = detected
 
     bbox_side = _bbox_side_pixels(bbox)
     text_len = len(qr_text)
+
+    # Compute bbox centre from the 4 corner points.
+    if bbox is not None and bbox.shape == (4, 2):
+        bbox_cx = float(bbox[:, 0].mean())
+        bbox_cy = float(bbox[:, 1].mean())
+    else:
+        bbox_cx, bbox_cy = 0.0, 0.0
 
     # Try the same decode strategies as the main worker so the probe
     # both feeds the LT decoder *and* tags the encoding mode (which
@@ -772,12 +876,13 @@ def _worker_probe_detect(frame_data):
             continue
         is_alpha = (mode_tag == "alpha")
         return (frame_idx, candidate, header.seed,
-                text_len, is_alpha, bbox_side, h, w)
+                text_len, is_alpha, bbox_side, h, w,
+                bbox_cx, bbox_cy)
 
     # Detected but undecodable — still surface the bbox so we can
     # estimate density even when the payload doesn't validate.
-    # Default to alphanumeric (the qrstream default).
-    return (frame_idx, None, None, text_len, True, bbox_side, h, w)
+    return (frame_idx, None, None, text_len, True, bbox_side, h, w,
+            bbox_cx, bbox_cy)
 
 
 def _try_base45(qr_data: str, base45_decode_fn) -> bytes | None:
@@ -810,15 +915,13 @@ def _try_cobs(qr_data: str, cobs_decode_fn) -> bytes | None:
 
 
 def _read_frames(video_path, sample_rate, total_frames, start_frame=0,
-                 max_detect_dim: int = _MAX_DETECT_DIM):
+                 max_detect_dim: int = _MAX_DETECT_DIM,
+                 crop_box: tuple[int, int, int, int] | None = None):
     """Generator that reads frames from video.
 
-    Yields ``(frame_idx, frame_ndarray)`` tuples. Frames are
-    downscaled to ``max_detect_dim`` (per-call so the adaptive
-    probe-derived value can override the legacy 1080 default) and
-    passed as BGR uint8 ndarrays directly.  Worker threads share
-    the main process address space, so the ndarray is handed over
-    as a zero-copy reference.
+    Yields ``(frame_idx, frame_ndarray)`` tuples. Frames are optionally
+    cropped to ``crop_box`` (y0, y1, x0, x1), then downscaled to
+    ``max_detect_dim``.
 
     Thread-safety note: ``cv2.VideoCapture.read()`` reuses an
     internal frame buffer — each call returns an ndarray that
@@ -840,6 +943,7 @@ def _read_frames(video_path, sample_rate, total_frames, start_frame=0,
         if not ret:
             break
         if (frame_idx - start_frame) % sample_rate == 0:
+            frame = _crop_frame(frame, crop_box)
             frame = _downscale_frame(frame, max_dim=max_detect_dim)
             frame = np.ascontiguousarray(frame).copy()
             yield (frame_idx, frame)
@@ -848,18 +952,14 @@ def _read_frames(video_path, sample_rate, total_frames, start_frame=0,
 
 
 def _read_frame_ranges(video_path, frame_ranges,
-                       max_detect_dim: int = _MAX_DETECT_DIM):
+                       max_detect_dim: int = _MAX_DETECT_DIM,
+                       crop_box: tuple[int, int, int, int] | None = None):
     """Generator that reads specific frame ranges from video.
 
     Args:
         frame_ranges: list of (start_frame, end_frame) tuples (inclusive).
         max_detect_dim: per-call downscale cap (see :func:`_read_frames`).
-
-    Yields ``(frame_idx, frame_ndarray)`` tuples for all frames
-    within ranges. See ``_read_frames`` for the rationale behind
-    the ndarray (rather than encoded-bytes) payload and the
-    mandatory ``.copy()`` (VideoCapture reuses its internal
-    buffer; threads would otherwise race with the next ``read()``).
+        crop_box: optional (y0, y1, x0, x1) ROI applied before downscale.
     """
     if not frame_ranges:
         return
@@ -870,6 +970,7 @@ def _read_frame_ranges(video_path, frame_ranges,
             ret, frame = cap.read()
             if not ret:
                 break
+            frame = _crop_frame(frame, crop_box)
             frame = _downscale_frame(frame, max_dim=max_detect_dim)
             frame = np.ascontiguousarray(frame).copy()
             yield (fidx, frame)
@@ -1005,7 +1106,7 @@ def _probe_sample_rate(video_path: str, workers: int,
     leading_frames_probed = 0
 
     if not probe_frames:
-        return 1, [], 0, 0, 0.0, 1.0, None
+        return 1, [], 0, 0, 0.0, 1.0, None, None
 
     if verbose and len(probe_ranges) > 1:
         ranges_str = ", ".join(f"{start}-{end}" for start, end in probe_ranges)
@@ -1062,6 +1163,24 @@ def _probe_sample_rate(video_path: str, workers: int,
               f"(target_ppm={effective_ppm:.2f}, "
               f"default would be {_MAX_DETECT_DIM}px)")
 
+    # ── Derive crop ROI from bbox centre observations ─────────
+    # Use the probe-measured frame dimensions (from the first
+    # observation with valid fh/fw).
+    probe_fh, probe_fw = 0, 0
+    for entry in probe_raw:
+        if len(entry) >= 8 and entry[6] > 0 and entry[7] > 0:
+            probe_fh, probe_fw = entry[6], entry[7]
+            break
+    crop_box = _derive_crop_box(probe_raw, probe_fh, probe_fw)
+    if verbose:
+        if crop_box is not None:
+            y0, y1, x0, x1 = crop_box
+            print(f"Crop ROI: ({x0},{y0})-({x1},{y1}) "
+                  f"= {x1-x0}x{y1-y0}px "
+                  f"(frame {probe_fw}x{probe_fh})")
+        elif probe_fh > 0:
+            print(f"Crop ROI: disabled (unstable QR position or insufficient data)")
+
     window_stats = []
     for start, end in probe_ranges:
         window_results = [result for result in probe_results if start <= result[0] <= end]
@@ -1072,7 +1191,7 @@ def _probe_sample_rate(video_path: str, workers: int,
     if not valid_windows:
         print(f"Probe: {probe_count} frames, insufficient seed diversity → sample_rate=1")
         return (1, probe_results, probe_count, leading_frames_probed,
-                0.0, 1.0, adaptive_max_dim)
+                0.0, 1.0, adaptive_max_dim, crop_box)
 
     limiting_start, limiting_end, limiting_stats = min(
         valid_windows,
@@ -1097,7 +1216,7 @@ def _probe_sample_rate(video_path: str, workers: int,
 
     return (auto_rate, probe_results, probe_count,
             leading_frames_probed, detect_rate, avg_run,
-            adaptive_max_dim)
+            adaptive_max_dim, crop_box)
 
 
 def _extract_probe_video_constants(
@@ -1111,7 +1230,7 @@ def _extract_probe_video_constants(
     for entry in probe_raw:
         if len(entry) < 8:
             continue
-        _, _, _, text_len, is_alpha, bbox_side, fh, fw = entry
+        _, _, _, text_len, is_alpha, bbox_side, fh, fw = entry[:8]
         if bbox_side <= 0.0 or text_len <= 0 or fh <= 0 or fw <= 0:
             continue
         modules = _infer_qr_modules(text_len, is_alpha)
@@ -1162,7 +1281,7 @@ def _adaptive_max_dim_from_probe(
     for entry in probe_raw:
         if len(entry) < 8:
             continue
-        _, _, _, text_len, is_alpha, bbox_side, fh, fw = entry
+        _, _, _, text_len, is_alpha, bbox_side, fh, fw = entry[:8]
         if bbox_side <= 0.0 or text_len <= 0 or fh <= 0 or fw <= 0:
             continue
         modules = _infer_qr_modules(text_len, is_alpha)
@@ -1277,11 +1396,12 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
         detect_rate = 1.0
         avg_repeat = 1.0
         adaptive_max_dim: int | None = None
+        crop_box: tuple[int, int, int, int] | None = None
 
         if sample_rate <= 0:
             (auto_rate, probe_results, probe_count,
              leading_frames_probed, detect_rate, avg_repeat,
-             adaptive_max_dim) = _probe_sample_rate(
+             adaptive_max_dim, crop_box) = _probe_sample_rate(
                 video_path, workers, verbose)
             sample_rate = auto_rate
             if verbose:
@@ -1336,7 +1456,8 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
             for frame_data in _read_frames(
                     video_path, sample_rate, total_frames,
                     start_frame=leading_frames_probed,
-                    max_detect_dim=active_max_dim):
+                    max_detect_dim=active_max_dim,
+                    crop_box=crop_box):
                 skipped = frame_data[0] - last_reported - 1
                 if skipped > 0:
                     pbar.update(skipped)
@@ -1382,7 +1503,8 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
                 seen_seeds, unique_blocks, decoded_count, no_detect_count,
                 lt_decoder, avg_repeat, verbose, seed_frame_map,
                 max_detect_dim=active_max_dim,
-                src_max=src_max)
+                src_max=src_max,
+                crop_box=crop_box)
 
         return unique_blocks
     finally:
@@ -1433,7 +1555,8 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
                        no_detect_count, lt_decoder, avg_repeat, verbose,
                        seed_frame_map: dict[int, int] | None = None,
                        max_detect_dim: int = _MAX_DETECT_DIM,
-                       src_max: int | None = None):
+                       src_max: int | None = None,
+                       crop_box: tuple[int, int, int, int] | None = None):
     """Multi-level recovery: escalate resolution on missing-seed frames.
 
     Runs up to three recovery levels with increasing ``max_detect_dim``
@@ -1486,20 +1609,23 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
         src_max = max_detect_dim  # no escalation possible
 
     # Build escalation levels, deduplicating identical max_dims.
+    # L1/L2 use the probe-derived crop ROI; L3 (full resolution)
+    # does NOT crop — it's the last resort and should use every
+    # pixel available.
     l2_dim = min(src_max, int(max_detect_dim * _RECOVERY_ESCALATION_BOOST))
-    levels: list[tuple[int, object, str]] = [
-        (max_detect_dim, _worker_detect_qr_clahe, "L1-clahe"),
+    levels: list[tuple[int, object, str, tuple | None]] = [
+        (max_detect_dim, _worker_detect_qr_clahe, "L1-clahe", crop_box),
     ]
     if l2_dim > max_detect_dim:
-        levels.append((l2_dim, _worker_detect_qr, "L2-boost"))
+        levels.append((l2_dim, _worker_detect_qr, "L2-boost", crop_box))
     if src_max > l2_dim:
-        levels.append((src_max, _worker_detect_qr, "L3-full"))
+        levels.append((src_max, _worker_detect_qr, "L3-full", None))
 
     print(f"Targeted recovery: {len(missing_seeds)} missing seeds, "
           f"{target_frames} frames in {len(frame_ranges)} segments, "
           f"{len(levels)} escalation level(s)")
 
-    for level_dim, worker_fn, level_name in levels:
+    for level_dim, worker_fn, level_name, level_crop in levels:
         if lt_decoder.done:
             break
 
@@ -1533,7 +1659,8 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
             decoded_count, no_detect_count, early_done = _stream_scan(
                 executor,
                 _read_frame_ranges(video_path, level_ranges,
-                                   max_detect_dim=level_dim),
+                                   max_detect_dim=level_dim,
+                                   crop_box=level_crop),
                 seen_seeds, unique_blocks,
                 decoded_count, no_detect_count, lt_decoder, pbar, verbose,
                 seed_frame_map, workers,
