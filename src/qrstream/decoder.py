@@ -28,8 +28,30 @@ from tqdm import tqdm
 
 from .lt_codec import PRNG, BlockGraph, DEFAULT_C, DEFAULT_DELTA
 from .protocol import unpack
-from .qr_utils import try_decode_qr, DETECTOR_CAN_CRASH
+from .qr_utils import try_decode_qr, try_decode_qr_with_bbox, DETECTOR_CAN_CRASH
 from . import qr_sandbox
+from . import protocol as _protocol_mod
+
+
+# Pre-sorted (version, capacity) tables for ``_infer_qr_modules``.
+# We materialise them once at import time so the per-frame inference
+# path is a tight scan over a 40-entry list rather than a dict probe
+# inside a Python loop.  We pin EC=M (level 1) to match the qrstream
+# encoder default.
+_QR_CAP_BYTE_M: list[tuple[int, int]] = sorted(
+    (
+        (version, _protocol_mod._QR_CAPACITY[(version, 1)])
+        for version in range(1, 41)
+    ),
+    key=lambda x: x[0],
+)
+_QR_CAP_ALPHA_M: list[tuple[int, int]] = sorted(
+    (
+        (version, _protocol_mod._QR_CAPACITY_ALPHANUMERIC[(version, 1)])
+        for version in range(1, 41)
+    ),
+    key=lambda x: x[0],
+)
 
 
 _PROGRESS_BAR_THRESHOLD = 512
@@ -282,21 +304,139 @@ class LTDecoder:
 
 # ── Video QR extraction (thread pool) ────────────────────────────
 
-# Max pixel dimension for QR detection. Frames larger than this are
-# downscaled before detection to avoid wasting CPU on 4K+ input.
+# Default fallback for the per-call max-dim (used when the adaptive
+# probe has no usable bbox observations — e.g. probe failed to decode
+# any frame, or the WeChat detector returned a degenerate bbox).  The
+# previous behaviour was to *always* downscale to 1080; that wrecks
+# detection on high-resolution camera captures of high-version QRs
+# (V25+) where each module already only spans ~3-5 pixels.  We keep
+# 1080 as the conservative fallback for legacy callers but the active
+# decode path computes a per-video value via
+# :func:`_compute_adaptive_max_dim` based on observed module density.
 _MAX_DETECT_DIM = 1080
 
+# Probe phase always runs at the source resolution (clamped to this
+# generous cap) so :func:`_compute_adaptive_max_dim` sees the QR
+# modules at full fidelity and can measure their pixel size
+# accurately.  4320 covers up to 8K source frames; anything larger is
+# downscaled to keep WeChat's preprocessing under control.
+_PROBE_MAX_DETECT_DIM = 4320
 
-def _downscale_frame(frame: np.ndarray) -> np.ndarray:
-    """Downscale a frame if its larger dimension exceeds _MAX_DETECT_DIM."""
+# Adaptive-downscale tuning.  Empirically WeChatQRCode's detection
+# pipeline is comfortable when each QR module spans ≥ ~3 pixels after
+# any internal preprocessing; we target 3.5 to leave headroom for
+# motion blur and JPEG artefacts in real captures.
+_ADAPTIVE_TARGET_PPM = 3.5
+# Never downscale below this dimension regardless of the adaptive
+# computation; smaller frames invite WeChat false-negatives even on
+# clean captures.
+_ADAPTIVE_MIN_DETECT_DIM = 720
+# Cap for the adaptive value so we don't run detection at 8K when a
+# single probe frame happens to contain a tiny QR (which would imply
+# the QR is unreadable anyway).
+_ADAPTIVE_MAX_DETECT_DIM = 4320
+
+
+def _downscale_frame(
+    frame: np.ndarray, max_dim: int = _MAX_DETECT_DIM
+) -> np.ndarray:
+    """Downscale a frame if its larger dimension exceeds ``max_dim``."""
     h, w = frame.shape[:2]
-    max_dim = max(h, w)
-    if max_dim <= _MAX_DETECT_DIM:
+    src_max = max(h, w)
+    if src_max <= max_dim:
         return frame
-    scale = _MAX_DETECT_DIM / max_dim
+    scale = max_dim / src_max
     new_w = int(w * scale)
     new_h = int(h * scale)
     return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
+def _bbox_side_pixels(bbox: np.ndarray) -> float:
+    """Estimate the QR side length in pixels from a (4, 2) corner array.
+
+    WeChatQRCode returns the four QR corners in clockwise order; we
+    average the four edge lengths so a slightly perspective-warped
+    quadrilateral still yields a sensible scalar.  Returns ``0.0`` for
+    degenerate / missing bboxes (zero-area).
+    """
+    if bbox is None or bbox.shape != (4, 2):
+        return 0.0
+    pts = bbox.astype(np.float64)
+    edges = [
+        pts[(i + 1) % 4] - pts[i]
+        for i in range(4)
+    ]
+    lengths = [float(np.linalg.norm(e)) for e in edges]
+    if min(lengths) <= 1.0:
+        return 0.0
+    return float(np.mean(lengths))
+
+
+def _infer_qr_modules(text_len: int, alphanumeric: bool) -> int | None:
+    """Reverse-lookup QR ``modules_per_side`` from a decoded payload.
+
+    Picks the smallest ISO 18004 QR version whose capacity (at EC=M,
+    the qrstream default) accommodates ``text_len`` characters of
+    payload in the given mode.  Returns ``modules_per_side`` =
+    ``4 * version + 17``, or ``None`` when the payload exceeds even
+    V40 capacity (which would imply the source video was produced by
+    a non-qrstream encoder we should not try to second-guess).
+
+    EC level is fixed at M (the encoder default); using the wrong EC
+    level only over-estimates the version by 1 step in the worst case,
+    which biases the adaptive max-dim slightly larger (more pixels per
+    module) — that errs on the side of preserving information, which
+    is the whole point of this heuristic.
+    """
+    if text_len <= 0:
+        return None
+    if alphanumeric:
+        table = _QR_CAP_ALPHA_M
+    else:
+        table = _QR_CAP_BYTE_M
+    for version, cap in table:
+        if text_len <= cap:
+            return 4 * version + 17
+    return None
+
+
+def _compute_adaptive_max_dim(
+    frame_h: int,
+    frame_w: int,
+    bbox: np.ndarray,
+    modules_per_side: int | None,
+) -> int | None:
+    """Compute a per-video downscale target preserving QR module density.
+
+    Given a probe frame's resolution, the QR's bounding box on that
+    frame, and (optionally) the inferred modules_per_side, return the
+    largest-dimension cap we can apply during the main scan while
+    still leaving each module ≥ ``_ADAPTIVE_TARGET_PPM`` pixels.
+
+    Returns ``None`` when the inputs are insufficient to compute a
+    sensible value (caller should fall back to ``_MAX_DETECT_DIM``).
+    """
+    qr_side = _bbox_side_pixels(bbox)
+    if qr_side <= 0.0 or modules_per_side is None or modules_per_side <= 0:
+        return None
+
+    src_max = max(frame_h, frame_w)
+    if src_max <= 0:
+        return None
+
+    pixels_per_module = qr_side / modules_per_side
+    if pixels_per_module <= _ADAPTIVE_TARGET_PPM:
+        # Source already at-or-below the target density; keep the
+        # frame at its native resolution (clamped to the upper cap).
+        return min(src_max, _ADAPTIVE_MAX_DETECT_DIM)
+
+    scale = _ADAPTIVE_TARGET_PPM / pixels_per_module
+    target = int(src_max * scale)
+    target = max(_ADAPTIVE_MIN_DETECT_DIM, target)
+    target = min(_ADAPTIVE_MAX_DETECT_DIM, target)
+    # Never go *above* the source — there's no point upscaling.
+    target = min(src_max, target)
+    return target
 
 
 def _worker_detect_qr(frame_data):
@@ -406,6 +546,67 @@ def _worker_detect_qr_clahe(frame_data):
     return (frame_idx, None, None)
 
 
+def _worker_probe_detect(frame_data):
+    """Probe-phase worker: detect QR + return bbox + decoded mode tag.
+
+    Returns ``(frame_idx, block_bytes, seed, qr_text_len,
+    is_alphanumeric, bbox_side_px, frame_h, frame_w)``.
+
+    The trailing four fields (``qr_text_len`` … ``frame_w``) feed
+    :func:`_compute_adaptive_max_dim` so the main scan can pick a
+    downscale target tuned to the source's QR module density.
+
+    Unlike :func:`_worker_detect_qr` this path *does not* go through
+    the sandbox dispatch hook — the probe runs only ~360 frames at
+    most and pulling the bbox out of WeChat would otherwise require
+    threading a parallel API through the multi-process sandbox IPC.
+    The trade-off: a probe-frame native crash will take down the
+    process.  In practice the probe operates on the middle of the
+    timeline (well past the lead-in) where camera-capture jitter is
+    lowest and crashes are correspondingly rare.
+    """
+    from .protocol import base45_decode, cobs_decode
+
+    frame_idx, frame = frame_data
+    if frame is None:
+        return (frame_idx, None, None, 0, False, 0.0, 0, 0)
+
+    h, w = frame.shape[:2]
+
+    detected = try_decode_qr_with_bbox(frame)
+    if detected is None:
+        return (frame_idx, None, None, 0, False, 0.0, h, w)
+    qr_text, bbox = detected
+
+    bbox_side = _bbox_side_pixels(bbox)
+    text_len = len(qr_text)
+
+    # Try the same decode strategies as the main worker so the probe
+    # both feeds the LT decoder *and* tags the encoding mode (which
+    # we need to look up the QR version → modules_per_side).
+    strategies = (
+        ("alpha", lambda d: _try_base45(d, base45_decode)),
+        ("byte",  _try_base64),
+        ("byte",  lambda d: _try_cobs(d, cobs_decode)),
+    )
+    for mode_tag, decode_fn in strategies:
+        candidate = decode_fn(qr_text)
+        if candidate is None:
+            continue
+        try:
+            header, _ = unpack(candidate)
+        except (ValueError, struct.error):
+            continue
+        is_alpha = (mode_tag == "alpha")
+        return (frame_idx, candidate, header.seed,
+                text_len, is_alpha, bbox_side, h, w)
+
+    # Detected but undecodable — still surface the bbox so we can
+    # estimate density even when the payload doesn't validate.
+    # Default to alphanumeric (the qrstream default).
+    return (frame_idx, None, None, text_len, True, bbox_side, h, w)
+
+
 def _try_base45(qr_data: str, base45_decode_fn) -> bytes | None:
     """Try to decode QR payload as a base45 (alphanumeric-mode) string."""
     try:
@@ -435,14 +636,16 @@ def _try_cobs(qr_data: str, cobs_decode_fn) -> bytes | None:
         return None
 
 
-def _read_frames(video_path, sample_rate, total_frames, start_frame=0):
+def _read_frames(video_path, sample_rate, total_frames, start_frame=0,
+                 max_detect_dim: int = _MAX_DETECT_DIM):
     """Generator that reads frames from video.
 
     Yields ``(frame_idx, frame_ndarray)`` tuples. Frames are
-    downscaled to ``_MAX_DETECT_DIM`` and passed as BGR uint8
-    ndarrays directly.  Worker threads share the main process
-    address space, so the ndarray is handed over as a zero-copy
-    reference.
+    downscaled to ``max_detect_dim`` (per-call so the adaptive
+    probe-derived value can override the legacy 1080 default) and
+    passed as BGR uint8 ndarrays directly.  Worker threads share
+    the main process address space, so the ndarray is handed over
+    as a zero-copy reference.
 
     Thread-safety note: ``cv2.VideoCapture.read()`` reuses an
     internal frame buffer — each call returns an ndarray that
@@ -464,18 +667,20 @@ def _read_frames(video_path, sample_rate, total_frames, start_frame=0):
         if not ret:
             break
         if (frame_idx - start_frame) % sample_rate == 0:
-            frame = _downscale_frame(frame)
+            frame = _downscale_frame(frame, max_dim=max_detect_dim)
             frame = np.ascontiguousarray(frame).copy()
             yield (frame_idx, frame)
         frame_idx += 1
     cap.release()
 
 
-def _read_frame_ranges(video_path, frame_ranges):
+def _read_frame_ranges(video_path, frame_ranges,
+                       max_detect_dim: int = _MAX_DETECT_DIM):
     """Generator that reads specific frame ranges from video.
 
     Args:
         frame_ranges: list of (start_frame, end_frame) tuples (inclusive).
+        max_detect_dim: per-call downscale cap (see :func:`_read_frames`).
 
     Yields ``(frame_idx, frame_ndarray)`` tuples for all frames
     within ranges. See ``_read_frames`` for the rationale behind
@@ -492,7 +697,7 @@ def _read_frame_ranges(video_path, frame_ranges):
             ret, frame = cap.read()
             if not ret:
                 break
-            frame = _downscale_frame(frame)
+            frame = _downscale_frame(frame, max_dim=max_detect_dim)
             frame = np.ascontiguousarray(frame).copy()
             yield (fidx, frame)
     cap.release()
@@ -593,9 +798,18 @@ def _probe_sample_rate(video_path: str, workers: int,
     the optimal sample_rate so that each QR code has enough detection
     chances to be reliably recovered.
 
+    Also derives a per-video adaptive downscale cap by inspecting the
+    QR's pixel size on the *original* probe frames (read at
+    ``_PROBE_MAX_DETECT_DIM``), so the main scan never throws away
+    QR-module pixels on high-resolution / high-version QR captures.
+
     Returns:
         (sample_rate, probe_results, probe_count, leading_frames_probed,
-         detect_rate, avg_repeat)
+         detect_rate, avg_repeat, adaptive_max_dim)
+
+        ``adaptive_max_dim`` is ``None`` when the probe gathered no
+        usable bbox observations; callers should fall back to
+        ``_MAX_DETECT_DIM`` in that case.
     """
     PROBE_WINDOW_SIZE = 120
     PROBE_GAP_RATIO = 0.15
@@ -605,12 +819,20 @@ def _probe_sample_rate(video_path: str, workers: int,
     cap.release()
 
     probe_ranges = _build_probe_ranges(total_frames, PROBE_WINDOW_SIZE, PROBE_GAP_RATIO)
-    probe_frames = list(_read_frame_ranges(video_path, probe_ranges))
+    # Read probe frames at the source resolution (clamped to
+    # _PROBE_MAX_DETECT_DIM, which is generous enough for 8K input
+    # but stops us from feeding *truly* outsized arrays through the
+    # detector).  We need the full pixel grid here so the bbox
+    # derived from WeChat reflects the actual module pitch.
+    probe_frames = list(_read_frame_ranges(
+        video_path, probe_ranges,
+        max_detect_dim=_PROBE_MAX_DETECT_DIM,
+    ))
     probe_count = len(probe_frames)
     leading_frames_probed = 0
 
     if not probe_frames:
-        return 1, [], 0, 0, 0.0, 1.0
+        return 1, [], 0, 0, 0.0, 1.0, None
 
     if verbose and len(probe_ranges) > 1:
         ranges_str = ", ".join(f"{start}-{end}" for start, end in probe_ranges)
@@ -619,21 +841,31 @@ def _probe_sample_rate(video_path: str, workers: int,
     # Detect QR codes in probe frames.
     # The probe is short, so force tqdm to refresh every update instead of
     # waiting for the default refresh interval and only rendering at the end.
-    probe_results = []
+    probe_raw = []
     pbar = tqdm(total=probe_count, desc="Probe",
                 unit="f", dynamic_ncols=True,
                 mininterval=0, miniters=1)
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_worker_detect_qr, fd): fd[0]
+        futures = {executor.submit(_worker_probe_detect, fd): fd[0]
                    for fd in probe_frames}
         for future in as_completed(futures):
             result = future.result()
-            probe_results.append(result)
+            probe_raw.append(result)
             pbar.update(1)
     pbar.close()
 
     # Sort by frame index
-    probe_results.sort(key=lambda x: x[0])
+    probe_raw.sort(key=lambda x: x[0])
+
+    # Strip the bbox / mode metadata before downstream code (which
+    # expects the historical (frame_idx, block_bytes, seed) tuple).
+    probe_results = [(t[0], t[1], t[2]) for t in probe_raw]
+
+    # ── Compute adaptive downscale target from bbox observations ──
+    adaptive_max_dim = _adaptive_max_dim_from_probe(probe_raw)
+    if verbose and adaptive_max_dim is not None:
+        print(f"Adaptive downscale: max_detect_dim={adaptive_max_dim}px "
+              f"(default would be {_MAX_DETECT_DIM}px)")
 
     window_stats = []
     for start, end in probe_ranges:
@@ -644,7 +876,8 @@ def _probe_sample_rate(video_path: str, workers: int,
     valid_windows = [entry for entry in window_stats if entry[2]['sample_rate'] is not None]
     if not valid_windows:
         print(f"Probe: {probe_count} frames, insufficient seed diversity → sample_rate=1")
-        return 1, probe_results, probe_count, leading_frames_probed, 0.0, 1.0
+        return (1, probe_results, probe_count, leading_frames_probed,
+                0.0, 1.0, adaptive_max_dim)
 
     limiting_start, limiting_end, limiting_stats = min(
         valid_windows,
@@ -668,7 +901,51 @@ def _probe_sample_rate(video_path: str, workers: int,
           f"detect_rate={detect_rate:.0%}, avg_repeat={avg_run:.1f} → sample_rate={auto_rate}")
 
     return (auto_rate, probe_results, probe_count,
-            leading_frames_probed, detect_rate, avg_run)
+            leading_frames_probed, detect_rate, avg_run,
+            adaptive_max_dim)
+
+
+def _adaptive_max_dim_from_probe(
+    probe_raw: list[tuple],
+) -> int | None:
+    """Aggregate probe-worker observations into a single max-detect-dim.
+
+    ``probe_raw`` items are
+    ``(frame_idx, block_bytes, seed, qr_text_len, is_alphanumeric,
+    bbox_side_px, frame_h, frame_w)`` tuples emitted by
+    :func:`_worker_probe_detect`.
+
+    Strategy: take the *median* of the per-frame max-dim suggestions
+    so single-frame outliers (motion blur warping the bbox, edge
+    captures) don't dominate.  Falling back to a sensible target
+    matters most when most frames agree the QR is dense.
+    """
+    suggestions: list[int] = []
+    for entry in probe_raw:
+        if len(entry) < 8:
+            continue
+        _, _, _, text_len, is_alpha, bbox_side, fh, fw = entry
+        if bbox_side <= 0.0 or text_len <= 0 or fh <= 0 or fw <= 0:
+            continue
+        modules = _infer_qr_modules(text_len, is_alpha)
+        if modules is None:
+            continue
+        # Reconstruct a synthetic 4-corner bbox that ``_compute_adaptive_max_dim``
+        # accepts, with the measured side length on both axes.
+        synth_bbox = np.array(
+            [[0.0, 0.0], [bbox_side, 0.0],
+             [bbox_side, bbox_side], [0.0, bbox_side]],
+            dtype=np.float32,
+        )
+        target = _compute_adaptive_max_dim(fh, fw, synth_bbox, modules)
+        if target is not None:
+            suggestions.append(target)
+
+    if not suggestions:
+        return None
+    suggestions.sort()
+    mid = suggestions[len(suggestions) // 2]
+    return int(mid)
 
 
 def extract_qr_from_video(video_path: str, sample_rate: int = 0,
@@ -756,10 +1033,12 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
         leading_frames_probed = 0
         detect_rate = 1.0
         avg_repeat = 1.0
+        adaptive_max_dim: int | None = None
 
         if sample_rate <= 0:
             (auto_rate, probe_results, probe_count,
-             leading_frames_probed, detect_rate, avg_repeat) = _probe_sample_rate(
+             leading_frames_probed, detect_rate, avg_repeat,
+             adaptive_max_dim) = _probe_sample_rate(
                 video_path, workers, verbose)
             sample_rate = auto_rate
             if verbose:
@@ -786,6 +1065,13 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
                 else:
                     no_detect_count += 1
 
+        # Fall back to the legacy global cap when no adaptive value
+        # was derived (e.g. caller passed sample_rate>0 → no probe;
+        # or probe failed to decode any QR).
+        active_max_dim = (
+            adaptive_max_dim if adaptive_max_dim is not None else _MAX_DETECT_DIM
+        )
+
         if verbose and probe_count > 0:
             pct = lt_decoder.progress * 100
             print(f"  After probe: {decoded_count} unique blocks, "
@@ -806,7 +1092,8 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
             last_reported = leading_frames_probed - 1
             for frame_data in _read_frames(
                     video_path, sample_rate, total_frames,
-                    start_frame=leading_frames_probed):
+                    start_frame=leading_frames_probed,
+                    max_detect_dim=active_max_dim):
                 skipped = frame_data[0] - last_reported - 1
                 if skipped > 0:
                     pbar.update(skipped)
@@ -850,7 +1137,8 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
             unique_blocks, decoded_count, no_detect_count = _targeted_recovery(
                 video_path, total_frames, src_fps, workers,
                 seen_seeds, unique_blocks, decoded_count, no_detect_count,
-                lt_decoder, avg_repeat, verbose, seed_frame_map)
+                lt_decoder, avg_repeat, verbose, seed_frame_map,
+                max_detect_dim=active_max_dim)
 
         return unique_blocks
     finally:
@@ -898,7 +1186,8 @@ def _estimate_frame_for_seed(seed: int, seed_frame_map: dict[int, int],
 def _targeted_recovery(video_path, total_frames, src_fps, workers,
                        seen_seeds, unique_blocks, decoded_count,
                        no_detect_count, lt_decoder, avg_repeat, verbose,
-                       seed_frame_map: dict[int, int] | None = None):
+                       seed_frame_map: dict[int, int] | None = None,
+                       max_detect_dim: int = _MAX_DETECT_DIM):
     """Targeted recovery: read only the video segments where missing seeds
     are expected to appear, scanning every frame in those segments.
 
@@ -954,7 +1243,8 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
     with ThreadPoolExecutor(max_workers=workers) as executor:
         decoded_count, no_detect_count, early_done = _stream_scan(
             executor,
-            _read_frame_ranges(video_path, frame_ranges),
+            _read_frame_ranges(video_path, frame_ranges,
+                               max_detect_dim=max_detect_dim),
             seen_seeds, unique_blocks,
             decoded_count, no_detect_count, lt_decoder, pbar, verbose,
             seed_frame_map, workers,

@@ -219,6 +219,26 @@ def try_decode_qr(frame: np.ndarray, qr_detector=None) -> str | None:
     raise UnicodeDecodeError; we swallow that and return None so
     the caller can try alternative detectors if it wants.
     """
+    result = try_decode_qr_with_bbox(frame, qr_detector)
+    if result is None:
+        return None
+    return result[0]
+
+
+def try_decode_qr_with_bbox(
+    frame: np.ndarray, qr_detector=None
+) -> tuple[str, np.ndarray] | None:
+    """Decode a QR code and return both the text and its bounding box.
+
+    Returns (decoded_str, bbox) on success or None on no-detect /
+    decode failure.  ``bbox`` is a ``(4, 2)`` ``float32`` ndarray of
+    QR corner coordinates (in the frame's pixel space) as returned by
+    WeChatQRCode.detectAndDecode().
+
+    The bbox lets callers measure the QR's pixel size on the source
+    frame, which is the basis for adaptive downscale decisions in
+    :mod:`qrstream.decoder`.
+    """
     # Lazy-init WeChatQRCode detector (per-thread, for ThreadPoolExecutor)
     detector = getattr(_thread_local, "detector", _UNINIT)
     if detector is _UNINIT:
@@ -228,15 +248,33 @@ def try_decode_qr(frame: np.ndarray, qr_detector=None) -> str | None:
             detector = None
         _thread_local.detector = detector
 
-    if detector is not None:
-        try:
-            results, _ = detector.detectAndDecode(frame)
-        except UnicodeDecodeError:
-            return None
-        if results:
-            for r in results:
-                if r:
-                    return r
+    if detector is None:
+        return None
+
+    try:
+        results, points = detector.detectAndDecode(frame)
+    except UnicodeDecodeError:
+        return None
+    if not results:
+        return None
+
+    # Pair each decoded result with its bbox (when available); WeChat
+    # returns ``points`` as a tuple of (4,2) ndarrays parallel to
+    # ``results``.  Some odd builds return an empty tuple even on
+    # successful detection — treat those as "no bbox" rather than
+    # erroring.
+    for idx, text in enumerate(results):
+        if not text:
+            continue
+        bbox = None
+        if points is not None and idx < len(points):
+            bbox = points[idx]
+        if bbox is None:
+            # No bbox available; synthesise a degenerate one so the
+            # caller can still distinguish "decoded" from "no-detect"
+            # but will skip module-density estimation.
+            return (text, np.zeros((4, 2), dtype=np.float32))
+        return (text, np.asarray(bbox, dtype=np.float32))
 
     return None
 
