@@ -336,11 +336,12 @@ _MAX_DETECT_DIM = 1080
 # downscaled to keep WeChat's preprocessing under control.
 _PROBE_MAX_DETECT_DIM = 4320
 
-# Adaptive-downscale tuning.  Empirically WeChatQRCode's detection
-# pipeline is comfortable when each QR module spans ≥ ~3 pixels after
-# any internal preprocessing; we target 3.5 to leave headroom for
-# motion blur and JPEG artefacts in real captures.
-_ADAPTIVE_TARGET_PPM = 3.5
+# Fallback target ppm when the multi-resolution sweep cannot learn a
+# per-video threshold (too few samples or plateau too low).  6.0 is
+# conservative — it achieves plateau hit rate on all tested real-world
+# captures (IMG_9432.MOV, v073 fixtures).  Synthetic / clean videos
+# will learn a lower threshold and downscale more aggressively.
+_ADAPTIVE_TARGET_PPM_FALLBACK = 6.0
 # Never downscale below this dimension regardless of the adaptive
 # computation; smaller frames invite WeChat false-negatives even on
 # clean captures.
@@ -349,6 +350,31 @@ _ADAPTIVE_MIN_DETECT_DIM = 720
 # single probe frame happens to contain a tiny QR (which would imply
 # the QR is unreadable anyway).
 _ADAPTIVE_MAX_DETECT_DIM = 4320
+
+# ── PPM-threshold learning parameters ────────────────────────────
+# Minimum number of (post_ppm, decoded?) samples before the sliding-
+# window fit is considered reliable.  Fewer samples → fall back to
+# _ADAPTIVE_TARGET_PPM_FALLBACK.
+_PPM_LEARN_MIN_SAMPLES = 30
+# Width of the sliding window used to estimate hit_rate(ppm).
+_PPM_LEARN_WINDOW_SIZE = 15
+# The inflection point is the last sliding window below the midpoint
+# of the transition band (floor → plateau), scaled by this fraction.
+# 0.5 corresponds to the S-curve's 50%-of-range crossing, which is
+# the most noise-robust estimator of the transition centre.  The
+# safety margin (_PPM_LEARN_SAFETY_MARGIN) then pads upward.
+_PPM_LEARN_PLATEAU_FRAC = 0.5
+# Safety margin applied to the learned ppm threshold to account for
+# frame-to-frame variation not captured by the probe sample.
+_PPM_LEARN_SAFETY_MARGIN = 1.15
+# Candidate downscale fractions for the multi-resolution sweep.
+# Each is applied to the probe-measured src_max to produce a candidate
+# max_dim.  The sweep runs from full-res (1.0) down to ~35% of the
+# source; this range typically spans the ppm cliff.
+_PPM_SWEEP_FRACTIONS = (1.0, 0.7, 0.5, 0.35)
+# Subsample ratio: use every Nth full-res probe frame for the sweep
+# to keep the cost manageable (~60 frames out of 360).
+_PPM_SWEEP_SUBSAMPLE = 6
 
 
 def _downscale_frame(
@@ -419,13 +445,14 @@ def _compute_adaptive_max_dim(
     frame_w: int,
     bbox: np.ndarray,
     modules_per_side: int | None,
+    target_ppm: float = _ADAPTIVE_TARGET_PPM_FALLBACK,
 ) -> int | None:
     """Compute a per-video downscale target preserving QR module density.
 
     Given a probe frame's resolution, the QR's bounding box on that
     frame, and (optionally) the inferred modules_per_side, return the
     largest-dimension cap we can apply during the main scan while
-    still leaving each module ≥ ``_ADAPTIVE_TARGET_PPM`` pixels.
+    still leaving each module ≥ ``target_ppm`` pixels.
 
     Returns ``None`` when the inputs are insufficient to compute a
     sensible value (caller should fall back to ``_MAX_DETECT_DIM``).
@@ -439,18 +466,146 @@ def _compute_adaptive_max_dim(
         return None
 
     pixels_per_module = qr_side / modules_per_side
-    if pixels_per_module <= _ADAPTIVE_TARGET_PPM:
+    if pixels_per_module <= target_ppm:
         # Source already at-or-below the target density; keep the
         # frame at its native resolution (clamped to the upper cap).
         return min(src_max, _ADAPTIVE_MAX_DETECT_DIM)
 
-    scale = _ADAPTIVE_TARGET_PPM / pixels_per_module
+    scale = target_ppm / pixels_per_module
     target = int(src_max * scale)
     target = max(_ADAPTIVE_MIN_DETECT_DIM, target)
     target = min(_ADAPTIVE_MAX_DETECT_DIM, target)
     # Never go *above* the source — there's no point upscaling.
     target = min(src_max, target)
     return target
+
+
+# ── PPM-threshold learning ───────────────────────────────────────
+
+def _learn_ppm_threshold(
+    samples: list[tuple[float, bool]],
+) -> float | None:
+    """Learn the minimum post-downscale ppm that sustains detection.
+
+    ``samples`` is a list of ``(post_ppm, decoded)`` observations
+    collected by :func:`_multi_res_sweep`.  The function fits a
+    hit-rate curve via a sliding window over ppm-sorted samples and
+    finds the inflection point — the smallest ppm at which the hit
+    rate reaches ``_PPM_LEARN_PLATEAU_FRAC`` of its global plateau.
+
+    Returns the learned ``target_ppm`` (with a
+    ``_PPM_LEARN_SAFETY_MARGIN`` applied), or ``None`` when the
+    input is too sparse or the plateau is too low (< 30% hit rate)
+    to be meaningful.
+    """
+    if len(samples) < _PPM_LEARN_MIN_SAMPLES:
+        return None
+
+    # Sort by ppm ascending.
+    sorted_s = sorted(samples, key=lambda x: x[0])
+    w = _PPM_LEARN_WINDOW_SIZE
+
+    if len(sorted_s) < w:
+        return None
+
+    # Build (median_ppm, hit_rate) per window position.
+    windows: list[tuple[float, float]] = []
+    for i in range(len(sorted_s) - w + 1):
+        chunk = sorted_s[i : i + w]
+        median_ppm = chunk[w // 2][0]
+        hit_rate = sum(1 for _, d in chunk if d) / w
+        windows.append((median_ppm, hit_rate))
+
+    if not windows:
+        return None
+
+    plateau = max(rate for _, rate in windows)
+    if plateau < 0.3:
+        # Detector is unreliable on this video even at full
+        # resolution — fall back to the caller's default.
+        return None
+
+    # Find the floor (hit rate at the low-ppm end).
+    floor = min(rate for _, rate in windows[:max(1, len(windows) // 4)])
+
+    # Midpoint of the transition band.
+    midpoint = floor + _PPM_LEARN_PLATEAU_FRAC * (plateau - floor)
+
+    # Walk the windows from left (low ppm) to right (high ppm).
+    # The inflection is the *last* window below the midpoint —
+    # the ppm just above it is where detection stabilises.
+    inflection_ppm = windows[0][0]
+    for ppm, rate in windows:
+        if rate < midpoint:
+            inflection_ppm = ppm
+        else:
+            break
+
+    learned = inflection_ppm * _PPM_LEARN_SAFETY_MARGIN
+    return round(learned, 2)
+
+
+def _multi_res_sweep(
+    probe_frames: list[tuple[int, np.ndarray]],
+    src_max: int,
+    qr_side_full: float,
+    modules: int,
+    workers: int,
+) -> list[tuple[float, bool]]:
+    """Re-detect a subset of probe frames at multiple resolutions.
+
+    For each candidate downscale fraction in ``_PPM_SWEEP_FRACTIONS``,
+    downscale the frames and run QR detection (through
+    ``_dispatch_detect`` — sandbox-safe).  For each frame × resolution
+    combination, record ``(post_ppm, detected)`` where ``post_ppm``
+    is the predicted ppm at the candidate resolution.
+
+    Returns the collected samples, sorted by ppm ascending.  The
+    caller feeds these into :func:`_learn_ppm_threshold`.
+    """
+    if not probe_frames or src_max <= 0 or modules <= 0 or qr_side_full <= 0:
+        return []
+
+    # K = qr_side_full / (src_max × modules)  — video-specific constant
+    K = qr_side_full / (src_max * modules)
+
+    # Subsample frames to keep sweep cost manageable.
+    subset = probe_frames[::_PPM_SWEEP_SUBSAMPLE]
+    if not subset:
+        return []
+
+    # Build work items: (frame_idx, downscaled_frame, candidate_ppm)
+    work_items: list[tuple[int, np.ndarray, float]] = []
+    for frac in _PPM_SWEEP_FRACTIONS:
+        cand_max = max(_ADAPTIVE_MIN_DETECT_DIM, int(src_max * frac))
+        cand_max = min(cand_max, src_max)
+        cand_ppm = cand_max * K
+        for frame_idx, frame in subset:
+            scaled = _downscale_frame(frame, max_dim=cand_max)
+            work_items.append((frame_idx, scaled, cand_ppm))
+
+    # Dispatch all detections through the sandbox-safe hook.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    samples: list[tuple[float, bool]] = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_ppm = {}
+        for frame_idx, scaled_frame, cand_ppm in work_items:
+            fut = executor.submit(
+                _dispatch_detect, frame_idx, scaled_frame
+            )
+            future_to_ppm[fut] = cand_ppm
+
+        for fut in as_completed(future_to_ppm):
+            ppm = future_to_ppm[fut]
+            try:
+                result = fut.result()
+                samples.append((ppm, result is not None))
+            except Exception:
+                samples.append((ppm, False))
+
+    samples.sort(key=lambda x: x[0])
+    return samples
 
 
 def _worker_detect_qr(frame_data):
@@ -875,11 +1030,33 @@ def _probe_sample_rate(video_path: str, workers: int,
     # expects the historical (frame_idx, block_bytes, seed) tuple).
     probe_results = [(t[0], t[1], t[2]) for t in probe_raw]
 
-    # ── Compute adaptive downscale target from bbox observations ──
-    adaptive_max_dim = _adaptive_max_dim_from_probe(probe_raw)
+    # ── Learn per-video ppm threshold via multi-resolution sweep ──
+    # Extract video-level constants from probe observations.
+    _probe_obs = _extract_probe_video_constants(probe_raw)
+    learned_ppm: float | None = None
+
+    if _probe_obs is not None:
+        src_max_obs, qr_side_obs, modules_obs = _probe_obs
+
+        sweep_samples = _multi_res_sweep(
+            probe_frames, src_max_obs, qr_side_obs, modules_obs, workers,
+        )
+        learned_ppm = _learn_ppm_threshold(sweep_samples)
+
+        if verbose:
+            if learned_ppm is not None:
+                print(f"PPM learning: {len(sweep_samples)} samples → "
+                      f"learned_target_ppm={learned_ppm:.2f}")
+            else:
+                print(f"PPM learning: {len(sweep_samples)} samples → "
+                      f"insufficient data, fallback={_ADAPTIVE_TARGET_PPM_FALLBACK}")
+
+    adaptive_max_dim = _adaptive_max_dim_from_probe(probe_raw, learned_ppm)
+    effective_ppm = learned_ppm if learned_ppm is not None else _ADAPTIVE_TARGET_PPM_FALLBACK
     if verbose and adaptive_max_dim is not None:
         print(f"Adaptive downscale: max_detect_dim={adaptive_max_dim}px "
-              f"(default would be {_MAX_DETECT_DIM}px)")
+              f"(target_ppm={effective_ppm:.2f}, "
+              f"default would be {_MAX_DETECT_DIM}px)")
 
     window_stats = []
     for start, end in probe_ranges:
@@ -919,8 +1096,43 @@ def _probe_sample_rate(video_path: str, workers: int,
             adaptive_max_dim)
 
 
+def _extract_probe_video_constants(
+    probe_raw: list[tuple],
+) -> tuple[int, float, int] | None:
+    """Extract (src_max, median_qr_side, modules) from probe observations.
+
+    Returns ``None`` when no usable bbox+modules observations exist.
+    """
+    obs: list[tuple[int, float, int]] = []
+    for entry in probe_raw:
+        if len(entry) < 8:
+            continue
+        _, _, _, text_len, is_alpha, bbox_side, fh, fw = entry
+        if bbox_side <= 0.0 or text_len <= 0 or fh <= 0 or fw <= 0:
+            continue
+        modules = _infer_qr_modules(text_len, is_alpha)
+        if modules is None:
+            continue
+        obs.append((max(fh, fw), bbox_side, modules))
+
+    if not obs:
+        return None
+
+    # Use median for stability.
+    src_maxs = sorted(o[0] for o in obs)
+    sides = sorted(o[1] for o in obs)
+    # modules should be identical across frames (same QR version).
+    modules_val = obs[0][2]
+    return (
+        src_maxs[len(src_maxs) // 2],
+        sides[len(sides) // 2],
+        modules_val,
+    )
+
+
 def _adaptive_max_dim_from_probe(
     probe_raw: list[tuple],
+    learned_ppm: float | None = None,
 ) -> int | None:
     """Aggregate probe-worker observations into a single max-detect-dim.
 
@@ -929,11 +1141,19 @@ def _adaptive_max_dim_from_probe(
     bbox_side_px, frame_h, frame_w)`` tuples emitted by
     :func:`_worker_probe_detect`.
 
+    When ``learned_ppm`` is provided (from :func:`_learn_ppm_threshold`),
+    it replaces the static fallback constant to set the target module
+    density.  Otherwise ``_ADAPTIVE_TARGET_PPM_FALLBACK`` is used.
+
     Strategy: take the *median* of the per-frame max-dim suggestions
     so single-frame outliers (motion blur warping the bbox, edge
-    captures) don't dominate.  Falling back to a sensible target
-    matters most when most frames agree the QR is dense.
+    captures) don't dominate.
     """
+    target_ppm = (
+        learned_ppm if learned_ppm is not None
+        else _ADAPTIVE_TARGET_PPM_FALLBACK
+    )
+
     suggestions: list[int] = []
     for entry in probe_raw:
         if len(entry) < 8:
@@ -944,14 +1164,14 @@ def _adaptive_max_dim_from_probe(
         modules = _infer_qr_modules(text_len, is_alpha)
         if modules is None:
             continue
-        # Reconstruct a synthetic 4-corner bbox that ``_compute_adaptive_max_dim``
-        # accepts, with the measured side length on both axes.
         synth_bbox = np.array(
             [[0.0, 0.0], [bbox_side, 0.0],
              [bbox_side, bbox_side], [0.0, bbox_side]],
             dtype=np.float32,
         )
-        target = _compute_adaptive_max_dim(fh, fw, synth_bbox, modules)
+        target = _compute_adaptive_max_dim(
+            fh, fw, synth_bbox, modules, target_ppm=target_ppm,
+        )
         if target is not None:
             suggestions.append(target)
 
