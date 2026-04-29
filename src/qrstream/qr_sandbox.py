@@ -58,19 +58,25 @@ _STOP = ("__STOP__",)
 def _helper_loop(in_q, out_q):
     """Subprocess entry point.
 
-    Drains ``in_q`` forever, calls ``try_decode_qr`` on each frame, and
-    pushes ``(frame_idx, decoded_or_None)`` onto ``out_q``.  Returns on
-    ``_STOP`` or on unrecoverable IPC errors; a silent return is enough
-    — the supervisor will observe the dead process via ``is_alive() ==
-    False`` and respawn.
+    Drains ``in_q`` forever, calls ``try_decode_qr_with_bbox`` on each
+    frame, and pushes ``(frame_idx, decoded_or_None, bbox_or_None)``
+    onto ``out_q``.  Returns on ``_STOP`` or on unrecoverable IPC
+    errors; a silent return is enough — the supervisor will observe
+    the dead process via ``is_alive() == False`` and respawn.
 
-    Any Python-level exception in ``try_decode_qr`` is caught and mapped
-    to ``None`` (no-detect), so callers uniformly treat any problem as
-    "this frame contributed nothing".
+    The ``bbox`` field is either ``None`` (no detection / degenerate
+    geometry) or an 8-tuple of floats — the QR's 4 corners flattened
+    in row-major order.  We send a plain Python tuple instead of the
+    raw ndarray to avoid pulling numpy into the pickle path on every
+    frame; the parent reconstructs the (4, 2) array when needed.
+
+    Any Python-level exception in ``try_decode_qr_with_bbox`` is
+    caught and mapped to ``(None, None)`` (no-detect), so callers
+    uniformly treat any problem as "this frame contributed nothing".
     """
     # Import inside the child so the main process isn't forced to pay
     # the cv2 / WeChat-detector import cost when the sandbox is disabled.
-    from .qr_utils import try_decode_qr
+    from .qr_utils import try_decode_qr_with_bbox
 
     while True:
         try:
@@ -87,18 +93,28 @@ def _helper_loop(in_q, out_q):
             # Malformed payload; drop silently and continue.
             continue
 
+        decoded: Optional[str] = None
+        bbox_tuple: Optional[tuple] = None
         try:
             frame = np.frombuffer(
                 raw, dtype=np.dtype(dtype_str)
             ).reshape(shape)
             if not frame.flags.writeable:
                 frame = frame.copy()
-            decoded = try_decode_qr(frame)
+            result = try_decode_qr_with_bbox(frame)
+            if result is not None:
+                decoded, bbox = result
+                if bbox is not None and bbox.shape == (4, 2):
+                    # Flatten to a plain Python tuple of 8 floats —
+                    # cheap to pickle and immune to numpy version
+                    # drift across subprocess boundaries.
+                    bbox_tuple = tuple(float(v) for v in bbox.flatten())
         except Exception:
             decoded = None
+            bbox_tuple = None
 
         try:
-            out_q.put((frame_idx, decoded))
+            out_q.put((frame_idx, decoded, bbox_tuple))
         except (BrokenPipeError, OSError):
             return
 
@@ -290,10 +306,23 @@ class SandboxedDetector:
                 return
 
             try:
-                frame_key, payload = item
+                # Helpers always reply with the 3-tuple
+                # (frame_key, decoded_text_or_none, bbox_tuple_or_none).
+                # Be defensive about a legacy 2-tuple in case a stale
+                # helper somehow predates the schema bump (in practice
+                # impossible since helper + parent ship together).
+                if len(item) == 3:
+                    frame_key, text_payload, bbox_payload = item
+                elif len(item) == 2:
+                    frame_key, text_payload = item
+                    bbox_payload = None
+                else:
+                    raise ValueError("malformed reply length")
             except Exception:
                 # Malformed reply; ignore.
                 continue
+
+            payload = (text_payload, bbox_payload)
 
             with self._lock:
                 waiter = self._results.pop(frame_key, None)
@@ -323,6 +352,51 @@ class SandboxedDetector:
         been closed or the crash-burst abort threshold has tripped.
         Raises ``TimeoutError`` when the input queue is saturated long
         enough that a put times out (back-pressure signal).
+        """
+        result = self._dispatch(frame_idx, frame, timeout=timeout)
+        if result is None:
+            return None
+        text, _bbox = result
+        return text
+
+    def detect_with_bbox(
+        self,
+        frame_idx: int,
+        frame: np.ndarray,
+        timeout: float = 30.0,
+    ) -> Optional[tuple]:
+        """Decode a QR and return ``(text, bbox_ndarray)`` or ``None``.
+
+        Same semantics as :meth:`detect` for ``frame_idx`` /
+        ``timeout`` / error modes.  ``bbox_ndarray`` is a ``(4, 2)``
+        ``float32`` array reconstructed from the helper's flattened
+        8-tuple, or ``None`` when the helper saw no bbox geometry
+        (e.g. a build of WeChatQRCode that returns an empty points
+        tuple even on success).
+        """
+        result = self._dispatch(frame_idx, frame, timeout=timeout)
+        if result is None:
+            return None
+        text, bbox_tuple = result
+        if text is None:
+            return None
+        bbox_arr = None
+        if bbox_tuple is not None and len(bbox_tuple) == 8:
+            bbox_arr = np.asarray(bbox_tuple, dtype=np.float32).reshape(4, 2)
+        return (text, bbox_arr)
+
+    def _dispatch(
+        self,
+        frame_idx: int,
+        frame: np.ndarray,
+        timeout: float = 30.0,
+    ) -> Optional[tuple]:
+        """Submit ``frame`` to the helper pool and await the reply.
+
+        Returns ``(text_or_none, bbox_tuple_or_none)`` on a successful
+        round trip, or ``None`` when the helper crash / waiter timeout
+        path was taken.  Raises the same exceptions as the public
+        ``detect`` methods.
         """
         del frame_idx  # informational only
 
