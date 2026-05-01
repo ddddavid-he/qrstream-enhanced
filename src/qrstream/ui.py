@@ -668,35 +668,34 @@ class LogReporter:
 
 if _RICH_AVAILABLE:
 
-    class _FpsColumn(ProgressColumn):
-        """Show ``X.Y fps`` stored in task.fields['fps'] (falls back to 0)."""
-
-        def render(self, task):  # type: ignore[override]
-            fps = task.fields.get("fps") if task.fields else None
-            if fps is None:
-                return Text("  -- fps", style="dim")
-            return Text(f"{fps:5.1f} fps", style="bright_magenta")
-
-
     class _HitColumn(ProgressColumn):
-        """Show sliding-window hit % from task.fields['hit']."""
+        """Show sliding-window hit % in parentheses: ``(hit 93%)``."""
 
         def render(self, task):  # type: ignore[override]
             hit = task.fields.get("hit") if task.fields else None
             if hit is None:
-                return Text("       ", style="dim")
-            return Text(f"hit {hit * 100:3.0f}%", style="bright_cyan")
+                return Text("", style="dim")
+            return Text(f"(hit {hit * 100:.0f}%)", style="bright_cyan")
 
 
-    class _EtaColumn(TimeRemainingColumn):
+    class _EncodeStatsColumn(ProgressColumn):
+        """Show fps + ETA in parentheses: ``(61.0 fps  ETA 00:05)``."""
+
         def render(self, task):  # type: ignore[override]
-            eta_override = task.fields.get("eta_override") if task.fields else None
-            if eta_override is None:
-                return super().render(task)
-            return Text(f"ETA {_fmt_duration(eta_override)}",
-                        style="bright_yellow")
+            fields = task.fields or {}
+            fps = fields.get("fps")
+            eta_override = fields.get("eta_override")
+            if fps is None and eta_override is None:
+                return Text("", style="dim")
+            parts: list[str] = []
+            if fps is not None:
+                parts.append(f"{fps:.1f} fps")
+            if eta_override is not None:
+                parts.append(f"ETA {_fmt_duration(eta_override)}")
+            return Text(f"({' '.join(parts)})", style="bright_magenta")
+
 else:  # pragma: no cover — exercised only when rich is unavailable
-    _FpsColumn = _HitColumn = _EtaColumn = None  # type: ignore[assignment]
+    _HitColumn = _EncodeStatsColumn = None  # type: ignore[assignment]
 
 
 class RichReporter:
@@ -985,15 +984,15 @@ class RichReporter:
             f"overhead=[bold]{overhead:.1f}x[/bold]"
         )
         self._progress = Progress(
-            TextColumn("[bold green]Encode[/bold green] "),
+            TextColumn(
+                f"[bold green]{_pad_status_label('Encode')}[/bold green]"
+            ),
             BarColumn(bar_width=None, complete_style="green",
                       finished_style="bright_green",
                       pulse_style="bright_green"),
             TaskProgressColumn(),
-            TextColumn("  "),
-            _FpsColumn(),
-            TextColumn("  "),
-            _EtaColumn(),
+            TextColumn(" "),
+            _EncodeStatsColumn(),
             console=self._console,
             transient=False,
         )
