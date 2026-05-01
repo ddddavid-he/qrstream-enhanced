@@ -120,6 +120,21 @@ class TestCli:
         args = parser.parse_args(['encode', 'input.bin', '-o', 'out.mp4', '-v'])
         assert args.verbose is True
 
+    def test_output_mode_defaults_to_auto(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            ['decode', 'video.mp4', '-o', 'out.bin'])
+        assert args.output_mode == 'auto'
+        assert args.verbose is False
+
+    def test_output_mode_accepts_all_modes(self):
+        parser = build_parser()
+        for mode in ('auto', 'interactive', 'log', 'quiet', 'verbose'):
+            args = parser.parse_args(
+                ['encode', 'input.bin', '-o', 'out.mp4',
+                 '--output-mode', mode])
+            assert args.output_mode == mode
+
     def test_encode_border_default_uses_standard_quiet_zone(self):
         parser = build_parser()
         args = parser.parse_args(['encode', 'input.bin', '-o', 'out.mp4'])

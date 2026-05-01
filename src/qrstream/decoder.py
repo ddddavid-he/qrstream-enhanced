@@ -8,6 +8,7 @@ Features adaptive sample rate and targeted frame recovery.
 import io
 import os
 import struct
+import time
 import zlib
 import base64
 from collections import namedtuple
@@ -24,13 +25,13 @@ from concurrent.futures import (
 
 import cv2
 import numpy as np
-from tqdm import tqdm
 
 from .lt_codec import PRNG, BlockGraph, DEFAULT_C, DEFAULT_DELTA
 from .protocol import unpack
 from .qr_utils import try_decode_qr, try_decode_qr_with_bbox
 from . import qr_sandbox
 from . import protocol as _protocol_mod
+from .ui import ProgressReporter, QuietReporter, SlidingHitWindow
 
 
 # Capacity tables for ``_infer_qr_modules``, keyed by version,
@@ -61,7 +62,6 @@ ProbeObservation = namedtuple("ProbeObservation", [
     "bbox_cy",
 ])
 
-_PROGRESS_BAR_THRESHOLD = 512
 
 # ── crash-isolation dispatch hook ────────────────────────────────
 # Worker functions call ``_dispatch_detect`` instead of
@@ -291,46 +291,35 @@ class LTDecoder:
         return raw_data
 
     def bytes_dump_to_file(self, output_path: str, show_progress: bool = False) -> int:
-        """Write the reconstructed output directly to a file."""
-        written = 0
-        pbar = None
-        if show_progress:
-            pbar = tqdm(total=self.K, desc="Write",
-                        unit="blk", dynamic_ncols=True,
-                        mininterval=0.1)
+        """Write the reconstructed output directly to a file.
 
-        try:
-            with open(output_path, 'wb') as f:
-                if self.compressed:
-                    decompressor = zlib.decompressobj()
-                    try:
-                        for chunk in self._iter_recovered_chunks():
-                            data = decompressor.decompress(chunk)
-                            if data:
-                                f.write(data)
-                                written += len(data)
-                            if pbar is not None:
-                                pbar.update(1)
-                                pbar.set_postfix(bytes=written)
-                        tail = decompressor.flush()
-                    except zlib.error as e:
-                        raise RuntimeError(
-                            f"Decompression failed: {e}. Decoded payload may be corrupted.") from e
-                    if tail:
-                        f.write(tail)
-                        written += len(tail)
-                        if pbar is not None:
-                            pbar.set_postfix(bytes=written)
-                else:
+        ``show_progress`` is kept for backward compatibility but is
+        ignored — the Save phase is instantaneous in practice and the
+        new UI layer surfaces it via ``reporter.save_done`` emitted
+        by the caller.
+        """
+        del show_progress  # unused; signature preserved for API compat
+        written = 0
+        with open(output_path, 'wb') as f:
+            if self.compressed:
+                decompressor = zlib.decompressobj()
+                try:
                     for chunk in self._iter_recovered_chunks():
-                        f.write(chunk)
-                        written += len(chunk)
-                        if pbar is not None:
-                            pbar.update(1)
-                            pbar.set_postfix(bytes=written)
-        finally:
-            if pbar is not None:
-                pbar.close()
+                        data = decompressor.decompress(chunk)
+                        if data:
+                            f.write(data)
+                            written += len(data)
+                    tail = decompressor.flush()
+                except zlib.error as e:
+                    raise RuntimeError(
+                        f"Decompression failed: {e}. Decoded payload may be corrupted.") from e
+                if tail:
+                    f.write(tail)
+                    written += len(tail)
+            else:
+                for chunk in self._iter_recovered_chunks():
+                    f.write(chunk)
+                    written += len(chunk)
         return written
 
 
@@ -1130,7 +1119,8 @@ def _analyze_probe_window(window_results, total_frames: int = 0,
 
 
 def _probe_sample_rate(video_path: str, workers: int,
-                       verbose: bool = False):
+                       verbose: bool = False,
+                       reporter: ProgressReporter | None = None):
     """Probe multiple windows of a video to determine optimal sample_rate.
 
     Measures both repeat count (R) and detection rate (p), then computes
@@ -1152,6 +1142,9 @@ def _probe_sample_rate(video_path: str, workers: int,
         ``crop_box`` is ``None`` when the QR centre is unstable or
         insufficient data is available.
     """
+    if reporter is None:
+        reporter = QuietReporter()
+
     cap = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
@@ -1176,23 +1169,16 @@ def _probe_sample_rate(video_path: str, workers: int,
 
     if verbose and len(probe_ranges) > 1:
         ranges_str = ", ".join(f"{start}-{end}" for start, end in probe_ranges)
-        print(f"Probe windows: {ranges_str}")
+        reporter.debug(f"Probe windows: {ranges_str}")
 
     # Detect QR codes in probe frames.
-    # The probe is short, so force tqdm to refresh every update instead of
-    # waiting for the default refresh interval and only rendering at the end.
     probe_raw = []
-    pbar = tqdm(total=probe_count, desc="Probe",
-                unit="f", dynamic_ncols=True,
-                mininterval=0, miniters=1)
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_worker_probe_detect, fd): fd[0]
                    for fd in probe_frames}
         for future in as_completed(futures):
             result = future.result()
             probe_raw.append(result)
-            pbar.update(1)
-    pbar.close()
 
     # Sort by frame index
     probe_raw.sort(key=lambda x: x.frame_idx)
@@ -1218,18 +1204,25 @@ def _probe_sample_rate(video_path: str, workers: int,
 
         if verbose:
             if learned_ppm is not None:
-                print(f"PPM learning: {len(sweep_samples)} samples → "
-                      f"learned_target_ppm={learned_ppm:.2f}")
+                reporter.debug(
+                    f"PPM learning: {len(sweep_samples)} samples → "
+                    f"learned_target_ppm={learned_ppm:.2f}"
+                )
             else:
-                print(f"PPM learning: {len(sweep_samples)} samples → "
-                      f"insufficient data, fallback={_ADAPTIVE_TARGET_PPM_FALLBACK}")
+                reporter.debug(
+                    f"PPM learning: {len(sweep_samples)} samples → "
+                    f"insufficient data, "
+                    f"fallback={_ADAPTIVE_TARGET_PPM_FALLBACK}"
+                )
 
     adaptive_max_dim = _adaptive_max_dim_from_probe(probe_raw, learned_ppm)
     effective_ppm = learned_ppm if learned_ppm is not None else _ADAPTIVE_TARGET_PPM_FALLBACK
     if verbose and adaptive_max_dim is not None:
-        print(f"Adaptive downscale: max_detect_dim={adaptive_max_dim}px "
-              f"(target_ppm={effective_ppm:.2f}, "
-              f"default would be {_MAX_DETECT_DIM}px)")
+        reporter.debug(
+            f"Adaptive downscale: max_detect_dim={adaptive_max_dim}px "
+            f"(target_ppm={effective_ppm:.2f}, "
+            f"default would be {_MAX_DETECT_DIM}px)"
+        )
 
     # ── Derive crop ROI from bbox centre observations ─────────
     # Use the probe-measured frame dimensions (from the first
@@ -1261,12 +1254,16 @@ def _probe_sample_rate(video_path: str, workers: int,
                 (_sides[_q3] - _sides[_q1]) / _med_side if _med_side else 0,
             ) if len(_cxs) >= _CROP_MIN_OBSERVATIONS else 0.0
             _margin = _crop_margin_for_jitter(_niqr)
-            print(f"Crop ROI: ({x0},{y0})-({x1},{y1}) "
-                  f"= {x1-x0}x{y1-y0}px "
-                  f"(frame {probe_fw}x{probe_fh}, "
-                  f"margin={_margin:.2f}, iqr={_niqr:.3f})")
+            reporter.debug(
+                f"Crop ROI: ({x0},{y0})-({x1},{y1}) "
+                f"= {x1-x0}x{y1-y0}px "
+                f"(frame {probe_fw}x{probe_fh}, "
+                f"margin={_margin:.2f}, iqr={_niqr:.3f})"
+            )
         elif probe_fh > 0:
-            print(f"Crop ROI: disabled (unstable QR position or insufficient data)")
+            reporter.debug(
+                "Crop ROI: disabled (unstable QR position or insufficient data)"
+            )
 
     # ── Extract K estimate from probe-decoded blocks ────────────
     # The first successfully decoded block's header contains
@@ -1293,7 +1290,10 @@ def _probe_sample_rate(video_path: str, workers: int,
 
     valid_windows = [entry for entry in window_stats if entry[2]['sample_rate'] is not None]
     if not valid_windows:
-        print(f"Probe: {probe_count} frames, insufficient seed diversity → sample_rate=1")
+        reporter.debug(
+            f"Probe: {probe_count} frames, insufficient seed diversity "
+            f"→ sample_rate=1"
+        )
         return (1, probe_results, probe_count, leading_frames_probed,
                 0.0, 1.0, adaptive_max_dim, crop_box)
 
@@ -1308,15 +1308,19 @@ def _probe_sample_rate(video_path: str, workers: int,
     if verbose:
         for start, end, stats in window_stats:
             rate_str = stats['sample_rate'] if stats['sample_rate'] is not None else 'n/a'
-            print(
-                f"  Probe window {start}-{end}: detect_rate={stats['detect_rate']:.0%}, "
-                f"avg_repeat={stats['avg_repeat']:.1f}, seeds={stats['distinct_seed_count']}, "
+            reporter.debug(
+                f"  Probe window {start}-{end}: "
+                f"detect_rate={stats['detect_rate']:.0%}, "
+                f"avg_repeat={stats['avg_repeat']:.1f}, "
+                f"seeds={stats['distinct_seed_count']}, "
                 f"sample_rate={rate_str}"
             )
-
-    print(f"Probe: {probe_count} frames across {len(probe_ranges)} windows, "
-          f"limiting_window={limiting_start}-{limiting_end}, "
-          f"detect_rate={detect_rate:.0%}, avg_repeat={avg_run:.1f} → sample_rate={auto_rate}")
+        reporter.debug(
+            f"Probe: {probe_count} frames across {len(probe_ranges)} "
+            f"windows, limiting_window={limiting_start}-{limiting_end}, "
+            f"detect_rate={detect_rate:.0%}, avg_repeat={avg_run:.1f} "
+            f"→ sample_rate={auto_rate}"
+        )
 
     return (auto_rate, probe_results, probe_count,
             leading_frames_probed, detect_rate, avg_run,
@@ -1413,7 +1417,8 @@ def _adaptive_max_dim_from_probe(
 
 def extract_qr_from_video(video_path: str, sample_rate: int = 0,
                            verbose: bool = False, workers: int | None = None,
-                           *, detect_isolation: str = "on"):
+                           *, detect_isolation: str = "on",
+                           reporter: ProgressReporter | None = None):
     """Extract unique QR code payloads from a video file.
 
     Uses an LT decoder internally for early termination: stops scanning
@@ -1425,7 +1430,8 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
 
     Args:
         sample_rate: Process every Nth frame. 0 = auto-detect (default).
-        verbose: Print progress details.
+        verbose: Emit verbose diagnostic details (routed through
+            ``reporter.debug``).
         workers: Number of parallel worker processes.
         detect_isolation: ``'on'`` (default) runs QR detection in a pool
             of subprocess helpers so a native crash in
@@ -1434,11 +1440,18 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
             instead of killing the decode process. ``'off'`` runs
             detection in-process (slightly faster but unsafe on
             camera-captured inputs).
+        reporter: Optional :class:`qrstream.ui.ProgressReporter`.  When
+            ``None`` a :class:`QuietReporter` is used (no progress
+            output) so the function stays side-effect-free for
+            programmatic callers.
 
     Returns a list of raw block byte strings.
     """
     global _dispatch_detect, _dispatch_detect_with_bbox
     _validate_isolation_mode(detect_isolation)
+
+    if reporter is None:
+        reporter = QuietReporter()
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -1456,8 +1469,10 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
         workers = os.cpu_count() or 1
 
     if verbose:
-        print(f"Video: {total_frames} frames, {src_fps:.1f} FPS, {duration:.1f}s")
-        print(f"Using {workers} worker processes")
+        reporter.debug(
+            f"Video: {total_frames} frames, {src_fps:.1f} FPS, {duration:.1f}s"
+        )
+        reporter.debug(f"Using {workers} worker processes")
 
     sandbox = None
     original_dispatch = _dispatch_detect
@@ -1474,13 +1489,13 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
             _dispatch_detect = sandbox.detect
             _dispatch_detect_with_bbox = sandbox.detect_with_bbox
             if verbose:
-                print(
+                reporter.debug(
                     "Using sandboxed detector: "
                     f"helpers={sandbox_pool_size}, "
                     f"crash_abort_threshold={crash_abort_threshold}"
                 )
         except Exception as exc:
-            print(
+            reporter.warn(
                 f"[sandbox] failed to initialise ({exc}); "
                 f"falling back to in-process detection."
             )
@@ -1505,13 +1520,37 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
         crop_box: tuple[int, int, int, int] | None = None
 
         if sample_rate <= 0:
+            reporter.probe_start()
             (auto_rate, probe_results, probe_count,
              leading_frames_probed, detect_rate, avg_repeat,
              adaptive_max_dim, crop_box) = _probe_sample_rate(
-                video_path, workers, verbose)
+                video_path, workers, verbose, reporter=reporter)
             sample_rate = auto_rate
+
+            # crop_reduction = 1 - crop_area / frame_area
+            crop_reduction: float | None
+            if crop_box is not None and src_w > 0 and src_h > 0:
+                y0, y1, x0, x1 = crop_box
+                crop_area = max(0, (y1 - y0)) * max(0, (x1 - x0))
+                frame_area = src_h * src_w
+                if frame_area > 0:
+                    crop_reduction = max(
+                        0.0, 1.0 - (crop_area / frame_area)
+                    )
+                else:
+                    crop_reduction = None
+            else:
+                crop_reduction = None
+
+            reporter.probe_done(
+                sample=sample_rate,
+                detect=detect_rate,
+                repeat=avg_repeat,
+                crop_reduction=crop_reduction,
+            )
+
             if verbose:
-                print(f"  Using auto sample_rate={sample_rate}")
+                reporter.debug(f"Using auto sample_rate={sample_rate}")
 
             # Feed probe results into decoder
             for fidx, block_bytes, seed in probe_results:
@@ -1525,9 +1564,12 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
                         try:
                             done, _ = lt_decoder.decode_bytes(block_bytes, skip_crc=True)
                             if done:
-                                print(f"Extraction done (during probe): "
-                                      f"{probe_count} sampled frames, "
-                                      f"{decoded_count} unique blocks")
+                                if verbose:
+                                    reporter.debug(
+                                        f"Extraction done (during probe): "
+                                        f"{probe_count} sampled frames, "
+                                        f"{decoded_count} unique blocks"
+                                    )
                                 return unique_blocks
                         except (ValueError, struct.error):
                             pass
@@ -1543,20 +1585,54 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
 
         if verbose and probe_count > 0:
             pct = lt_decoder.progress * 100
-            print(f"  After probe: {decoded_count} unique blocks, "
-                  f"progress={pct:.1f}%")
+            reporter.debug(
+                f"After probe: {decoded_count} unique blocks, "
+                f"progress={pct:.1f}%"
+            )
 
         # ── Main scan (remaining frames) ─────────────────────────
-        pbar = tqdm(total=total_frames, desc="Scan",
-                    unit="f", dynamic_ncols=True)
+        reporter.scan_start(total_frames=total_frames)
+        hit_window = SlidingHitWindow(capacity=128)
+        # Track how much "video progress" has accrued from skipped +
+        # processed frames.  The reporter receives percentage updates.
+        scan_state = {
+            "processed_frames": leading_frames_probed,
+            "last_emit_ts": 0.0,
+        }
+        _EMIT_INTERVAL = 0.1  # seconds — rate-limit Rich Live churn
 
-        if leading_frames_probed > 0:
-            pbar.update(leading_frames_probed)
+        def _scan_update(fidx: int, hit: bool) -> None:
+            # Account for this processed frame + any frames skipped
+            # since the last reported position.  ``fidx`` is monotonic
+            # in practice (main scan reads frames in order).
+            prev = scan_state["processed_frames"]
+            if fidx + 1 > prev:
+                scan_state["processed_frames"] = fidx + 1
+            hit_window.push(hit)
+            now = time.monotonic()
+            if now - scan_state["last_emit_ts"] < _EMIT_INTERVAL:
+                return
+            scan_state["last_emit_ts"] = now
+            video_pct = (
+                scan_state["processed_frames"] / total_frames * 100
+                if total_frames > 0 else 100.0
+            )
+            file_pct = lt_decoder.progress * 100
+            recovered = (
+                lt_decoder.block_graph.eliminated
+                if lt_decoder.initialized else {}
+            )
+            k = lt_decoder.K if lt_decoder.initialized else None
+            reporter.scan_update(
+                video_pct=video_pct,
+                hit_window=hit_window.ratio,
+                file_pct=file_pct,
+                recovered=recovered,
+                k=k,
+            )
 
         early_done = False
 
-        # Wrap _read_frames so pbar updates reflect the current video
-        # position even when frames are skipped by sample_rate.
         def _tracking_frame_iter():
             last_reported = leading_frames_probed - 1
             for frame_data in _read_frames(
@@ -1565,36 +1641,53 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
                     max_detect_dim=active_max_dim,
                     crop_box=crop_box):
                 skipped = frame_data[0] - last_reported - 1
-                if skipped > 0:
-                    pbar.update(skipped)
+                if skipped > 0 and frame_data[0] > scan_state["processed_frames"]:
+                    scan_state["processed_frames"] = frame_data[0]
                 last_reported = frame_data[0]
                 yield frame_data
-            # After iteration, advance pbar for any frames past the last
-            # sampled one (they were read but not yielded).
-            remaining = total_frames - (last_reported + 1)
-            if remaining > 0:
-                pbar.update(remaining)
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             decoded_count, no_detect_count, early_done, detect_count = _stream_scan(
                 executor, _tracking_frame_iter(),
                 seen_seeds, unique_blocks,
-                decoded_count, no_detect_count, lt_decoder, pbar, verbose,
-                seed_frame_map, workers)
+                decoded_count, no_detect_count, lt_decoder,
+                _scan_update, verbose, seed_frame_map, workers,
+                reporter=reporter)
             if early_done and verbose:
-                tqdm.write(
-                    "  Early termination: all source blocks recovered!")
+                reporter.debug(
+                    "Early termination: all source blocks recovered!"
+                )
 
-        pbar.close()
+        # Final full-bar tick before closing scan.
+        try:
+            reporter.scan_update(
+                video_pct=100.0,
+                hit_window=hit_window.ratio,
+                file_pct=lt_decoder.progress * 100,
+                recovered=(
+                    lt_decoder.block_graph.eliminated
+                    if lt_decoder.initialized else {}
+                ),
+                k=lt_decoder.K if lt_decoder.initialized else None,
+            )
+        except Exception:
+            pass
+        reporter.scan_done()
 
         total_sampled = detect_count + no_detect_count
-        hit_rate_str = f"{detect_count * 100 // total_sampled}%" if total_sampled else "n/a"
-        status = " (early termination)" if early_done else ""
-        print(f"Extraction done{status}: {total_frames} frames "
-              f"({total_sampled} sampled, sample_rate={sample_rate}, "
-              f"hit={hit_rate_str}), "
-              f"{decoded_count} unique blocks, "
-              f"{no_detect_count} missed")
+        if verbose:
+            hit_rate_str = (
+                f"{detect_count * 100 // total_sampled}%"
+                if total_sampled else "n/a"
+            )
+            status = " (early termination)" if early_done else ""
+            reporter.debug(
+                f"Extraction done{status}: {total_frames} frames "
+                f"({total_sampled} sampled, sample_rate={sample_rate}, "
+                f"hit={hit_rate_str}), "
+                f"{decoded_count} unique blocks, "
+                f"{no_detect_count} missed"
+            )
 
         # ── Targeted recovery for missing seeds ───────────────────
         # Triggered whenever the main scan finished without LT converging,
@@ -1612,7 +1705,8 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
                 lt_decoder, avg_repeat, verbose, seed_frame_map,
                 max_detect_dim=active_max_dim,
                 src_max=src_max,
-                crop_box=crop_box)
+                crop_box=crop_box,
+                reporter=reporter)
 
         return unique_blocks
     finally:
@@ -1622,8 +1716,7 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
             crashes = sandbox.crash_count
             sandbox.close()
             if crashes > 0:
-                # Unconditional print (not gated on --verbose).
-                print(
+                reporter.warn(
                     f"[sandbox] detector crashed {crashes} time(s) "
                     f"during decode; affected frames treated as "
                     f"no-detect. Decoding proceeded normally."
@@ -1664,7 +1757,8 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
                        seed_frame_map: dict[int, int] | None = None,
                        max_detect_dim: int = _MAX_DETECT_DIM,
                        src_max: int | None = None,
-                       crop_box: tuple[int, int, int, int] | None = None):
+                       crop_box: tuple[int, int, int, int] | None = None,
+                       reporter: ProgressReporter | None = None):
     """Multi-level recovery: escalate resolution on missing-seed frames.
 
     Runs up to three recovery levels with increasing ``max_detect_dim``
@@ -1683,6 +1777,8 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
     build a linear model for estimating missing seed positions. Falls back
     to naive linear estimation when insufficient observations are available.
     """
+    if reporter is None:
+        reporter = QuietReporter()
     if seed_frame_map is None:
         seed_frame_map = {}
 
@@ -1729,9 +1825,14 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
     if src_max > l2_dim:
         levels.append((src_max, _worker_detect_qr, "L3-full", None))
 
-    print(f"Targeted recovery: {len(missing_seeds)} missing seeds, "
-          f"{target_frames} frames in {len(frame_ranges)} segments, "
-          f"{len(levels)} escalation level(s)")
+    if verbose:
+        reporter.debug(
+            f"Targeted recovery: {len(missing_seeds)} missing seeds, "
+            f"{target_frames} frames in {len(frame_ranges)} segments, "
+            f"{len(levels)} escalation level(s)"
+        )
+
+    _EMIT_INTERVAL = 0.1
 
     for level_dim, worker_fn, level_name, level_crop in levels:
         if lt_decoder.done:
@@ -1754,38 +1855,100 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
         level_frames = sum(e - s + 1 for s, e in level_ranges)
 
         if verbose:
-            print(f"  {level_name}: max_dim={level_dim}, "
-                  f"{len(current_missing)} missing seeds, "
-                  f"{level_frames} frames")
+            reporter.debug(
+                f"{level_name}: max_dim={level_dim}, "
+                f"{len(current_missing)} missing seeds, "
+                f"{level_frames} frames"
+            )
 
-        pbar = tqdm(total=level_frames, desc=f"Recover({level_name})",
-                    unit="f", dynamic_ncols=True,
-                    mininterval=0, miniters=1,
-                    bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{percentage:3.0f}%]")
+        reporter.recover_start(
+            level=level_name,
+            segments=level_ranges,
+            total_frames=total_frames,
+        )
+        hit_window = SlidingHitWindow(capacity=128)
+        rec_state = {
+            "processed": 0,
+            "last_emit_ts": 0.0,
+            "current_range": level_ranges[0] if level_ranges else None,
+        }
 
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            decoded_count, no_detect_count, early_done, _ = _stream_scan(
-                executor,
-                _read_frame_ranges(video_path, level_ranges,
-                                   max_detect_dim=level_dim,
-                                   crop_box=level_crop),
-                seen_seeds, unique_blocks,
-                decoded_count, no_detect_count, lt_decoder, pbar, verbose,
-                seed_frame_map, workers,
-                worker_fn=worker_fn)
-            if early_done and verbose:
-                tqdm.write(f"  {level_name}: all blocks recovered!")
+        def _recover_update(fidx: int, hit: bool) -> None:
+            rec_state["processed"] += 1
+            hit_window.push(hit)
+            # Update which segment the current frame lives in (cheap
+            # linear scan — level_ranges is small, usually < 20).
+            for seg in level_ranges:
+                if seg[0] <= fidx <= seg[1]:
+                    rec_state["current_range"] = seg
+                    break
+            now = time.monotonic()
+            if now - rec_state["last_emit_ts"] < _EMIT_INTERVAL:
+                return
+            rec_state["last_emit_ts"] = now
+            progress_pct = (
+                rec_state["processed"] / level_frames * 100
+                if level_frames > 0 else 100.0
+            )
+            file_pct = lt_decoder.progress * 100
+            recovered = (
+                lt_decoder.block_graph.eliminated
+                if lt_decoder.initialized else {}
+            )
+            k = lt_decoder.K if lt_decoder.initialized else None
+            reporter.recover_update(
+                progress_pct=progress_pct,
+                hit_window=hit_window.ratio,
+                file_pct=file_pct,
+                recovered=recovered,
+                k=k,
+                current_range=rec_state["current_range"],
+            )
 
-        pbar.close()
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                decoded_count, no_detect_count, early_done, _ = _stream_scan(
+                    executor,
+                    _read_frame_ranges(video_path, level_ranges,
+                                       max_detect_dim=level_dim,
+                                       crop_box=level_crop),
+                    seen_seeds, unique_blocks,
+                    decoded_count, no_detect_count, lt_decoder,
+                    _recover_update, verbose, seed_frame_map, workers,
+                    worker_fn=worker_fn,
+                    reporter=reporter)
+                if early_done and verbose:
+                    reporter.debug(f"{level_name}: all blocks recovered!")
+        finally:
+            # Final 100% tick before closing this level.
+            try:
+                reporter.recover_update(
+                    progress_pct=100.0,
+                    hit_window=hit_window.ratio,
+                    file_pct=lt_decoder.progress * 100,
+                    recovered=(
+                        lt_decoder.block_graph.eliminated
+                        if lt_decoder.initialized else {}
+                    ),
+                    k=lt_decoder.K if lt_decoder.initialized else None,
+                    current_range=rec_state["current_range"],
+                )
+            except Exception:
+                pass
+            reporter.recover_done()
 
         if early_done:
             break
 
-    status = " (complete)" if lt_decoder.done else ""
-    final_missing = len(all_seeds - seen_seeds)
-    print(f"Targeted recovery done{status}: "
-          f"{decoded_count} unique blocks, {no_detect_count} missed"
-          + (f", {final_missing} seeds still missing" if final_missing > 0 else ""))
+    if verbose:
+        status = " (complete)" if lt_decoder.done else ""
+        final_missing = len(all_seeds - seen_seeds)
+        tail = (f", {final_missing} seeds still missing"
+                if final_missing > 0 else "")
+        reporter.debug(
+            f"Targeted recovery done{status}: "
+            f"{decoded_count} unique blocks, {no_detect_count} missed{tail}"
+        )
 
     return unique_blocks, decoded_count, no_detect_count
 
@@ -1854,14 +2017,17 @@ def _prefetch_iter(source_iter, capacity: int = _READER_QUEUE_CAPACITY):
 
 
 def _stream_scan(executor: Executor, frame_iter, seen_seeds, unique_blocks,
-                 decoded_count, no_detect_count, lt_decoder, pbar, verbose,
-                 seed_frame_map, workers, worker_fn=None):
+                 decoded_count, no_detect_count, lt_decoder,
+                 on_frame, verbose,
+                 seed_frame_map, workers, worker_fn=None,
+                 reporter: ProgressReporter | None = None):
     """Pipelined scan: keep ``workers*2`` detect tasks in flight at all times.
 
     Reads frames via ``_prefetch_iter`` (background thread) and feeds
     them to ``executor`` using a sliding window of pending futures.
-    Each completed future updates ``pbar`` by 1, so progress visibly
-    advances frame-by-frame instead of in batch-sized jumps.
+    After each completed future, ``on_frame(frame_idx, hit_bool)`` is
+    invoked — the caller owns progress / hit-window rendering via a
+    :class:`qrstream.ui.ProgressReporter`.
 
     ``worker_fn`` defaults to :func:`_worker_detect_qr` (plain WeChat
     detection on the already-downscaled frame).  Targeted recovery
@@ -1897,8 +2063,8 @@ def _stream_scan(executor: Executor, frame_iter, seen_seeds, unique_blocks,
         done_set, pending = _futures_wait(pending, return_when=FIRST_COMPLETED)
         for fut in done_set:
             fidx, block_bytes, seed = fut.result()
-            pbar.update(1)
-            if block_bytes is not None and seed is not None:
+            hit = block_bytes is not None and seed is not None
+            if hit:
                 detect_count += 1
                 if seed_frame_map is not None and seed not in seed_frame_map:
                     seed_frame_map[seed] = fidx
@@ -1913,17 +2079,21 @@ def _stream_scan(executor: Executor, frame_iter, seen_seeds, unique_blocks,
                             early_done = True
                     except (ValueError, struct.error):
                         pass
-                    if verbose:
+                    if verbose and reporter is not None:
                         pct = lt_decoder.progress * 100
-                        tqdm.write(
-                            f"  Frame {fidx}: seed={seed}, "
+                        reporter.debug(
+                            f"Frame {fidx}: seed={seed}, "
                             f"uniq={decoded_count}, "
-                            f"progress={pct:.1f}%")
+                            f"progress={pct:.1f}%"
+                        )
             else:
                 no_detect_count += 1
-            total_seen = detect_count + no_detect_count
-            hit_pct = (detect_count * 100 // total_seen) if total_seen else 0
-            pbar.set_postfix_str(f"hit={hit_pct}%, uniq={decoded_count}")
+
+            if on_frame is not None:
+                try:
+                    on_frame(fidx, hit)
+                except Exception:
+                    pass
 
             # Keep the pool topped up — one in, one out.
             if not early_done:
@@ -1937,48 +2107,38 @@ def _stream_scan(executor: Executor, frame_iter, seen_seeds, unique_blocks,
     return decoded_count, no_detect_count, early_done, detect_count
 
 
-def _decode_into_decoder(blocks, verbose=False) -> LTDecoder | None:
+def _decode_into_decoder(blocks, verbose=False,
+                         reporter: ProgressReporter | None = None) -> "LTDecoder | None":
+    if reporter is None:
+        reporter = QuietReporter()
     if not blocks:
+        # Business error: keep on stdout so ``capsys`` tests still see it.
         print("Error: No blocks to decode")
         return None
 
     decoder = LTDecoder()
-    show_progress = verbose or len(blocks) >= _PROGRESS_BAR_THRESHOLD
-    pbar = None
-    if show_progress:
-        pbar = tqdm(total=len(blocks), desc="LT decode",
-                    unit="blk", dynamic_ncols=True,
-                    mininterval=0.1)
-
-    def _update_pbar():
-        if pbar is not None:
-            pbar.update(1)
-            if decoder.initialized:
-                pbar.set_postfix_str(
-                    f"got={decoder.num_recovered}/{decoder.K}")
 
     try:
         for i, block_bytes in enumerate(blocks):
             try:
                 done, compressed = decoder.decode_bytes(block_bytes)
-                _update_pbar()
                 if done:
                     if verbose:
-                        print(f"  Decoded after {i + 1}/{len(blocks)} blocks "
-                              f"(filesize={decoder.filesize}, K={decoder.K}, "
-                              f"compressed={compressed}, v={decoder.protocol_version})")
+                        reporter.debug(
+                            f"Decoded after {i + 1}/{len(blocks)} blocks "
+                            f"(filesize={decoder.filesize}, K={decoder.K}, "
+                            f"compressed={compressed}, "
+                            f"v={decoder.protocol_version})"
+                        )
                     return decoder
             except ValueError as e:
-                _update_pbar()
                 if verbose:
-                    print(f"  Block {i} error, skipping: {e}")
+                    reporter.debug(f"Block {i} error, skipping: {e}")
             except Exception as e:
-                _update_pbar()
                 if verbose:
-                    print(f"  Block {i} error: {e}")
+                    reporter.debug(f"Block {i} error: {e}")
     finally:
-        if pbar is not None:
-            pbar.close()
+        pass
 
     # Peeling (belief-propagation) exhausted all blocks without
     # converging. Attempt a GF(2) Gauss-Jordan rescue pass over the
@@ -1997,28 +2157,37 @@ def _decode_into_decoder(blocks, verbose=False) -> LTDecoder | None:
         rescued = decoder.try_gaussian_rescue()
         if rescued:
             if verbose:
-                print(f"  GE rescue recovered all "
-                      f"{decoder.num_recovered}/{decoder.K} blocks "
-                      f"after peeling stalled.")
+                reporter.debug(
+                    f"GE rescue recovered all "
+                    f"{decoder.num_recovered}/{decoder.K} blocks "
+                    f"after peeling stalled."
+                )
             else:
-                print(f"  GE rescue recovered "
-                      f"{decoder.num_recovered}/{decoder.K} source blocks.")
+                reporter.info(
+                    f"GE rescue recovered "
+                    f"{decoder.num_recovered}/{decoder.K} source blocks."
+                )
             return decoder
         elif verbose:
-            print(f"  GE rescue attempted, still "
-                  f"{decoder.num_recovered}/{decoder.K} recovered.")
+            reporter.debug(
+                f"GE rescue attempted, still "
+                f"{decoder.num_recovered}/{decoder.K} recovered."
+            )
 
     n_recovered = decoder.num_recovered
     k = decoder.K if decoder.K else '?'
+    # Business failure messages: keep on stdout so ``capsys`` tests and
+    # ``print``-based error capture still work.
     print(f"\nDecoding incomplete: {n_recovered}/{k} source blocks recovered "
           f"from {len(blocks)} encoded blocks.")
     print("Try recording the QR stream longer to capture more unique frames.")
     return None
 
 
-def decode_blocks(blocks, verbose=False) -> bytes | None:
+def decode_blocks(blocks, verbose=False,
+                  reporter: ProgressReporter | None = None) -> "bytes | None":
     """Feed blocks into LT decoder to reconstruct the file."""
-    decoder = _decode_into_decoder(blocks, verbose=verbose)
+    decoder = _decode_into_decoder(blocks, verbose=verbose, reporter=reporter)
     if decoder is None:
         return None
     try:
@@ -2028,14 +2197,18 @@ def decode_blocks(blocks, verbose=False) -> bytes | None:
         return None
 
 
-def decode_blocks_to_file(blocks, output_path: str, verbose=False) -> int | None:
+def decode_blocks_to_file(blocks, output_path: str, verbose=False,
+                          reporter: ProgressReporter | None = None) -> "int | None":
     """Decode blocks and write the result directly to a file."""
-    decoder = _decode_into_decoder(blocks, verbose=verbose)
+    if reporter is None:
+        reporter = QuietReporter()
+    decoder = _decode_into_decoder(blocks, verbose=verbose, reporter=reporter)
     if decoder is None:
         return None
     try:
-        show_progress = verbose or (decoder.K >= _PROGRESS_BAR_THRESHOLD)
-        return decoder.bytes_dump_to_file(output_path, show_progress=show_progress)
+        written = decoder.bytes_dump_to_file(output_path)
     except RuntimeError as e:
         print(f"Error: {e}")
         return None
+    reporter.save_done(output_path=output_path, bytes_written=written)
+    return written

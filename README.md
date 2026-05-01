@@ -75,7 +75,7 @@ uv sync --dev
 ### Requirements
 
 - Python >= 3.10 (3.10 – 3.14 tested)
-- Dependencies: `opencv-contrib-python`, `numpy`, `tqdm`, `segno`
+- Dependencies: `opencv-contrib-python`, `numpy`, `rich`, `segno`
 
 ## Usage
 

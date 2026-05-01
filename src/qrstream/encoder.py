@@ -4,6 +4,7 @@ LT Fountain Code Encoder: file → LT encoded blocks → QR frames → video.
 
 import mmap
 import os
+import time
 import zlib
 from itertools import repeat
 from math import ceil
@@ -13,7 +14,6 @@ from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
-from tqdm import tqdm
 
 from .lt_codec import PRNG, DEFAULT_C, DEFAULT_DELTA, xor_bytes
 from .protocol import (
@@ -22,6 +22,7 @@ from .protocol import (
     pack_v3,
 )
 from .qr_utils import generate_qr_image
+from .ui import ProgressReporter, QuietReporter
 
 
 # Prefer mmap-backed random access for larger uncompressed inputs.
@@ -150,7 +151,8 @@ def _read_file_bytes(input_path: str) -> bytes:
 
 def _load_payload(input_path: str, compress: bool,
                   force_compress: bool = False,
-                  verbose: bool = False):
+                  verbose: bool = False,
+                  reporter: ProgressReporter | None = None):
     """Load the LT source payload with a low-memory path when possible.
 
     Returns (payload, effective_compress, used_mmap, raw_size).
@@ -159,8 +161,10 @@ def _load_payload(input_path: str, compress: bool,
 
     if compress:
         if raw_size > _MMAP_THRESHOLD and not force_compress:
-            if verbose:
-                print("Compression disabled for large input to keep memory usage low.")
+            if verbose and reporter is not None:
+                reporter.debug(
+                    "Compression disabled for large input to keep memory usage low."
+                )
             compress = False
         else:
             raw_data = _read_file_bytes(input_path)
@@ -201,13 +205,18 @@ def encode_to_video(input_path: str, output_path: str,
                     binary_qr: bool = True,
                     alphanumeric_qr: bool | None = None,
                     force_compress: bool = False,
-                    auto_mask: bool = False):
+                    auto_mask: bool = False,
+                    reporter: ProgressReporter | None = None):
     """Encode a file to a QR-code video using LT fountain codes.
 
     ``binary_qr`` and ``alphanumeric_qr`` are aliases for the
     high-density QR mode flag; prefer ``alphanumeric_qr`` in new code.
     When enabled (default), frames are encoded via base45 into QR
     alphanumeric mode, carrying ~29% more payload per frame than base64.
+
+    ``reporter`` — optional :class:`qrstream.ui.ProgressReporter` used
+    for progress/status rendering.  When ``None`` a :class:`QuietReporter`
+    is used so the function stays side-effect-free for programmatic use.
 
     .. deprecated:: 0.8
         ``ec_level`` is redundant with ``overhead`` in qrstream's
@@ -218,6 +227,9 @@ def encode_to_video(input_path: str, output_path: str,
         at the video level.  The CLI already hides ``--ec-level``; the
         API keyword is retained for one deprecation window.
     """
+    if reporter is None:
+        reporter = QuietReporter()
+
     high_density = _resolve_alphanumeric_flag(binary_qr, alphanumeric_qr)
     payload = None
     writer = None
@@ -230,15 +242,21 @@ def encode_to_video(input_path: str, output_path: str,
             compress=compress,
             force_compress=force_compress,
             verbose=verbose,
+            reporter=reporter,
         )
 
         payload_size = len(payload)
         if verbose:
             source_desc = "mmap" if used_mmap else "memory"
-            print(f"Input: {input_path} ({raw_size} bytes, source={source_desc})")
+            reporter.debug(
+                f"Input: {input_path} ({raw_size} bytes, source={source_desc})"
+            )
             if compress:
                 ratio = payload_size / raw_size * 100 if raw_size else 0.0
-                print(f"Compressed: {raw_size} → {payload_size} bytes ({ratio:.1f}%)")
+                reporter.debug(
+                    f"Compressed: {raw_size} → {payload_size} bytes "
+                    f"({ratio:.1f}%)"
+                )
 
         blocksize = auto_blocksize(
             payload_size,
@@ -254,8 +272,11 @@ def encode_to_video(input_path: str, output_path: str,
 
         if verbose:
             mode_str = "alphanumeric/base45" if high_density else "base64"
-            print(f"Blocks: K={K}, blocksize={blocksize}, total={num_blocks} "
-                  f"(overhead={overhead}x, {mode_str})")
+            reporter.debug(
+                f"Blocks: K={K}, blocksize={blocksize}, "
+                f"total={num_blocks} "
+                f"(overhead={overhead}x, {mode_str})"
+            )
 
         encoder = LTEncoder(
             payload,
@@ -299,8 +320,21 @@ def encode_to_video(input_path: str, output_path: str,
             workers = min(os.cpu_count() or 1, 4)
 
         if verbose:
-            print(f"QR frame size: {w}x{h}, video FPS: {fps}, workers: {workers}")
-            print(f"Estimated duration: {total_frames / fps:.1f}s")
+            reporter.debug(
+                f"QR frame size: {w}x{h}, video FPS: {fps}, workers: {workers}"
+            )
+
+        # User-facing encode summary (always shown, even without verbose):
+        #   video duration, fps, QR version, QR mode, overhead.
+        duration_sec = total_frames / fps if fps else 0.0
+        mode_str = "base45" if high_density else "base64"
+        reporter.encode_start(
+            duration_sec=duration_sec,
+            fps=fps,
+            qr_version=qr_version,
+            mode=mode_str,
+            overhead=overhead,
+        )
 
         fourcc_str, default_ext = _CODEC_MAP.get(codec, ('mp4v', '.mp4'))
         fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
@@ -339,8 +373,29 @@ def encode_to_video(input_path: str, output_path: str,
                 writer_queue.put(blank_frame)
 
         batch_size = max(workers * 4, 64)
-        progress = tqdm(total=num_blocks, desc="Encode", unit="f",
-                        dynamic_ncols=True)
+
+        # ── Progress tracking ───────────────────────────────────
+        produced = 0
+        start_ts = time.monotonic()
+        last_report_ts = start_ts
+
+        def _report_progress(now: float) -> None:
+            nonlocal last_report_ts
+            # Rate-limit to ~10 Hz to keep the Rich Live renderer
+            # out of the hot path; LogReporter has its own throttle.
+            if now - last_report_ts < 0.1 and produced < num_blocks:
+                return
+            elapsed = max(1e-6, now - start_ts)
+            speed = produced / elapsed
+            remaining = max(0, num_blocks - produced)
+            eta = remaining / speed if speed > 1e-6 else 0.0
+            pct = (produced / num_blocks * 100) if num_blocks else 100.0
+            reporter.encode_update(
+                progress_pct=pct,
+                speed_fps=speed,
+                eta_sec=eta,
+            )
+            last_report_ts = now
 
         if workers > 1:
             block_queue = Queue(maxsize=batch_size * 2)
@@ -378,7 +433,8 @@ def encode_to_video(input_path: str, output_path: str,
                     ))
                     for qr_img in qr_imgs:
                         writer_queue.put(qr_img)
-                    progress.update(len(batch))
+                    produced += len(batch)
+                    _report_progress(time.monotonic())
 
             producer.join(timeout=5)
         else:
@@ -395,9 +451,16 @@ def encode_to_video(input_path: str, output_path: str,
                     auto_mask=auto_mask,
                 )
                 writer_queue.put(qr_img)
-                progress.update(1)
+                produced += 1
+                _report_progress(time.monotonic())
 
-        progress.close()
+        # Final 100% tick so the bar cleanly lands on 100.
+        if num_blocks > 0:
+            reporter.encode_update(
+                progress_pct=100.0,
+                speed_fps=produced / max(1e-6, time.monotonic() - start_ts),
+                eta_sec=0.0,
+            )
 
         # Flush writer: signal sentinel and wait for disk writes to drain
         writer_queue.put(None)
@@ -419,8 +482,9 @@ def encode_to_video(input_path: str, output_path: str,
                 close()
 
     output_size = os.path.getsize(output_path)
+    reporter.encode_done(output_path=output_path, size_bytes=output_size)
     if verbose:
-        print(f"Output: {output_path} ({output_size} bytes, {total_frames} frames)")
-    else:
-        print(f"Encoded {input_path} → {output_path} "
-              f"({total_frames} frames, {total_frames / fps:.1f}s)")
+        reporter.debug(
+            f"Output: {output_path} ({output_size} bytes, "
+            f"{total_frames} frames)"
+        )

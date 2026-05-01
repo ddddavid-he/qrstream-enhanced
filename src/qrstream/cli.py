@@ -3,8 +3,22 @@ Unified CLI for QRStream.
 
 Usage:
     qrstream -V | --version
-    qrstream encode <file> -o output.mp4 [--overhead 2.0] [--fps 10] [-v]
-    qrstream decode <video> -o output_file [-s sample_rate] [-v]
+    qrstream encode <file> -o output.mp4 [--overhead 2.0] [--fps 10]
+                          [--output-mode MODE]
+    qrstream decode <video> -o output_file [-s sample_rate]
+                          [--output-mode MODE]
+
+``--output-mode`` selects how progress/status is rendered:
+
+* ``auto``        — Rich interactive on TTY, ``log`` otherwise (default).
+* ``interactive`` — Force Rich animated UI (thin bars + file block map).
+* ``log``         — Append-only ``key=value`` lines; CI / ``tee`` safe.
+* ``quiet``       — Only errors and the final success line.
+* ``verbose``     — Verbose diagnostic output (Rich on TTY, log-verbose
+                    otherwise).
+
+The legacy ``-v / --verbose`` flag is accepted as a hidden alias for
+``--output-mode verbose`` to keep existing scripts working.
 """
 
 import sys
@@ -12,6 +26,7 @@ import os
 import argparse
 
 from .__init__ import __version__
+from .ui import OutputMode, resolve_output_mode
 
 
 # Minimum overhead the default LT codec (SplitMix64 PRNG mixer,
@@ -27,6 +42,20 @@ from .__init__ import __version__
 # LTEncoder API directly.
 _MIN_OVERHEAD = 1.20
 _RECOMMENDED_OVERHEAD = 1.50
+
+
+def _resolve_mode(args) -> OutputMode:
+    """Reconcile legacy ``-v`` with the new ``--output-mode`` flag.
+
+    ``-v`` is kept as a hidden alias that upgrades ``auto`` to
+    ``verbose``; users who explicitly pass ``--output-mode`` get
+    their choice honoured verbatim.
+    """
+    raw = getattr(args, 'output_mode', None) or 'auto'
+    mode = OutputMode(raw)
+    if getattr(args, 'verbose', False) and mode is OutputMode.AUTO:
+        return OutputMode.VERBOSE
+    return mode
 
 
 def cmd_encode(args):
@@ -64,24 +93,42 @@ def cmd_encode(args):
 
     alphanumeric_qr = (args.qr_mode == 'alphanumeric')
 
-    encode_to_video(
-        input_path=args.file,
-        output_path=output,
-        overhead=args.overhead,
-        fps=args.fps,
-        ec_level=args.ec_level,
-        qr_version=args.qr_version,
-        border=args.border,
-        lead_in_seconds=args.lead_in_seconds,
-        compress=not args.no_compress,
-        verbose=args.verbose,
-        workers=args.workers,
-        use_legacy_qr=args.legacy_qr,
-        codec=args.codec,
-        alphanumeric_qr=alphanumeric_qr,
-        force_compress=args.force_compress,
-        auto_mask=args.auto_mask,
-    )
+    mode = _resolve_mode(args)
+    try:
+        reporter = resolve_output_mode(
+            mode,
+            explicit=(getattr(args, 'output_mode', 'auto') != 'auto'),
+        )
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
+    verbose = mode is OutputMode.VERBOSE
+
+    try:
+        encode_to_video(
+            input_path=args.file,
+            output_path=output,
+            overhead=args.overhead,
+            fps=args.fps,
+            ec_level=args.ec_level,
+            qr_version=args.qr_version,
+            border=args.border,
+            lead_in_seconds=args.lead_in_seconds,
+            compress=not args.no_compress,
+            verbose=verbose,
+            workers=args.workers,
+            use_legacy_qr=args.legacy_qr,
+            codec=args.codec,
+            alphanumeric_qr=alphanumeric_qr,
+            force_compress=args.force_compress,
+            auto_mask=args.auto_mask,
+            reporter=reporter,
+        )
+    finally:
+        try:
+            reporter.close()
+        except Exception:
+            pass
 
 
 def cmd_decode(args):
@@ -92,25 +139,58 @@ def cmd_decode(args):
         print(f"Error: File not found: {args.video}")
         sys.exit(1)
 
-    print(f"Processing: {args.video}")
-    print("Extracting QR codes...")
+    mode = _resolve_mode(args)
+    try:
+        reporter = resolve_output_mode(
+            mode,
+            explicit=(getattr(args, 'output_mode', 'auto') != 'auto'),
+        )
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
+    verbose = mode is OutputMode.VERBOSE
 
-    blocks = extract_qr_from_video(
-        args.video, args.sample_rate, args.verbose, args.workers)
+    try:
+        blocks = extract_qr_from_video(
+            args.video, args.sample_rate, verbose, args.workers,
+            detect_isolation=args.detect_isolation,
+            reporter=reporter,
+        )
 
-    if not blocks:
-        print("No QR codes detected. Check that the video clearly shows QR codes.")
-        sys.exit(1)
+        if not blocks:
+            print("No QR codes detected. Check that the video clearly shows QR codes.")
+            sys.exit(1)
 
-    print(f"Found {len(blocks)} unique blocks. Decoding...")
+        output_path = args.output
+        written = decode_blocks_to_file(
+            blocks, output_path, verbose, reporter=reporter,
+        )
 
-    output_path = args.output
-    written = decode_blocks_to_file(blocks, output_path, args.verbose)
+        if written is None:
+            sys.exit(1)
+    finally:
+        try:
+            reporter.close()
+        except Exception:
+            pass
 
-    if written is None:
-        sys.exit(1)
 
-    print(f"\nSuccess! Saved to: {output_path} ({written} bytes)")
+def _add_output_mode_group(sub: argparse.ArgumentParser) -> None:
+    """Attach the shared ``--output-mode`` option plus hidden ``-v``."""
+    sub.add_argument(
+        '--output-mode',
+        dest='output_mode',
+        choices=[m.value for m in OutputMode],
+        default=OutputMode.AUTO.value,
+        help='Control progress/status rendering. '
+             '"auto" picks Rich interactive on TTY, "log" otherwise. '
+             '"log" emits append-only key=value lines for CI. '
+             '"quiet" prints only errors and the final path. '
+             '"verbose" enables full diagnostic output.',
+    )
+    # Legacy alias kept hidden: ``-v`` → upgrade ``auto`` to ``verbose``.
+    sub.add_argument('-v', '--verbose', action='store_true',
+                     help=argparse.SUPPRESS)
 
 
 def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
@@ -176,8 +256,7 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                           'instead of using the fixed mask=0 fast path. '
                           'Slower (~5× per frame) but may improve scan '
                           'quality under adverse capture conditions.')
-    enc.add_argument('-v', '--verbose', action='store_true',
-                     help='Print extra detail (block stats, compression ratio, etc.)')
+    _add_output_mode_group(enc)
 
     # ── decode ────────────────────────────────────────────────────
     dec = subparsers.add_parser(
@@ -189,8 +268,6 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                      help='Process every Nth frame (default: 0=auto-detect)')
     dec.add_argument('-w', '--workers', type=int, default=None,
                      help='Parallel workers (default: all CPU cores)')
-    dec.add_argument('-v', '--verbose', action='store_true',
-                     help='Print detailed progress')
     dec.add_argument(
         '--detect-isolation', choices=['on', 'off'], default='on',
         help='Isolate the WeChat QR detector in subprocess helpers so a '
@@ -198,6 +275,7 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
              'dropped frame instead of killing the decode process. '
              'Default: on. Use "off" to trade safety for ~20-30%% '
              'throughput when you know your input is safe.')
+    _add_output_mode_group(dec)
 
     return parser
 

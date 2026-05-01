@@ -73,7 +73,7 @@ uv sync --dev
 ### 系统要求
 
 - Python >= 3.10（已测试 3.10 – 3.14）
-- 依赖：`opencv-contrib-python`, `numpy`, `tqdm`, `segno`
+- 依赖：`opencv-contrib-python`, `numpy`, `rich`, `segno`
 
 ## 使用方式
 
