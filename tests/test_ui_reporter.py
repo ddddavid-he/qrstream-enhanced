@@ -11,6 +11,7 @@ from qrstream.ui import (
     LogReporter,
     OutputMode,
     QuietReporter,
+    RichReporter,
     SlidingHitWindow,
     compute_block_map_cells,
     compute_range_strip_cells,
@@ -193,6 +194,30 @@ class TestLogReporter:
 
 
 # ── Resolver ─────────────────────────────────────────────────────
+
+
+class TestRichReporter:
+    def test_scan_and_file_rows_align_in_interactive_output(self):
+        buf = io.StringIO()
+        r = RichReporter(stream=buf)
+        r.scan_start(total_frames=100)
+        r.scan_update(video_pct=100.0, hit_window=0.93,
+                      file_pct=100.0,
+                      recovered=set(range(32)), k=32)
+        r.close()
+
+        lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+        scan_line = [ln for ln in lines if "Scan" in ln][-1]
+        file_line = [ln for ln in lines if "File" in ln][-1]
+
+        def _first_bar_col(line: str) -> int:
+            cols = [line.find(ch) for ch in "━█▓▒░" if ch in line]
+            return min(col for col in cols if col >= 0)
+
+        assert scan_line.startswith("Scan")
+        assert file_line.startswith("File")
+        assert _first_bar_col(scan_line) == _first_bar_col(file_line)
+        assert len(scan_line) == len(file_line)
 
 
 class TestResolver:

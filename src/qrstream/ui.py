@@ -162,6 +162,12 @@ def compute_block_map_cells(
         Total number of source blocks.
     width
         Target number of cells (terminal columns) to render.
+
+    Notes
+    -----
+    The returned cell count always matches ``width`` so the visual
+    block strip can align with progress bars even when ``k`` is much
+    smaller than the available terminal width.
     """
     if k <= 0 or width <= 0:
         return []
@@ -169,18 +175,26 @@ def compute_block_map_cells(
     if isinstance(recovered, dict):
         recovered_set = recovered  # dict supports ``in`` on keys
     else:
-        recovered_set = recovered if hasattr(recovered, "__contains__") else set(recovered)
+        recovered_set = (
+            recovered if hasattr(recovered, "__contains__")
+            else set(recovered)
+        )
 
-    bucket_size = max(1, math.ceil(k / width))
     cells: list[tuple[str, str, float]] = []
-    idx = 0
-    while idx < k:
-        end = min(k, idx + bucket_size)
-        hits = sum(1 for i in range(idx, end) if i in recovered_set)
-        density = hits / (end - idx)
+    scale = k / width
+    for cell_idx in range(width):
+        start = cell_idx * scale
+        end = (cell_idx + 1) * scale
+        lo = int(math.floor(start))
+        hi = min(k - 1, int(math.ceil(end) - 1))
+        covered = 0.0
+        for block_idx in range(lo, hi + 1):
+            overlap = min(end, block_idx + 1.0) - max(start, float(block_idx))
+            if overlap > 0.0 and block_idx in recovered_set:
+                covered += overlap
+        density = covered / scale if scale > 0 else 0.0
         ch, style = _density_cell(density)
         cells.append((ch, style, density))
-        idx = end
     return cells
 
 
@@ -385,6 +399,19 @@ def _fmt_size(n: int) -> str:
 
 def _fmt_pct(x: float) -> str:
     return f"{max(0.0, min(100.0, x)):.1f}%"
+
+
+_STATUS_LABEL_WIDTH = 8
+
+
+def _pad_status_label(label: str) -> str:
+    """Return a fixed-width left-aligned label for status rows."""
+    return f"{label:<{_STATUS_LABEL_WIDTH}}"
+
+
+def _pad_stacked_status_label(label: str) -> str:
+    """Match the extra inter-column gap Rich inserts after progress labels."""
+    return _pad_status_label(label) + " "
 
 
 def _log_escape(value: object) -> str:
@@ -682,8 +709,8 @@ class RichReporter:
 
     _MAP_MIN_WIDTH = 24
     _MAP_MAX_WIDTH = 80
-    _MAP_LABEL = "  File  "
-    _RANGE_LABEL = "  Range "
+    _MAP_LABEL = _pad_stacked_status_label("File")
+    _RANGE_LABEL = _pad_stacked_status_label("Range")
     # Throttle map updates so per-frame scan callbacks don't churn
     # the Live renderer when the bucket output hasn't changed.
     _MAP_QUANT_BUCKETS = 200.0  # 0.5% quantisation on file pct
@@ -820,7 +847,9 @@ class RichReporter:
                    total_blocks: int | None = None) -> None:
         self._stop_live()
         self._progress = Progress(
-            TextColumn("[bold cyan]Scan[/bold cyan]   "),
+            TextColumn(
+                f"[bold cyan]{_pad_status_label('Scan')}[/bold cyan]"
+            ),
             BarColumn(bar_width=None, complete_style="cyan",
                       finished_style="bright_cyan",
                       pulse_style="bright_cyan"),
