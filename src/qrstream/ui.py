@@ -334,6 +334,8 @@ class ProgressReporter(Protocol):
 
     # Decode
     def probe_start(self) -> None: ...
+    def probe_update(self, *, scanned: int, total: int,
+                     detect: float, phase: str) -> None: ...
     def probe_done(self, *, sample: int, detect: float,
                    repeat: float,
                    crop_reduction: float | None) -> None: ...
@@ -461,6 +463,7 @@ class QuietReporter:
 
     # Decode -------------------------------------------------------
     def probe_start(self) -> None: return
+    def probe_update(self, **_kw) -> None: return
     def probe_done(self, **_kw) -> None: return
     def scan_start(self, **_kw) -> None: return
     def scan_update(self, **_kw) -> None: return
@@ -561,6 +564,14 @@ class LogReporter:
     # ── decode ────────────────────────────────────────────────
     def probe_start(self) -> None:
         self._write_line(phase="probe", status="start")
+
+    def probe_update(self, *, scanned: int, total: int,
+                     detect: float, phase: str) -> None:
+        if not self._should_emit("probe", scanned / total * 100 if total else 0):
+            return
+        self._write_line(phase="probe", status=phase,
+                         scanned=scanned, total=total,
+                         detect=f"{detect * 100:.0f}%")
 
     def probe_done(self, *, sample: int, detect: float, repeat: float,
                    crop_reduction: float | None) -> None:
@@ -669,17 +680,17 @@ class LogReporter:
 if _RICH_AVAILABLE:
 
     class _HitColumn(ProgressColumn):
-        """Show sliding-window hit % in parentheses: ``(hit 93%)``."""
+        """Show sliding-window detection rate: ``(detect 93%)``."""
 
         def render(self, task):  # type: ignore[override]
             hit = task.fields.get("hit") if task.fields else None
             if hit is None:
                 return Text("", style="dim")
-            return Text(f"(hit {hit * 100:.0f}%)", style="bright_cyan")
+            return Text(f"(detect {hit * 100:.0f}%)", style="bright_cyan")
 
 
     class _EncodeStatsColumn(ProgressColumn):
-        """Show fps + ETA in parentheses: ``(61.0 fps  ETA 00:05)``."""
+        """Show fps + ETA in parens, comma-separated: ``(61.0 fps, ETA 00:05)``."""
 
         def render(self, task):  # type: ignore[override]
             fields = task.fields or {}
@@ -692,7 +703,7 @@ if _RICH_AVAILABLE:
                 parts.append(f"{fps:.1f} fps")
             if eta_override is not None:
                 parts.append(f"ETA {_fmt_duration(eta_override)}")
-            return Text(f"({' '.join(parts)})", style="bright_magenta")
+            return Text(f"({', '.join(parts)})", style="bright_magenta")
 
 else:  # pragma: no cover — exercised only when rich is unavailable
     _HitColumn = _EncodeStatsColumn = None  # type: ignore[assignment]
@@ -809,13 +820,20 @@ class RichReporter:
         self._stop_live()
         self._probe_spinner_progress = Progress(
             SpinnerColumn(style="cyan"),
-            TextColumn("[bold cyan]Probe[/bold cyan]  "
-                       "[dim]detecting sample rate / crop / ppm[/dim]"),
+            TextColumn(
+                f"[bold cyan]{_pad_status_label('Probe')}[/bold cyan]"
+            ),
+            BarColumn(bar_width=None, complete_style="cyan",
+                      finished_style="bright_cyan",
+                      pulse_style="bright_cyan"),
+            TaskProgressColumn(),
+            TextColumn(" "),
+            _HitColumn(),
             console=self._console,
             transient=True,
         )
         self._probe_task_id = self._probe_spinner_progress.add_task(
-            "probe", total=None)
+            "probe", total=None, hit=None)
         self._live = Live(
             self._probe_spinner_progress,
             console=self._console,
@@ -823,6 +841,28 @@ class RichReporter:
             transient=True,
         )
         self._live.start()
+
+    def probe_update(self, *, scanned: int, total: int,
+                     detect: float, phase: str) -> None:
+        if self._probe_spinner_progress is None or self._probe_task_id is None:
+            return
+        try:
+            if phase == "scanning":
+                self._probe_spinner_progress.update(
+                    self._probe_task_id,
+                    total=max(1, total),
+                    completed=scanned,
+                    hit=detect,
+                )
+            else:
+                # calibrating phase — pulse bar (total=None) + keep hit value
+                self._probe_spinner_progress.update(
+                    self._probe_task_id,
+                    total=None,
+                    hit=detect,
+                )
+        except Exception:
+            pass
 
     def probe_done(self, *, sample: int, detect: float, repeat: float,
                    crop_reduction: float | None) -> None:

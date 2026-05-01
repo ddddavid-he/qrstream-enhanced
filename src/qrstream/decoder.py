@@ -1173,12 +1173,21 @@ def _probe_sample_rate(video_path: str, workers: int,
 
     # Detect QR codes in probe frames.
     probe_raw = []
+    _probe_detected = 0
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_worker_probe_detect, fd): fd[0]
                    for fd in probe_frames}
         for future in as_completed(futures):
             result = future.result()
             probe_raw.append(result)
+            if result.seed is not None:
+                _probe_detected += 1
+            reporter.probe_update(
+                scanned=len(probe_raw),
+                total=probe_count,
+                detect=_probe_detected / len(probe_raw) if probe_raw else 0.0,
+                phase="scanning",
+            )
 
     # Sort by frame index
     probe_raw.sort(key=lambda x: x.frame_idx)
@@ -1193,6 +1202,14 @@ def _probe_sample_rate(video_path: str, workers: int,
     # Extract video-level constants from probe observations.
     _probe_obs = _extract_probe_video_constants(probe_raw)
     learned_ppm: float | None = None
+
+    _final_detect = _probe_detected / probe_count if probe_count else 0.0
+    reporter.probe_update(
+        scanned=probe_count,
+        total=probe_count,
+        detect=_final_detect,
+        phase="calibrating",
+    )
 
     if _probe_obs is not None:
         src_max_obs, qr_side_obs, modules_obs = _probe_obs
