@@ -208,6 +208,15 @@ def encode_to_video(input_path: str, output_path: str,
     high-density QR mode flag; prefer ``alphanumeric_qr`` in new code.
     When enabled (default), frames are encoded via base45 into QR
     alphanumeric mode, carrying ~29% more payload per frame than base64.
+
+    .. deprecated:: 0.8
+        ``ec_level`` is redundant with ``overhead`` in qrstream's
+        pipeline and will be removed in v0.10.0.  QR-level Reed-Solomon
+        only rescues *bit* errors within a detected frame, but
+        WeChatQRCode either decodes a frame's payload or returns
+        ``None``; borderline frames are handled by LT fountain overhead
+        at the video level.  The CLI already hides ``--ec-level``; the
+        API keyword is retained for one deprecation window.
     """
     high_density = _resolve_alphanumeric_flag(binary_qr, alphanumeric_qr)
     payload = None

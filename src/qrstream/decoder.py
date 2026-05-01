@@ -399,17 +399,27 @@ _PPM_SWEEP_SUBSAMPLE = 6
 _RECOVERY_ESCALATION_BOOST = 1.5
 
 # ── Crop ROI parameters ──────────────────────────────────────────
-# Stability threshold for the bbox-derived crop ROI.  If the IQR of
-# the QR centre positions (in either axis) exceeds this fraction of
-# the frame dimension, the QR is moving too much and cropping is
-# disabled to avoid cutting the QR out of frame.
+# Stability threshold for the bbox-derived crop ROI.  If the normalised
+# IQR of the QR centre position or apparent side length exceeds this
+# fraction, the QR moves too much and cropping is disabled.
 _CROP_STABILITY_THRESHOLD = 0.15
-# Margin multiplier on the median bbox side to derive the crop rect.
-# 1.3 → crop rect is 30% larger than the QR to accommodate jitter
-# and the quiet-zone border.
+# Continuous margin range.  A perfectly stable QR uses the minimum;
+# jitter approaching _CROP_STABILITY_THRESHOLD approaches the maximum.
+_CROP_MARGIN_MIN = 1.15
+_CROP_MARGIN_MAX = 1.65
+# Legacy constant kept for API compatibility in tests; new code uses
+# the continuous margins above.
 _CROP_MARGIN = 1.3
 # Minimum number of probe observations to derive a crop box.
 _CROP_MIN_OBSERVATIONS = 10
+
+
+def _crop_margin_for_jitter(norm_iqr: float) -> float:
+    """Map normalised jitter continuously to a crop margin multiplier."""
+    if norm_iqr <= 0.0:
+        return _CROP_MARGIN_MIN
+    t = min(1.0, norm_iqr / _CROP_STABILITY_THRESHOLD)
+    return _CROP_MARGIN_MIN + (_CROP_MARGIN_MAX - _CROP_MARGIN_MIN) * t
 
 
 def _downscale_frame(
@@ -485,13 +495,16 @@ def _derive_crop_box(
 ) -> tuple[int, int, int, int] | None:
     """Derive a stable crop ROI from probe-phase bbox observations.
 
-    The crop box is centred on the median QR position and sized to
-    ``median_bbox_side × _CROP_MARGIN``, clamped to frame bounds.
+    Uses a continuous adaptive margin based on QR centre/size jitter:
+
+    - ``norm_iqr = 0`` → ``_CROP_MARGIN_MIN`` (tightest stable crop).
+    - ``0 < norm_iqr ≤ _CROP_STABILITY_THRESHOLD`` → linearly
+      interpolated margin up to ``_CROP_MARGIN_MAX``.
+    - ``norm_iqr > _CROP_STABILITY_THRESHOLD`` → disabled (returns None).
 
     Returns ``None`` (= don't crop) when:
     - fewer than ``_CROP_MIN_OBSERVATIONS`` usable bbox observations,
-    - the QR centre varies too much (IQR > ``_CROP_STABILITY_THRESHOLD``
-      × frame dimension in either axis).
+    - the QR centre varies too much (see above).
 
     ``probe_raw`` entries are :class:`ProbeObservation` namedtuples from
     ``_worker_probe_detect``.
@@ -513,27 +526,39 @@ def _derive_crop_box(
     if len(cxs) < _CROP_MIN_OBSERVATIONS:
         return None
 
-    # Stability check: IQR of centre positions.
+    # Stability check: IQR of centre positions and QR apparent size.
+    # Handheld captures may keep the QR centre almost fixed while the
+    # camera moves closer/farther, so side-length jitter must also feed
+    # the tight-vs-wide decision.
     cxs_sorted = sorted(cxs)
     cys_sorted = sorted(cys)
+    sides_sorted = sorted(sides)
     q1_idx = len(cxs_sorted) // 4
     q3_idx = 3 * len(cxs_sorted) // 4
     iqr_x = cxs_sorted[q3_idx] - cxs_sorted[q1_idx]
     iqr_y = cys_sorted[q3_idx] - cys_sorted[q1_idx]
-
-    if iqr_x > frame_w * _CROP_STABILITY_THRESHOLD:
-        return None
-    if iqr_y > frame_h * _CROP_STABILITY_THRESHOLD:
-        return None
-
-    # Median centre and side.
-    med_cx = cxs_sorted[len(cxs_sorted) // 2]
-    med_cy = cys_sorted[len(cys_sorted) // 2]
-    sides_sorted = sorted(sides)
+    iqr_side = sides_sorted[q3_idx] - sides_sorted[q1_idx]
     med_side = sides_sorted[len(sides_sorted) // 2]
 
+    # Normalised IQR: max of X/Y relative to frame dim, and side IQR
+    # relative to median QR side.
+    norm_iqr_x = iqr_x / frame_w if frame_w > 0 else 1.0
+    norm_iqr_y = iqr_y / frame_h if frame_h > 0 else 1.0
+    norm_iqr_side = iqr_side / med_side if med_side > 0 else 1.0
+    norm_iqr = max(norm_iqr_x, norm_iqr_y, norm_iqr_side)
+
+    if norm_iqr > _CROP_STABILITY_THRESHOLD:
+        return None
+
+    # Continuous adaptive margin based on jitter magnitude.
+    margin = _crop_margin_for_jitter(norm_iqr)
+
+    # Median centre.
+    med_cx = cxs_sorted[len(cxs_sorted) // 2]
+    med_cy = cys_sorted[len(cys_sorted) // 2]
+
     # Build crop rect.
-    half = int(med_side * _CROP_MARGIN / 2)
+    half = int(med_side * margin / 2)
     cx_i, cy_i = int(med_cx), int(med_cy)
 
     x0 = max(0, cx_i - half)
@@ -1218,9 +1243,28 @@ def _probe_sample_rate(video_path: str, workers: int,
     if verbose:
         if crop_box is not None:
             y0, y1, x0, x1 = crop_box
+            # Recompute norm_iqr for reporting using the same validity
+            # predicate as _derive_crop_box, so x/y sample counts match.
+            _valid_crop_obs = [
+                e for e in probe_raw
+                if e.bbox_side > 0 and e.bbox_cx > 0 and e.bbox_cy > 0
+            ]
+            _cxs = sorted(e.bbox_cx for e in _valid_crop_obs)
+            _cys = sorted(e.bbox_cy for e in _valid_crop_obs)
+            _sides = sorted(e.bbox_side for e in _valid_crop_obs)
+            _q1 = len(_cxs) // 4
+            _q3 = 3 * len(_cxs) // 4
+            _med_side = _sides[len(_sides) // 2] if _sides else 0.0
+            _niqr = max(
+                (_cxs[_q3] - _cxs[_q1]) / probe_fw if probe_fw else 0,
+                (_cys[_q3] - _cys[_q1]) / probe_fh if probe_fh else 0,
+                (_sides[_q3] - _sides[_q1]) / _med_side if _med_side else 0,
+            ) if len(_cxs) >= _CROP_MIN_OBSERVATIONS else 0.0
+            _margin = _crop_margin_for_jitter(_niqr)
             print(f"Crop ROI: ({x0},{y0})-({x1},{y1}) "
                   f"= {x1-x0}x{y1-y0}px "
-                  f"(frame {probe_fw}x{probe_fh})")
+                  f"(frame {probe_fw}x{probe_fh}, "
+                  f"margin={_margin:.2f}, iqr={_niqr:.3f})")
         elif probe_fh > 0:
             print(f"Crop ROI: disabled (unstable QR position or insufficient data)")
 
@@ -1288,9 +1332,11 @@ def _extract_probe_video_constants(
     """
     obs: list[tuple[int, float, int]] = []
     for entry in probe_raw:
-        if entry.bbox_side <= 0.0 or entry.text_len <= 0:
+        if entry.bbox_side <= 0.0:
             continue
         if entry.frame_h <= 0 or entry.frame_w <= 0:
+            continue
+        if entry.text_len <= 0:
             continue
         modules = _infer_qr_modules(entry.text_len, entry.is_alpha)
         if modules is None:
@@ -1337,9 +1383,11 @@ def _adaptive_max_dim_from_probe(
 
     suggestions: list[int] = []
     for entry in probe_raw:
-        if entry.bbox_side <= 0.0 or entry.text_len <= 0:
+        if entry.bbox_side <= 0.0:
             continue
         if entry.frame_h <= 0 or entry.frame_w <= 0:
+            continue
+        if entry.text_len <= 0:
             continue
         modules = _infer_qr_modules(entry.text_len, entry.is_alpha)
         if modules is None:

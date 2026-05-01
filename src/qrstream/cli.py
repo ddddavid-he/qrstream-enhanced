@@ -135,8 +135,19 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                           f'recommended: ≥{_RECOMMENDED_OVERHEAD})')
     enc.add_argument('--fps', type=int, default=10,
                      help='Frames per second in output video (default: 10)')
+    # TODO(v0.10.0): remove ``--ec-level`` entirely.  QR-level error
+    # correction is redundant in qrstream's pipeline because LT fountain
+    # ``--overhead`` already handles frame-level loss (which is the
+    # dominant failure mode on phone captures), and WeChatQRCode either
+    # decodes a QR into its payload or fails outright — EC rarely
+    # rescues a borderline frame that the detector would otherwise
+    # return ``None`` for.  The option is kept hidden in v0.8/0.9 so
+    # scripts built around the previous CLI continue to work, but users
+    # should stop setting it.  See ``encoder.encode_to_video`` for the
+    # corresponding API-level parameter which is retained for the same
+    # deprecation window.
     enc.add_argument('--ec-level', type=int, default=1, choices=[0, 1, 2, 3],
-                     help='QR error correction: 0=L, 1=M (default), 2=Q, 3=H')
+                     help=argparse.SUPPRESS)
     enc.add_argument('--qr-version', type=int, default=25,
                      choices=range(1, 41), metavar='N',
                      help='QR code version 1-40, controls density (default: 25)')
