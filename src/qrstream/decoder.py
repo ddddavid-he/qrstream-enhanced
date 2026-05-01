@@ -1152,15 +1152,27 @@ def _probe_sample_rate(video_path: str, workers: int,
     probe_ranges = _build_probe_ranges(
         total_frames, _PROBE_WINDOW_SIZE, _PROBE_GAP_RATIO,
     )
+    # Total frames we plan to read across all probe windows; used to
+    # drive the "reading" phase progress display.
+    _expected_read = sum(
+        max(0, end - start + 1) for start, end in probe_ranges
+    )
     # Read probe frames at the source resolution (clamped to
     # _PROBE_MAX_DETECT_DIM, which is generous enough for 8K input
     # but stops us from feeding *truly* outsized arrays through the
     # detector).  We need the full pixel grid here so the bbox
     # derived from WeChat reflects the actual module pitch.
-    probe_frames = list(_read_frame_ranges(
-        video_path, probe_ranges,
-        max_detect_dim=_PROBE_MAX_DETECT_DIM,
-    ))
+    probe_frames = []
+    for _fd in _read_frame_ranges(
+            video_path, probe_ranges,
+            max_detect_dim=_PROBE_MAX_DETECT_DIM):
+        probe_frames.append(_fd)
+        reporter.probe_update(
+            scanned=len(probe_frames),
+            total=max(_expected_read, len(probe_frames)),
+            detect=0.0,
+            phase="reading",
+        )
     probe_count = len(probe_frames)
     leading_frames_probed = 0
 

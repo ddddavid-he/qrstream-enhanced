@@ -823,17 +823,12 @@ class RichReporter:
             TextColumn(
                 f"[bold cyan]{_pad_status_label('Probe')}[/bold cyan]"
             ),
-            BarColumn(bar_width=None, complete_style="cyan",
-                      finished_style="bright_cyan",
-                      pulse_style="bright_cyan"),
-            TaskProgressColumn(),
-            TextColumn(" "),
-            _HitColumn(),
+            TextColumn("[cyan]{task.description}[/cyan]"),
             console=self._console,
             transient=True,
         )
         self._probe_task_id = self._probe_spinner_progress.add_task(
-            "probe", total=None, hit=None)
+            "starting...", total=None)
         self._live = Live(
             self._probe_spinner_progress,
             console=self._console,
@@ -846,21 +841,17 @@ class RichReporter:
                      detect: float, phase: str) -> None:
         if self._probe_spinner_progress is None or self._probe_task_id is None:
             return
+        if phase == "reading":
+            desc = f"reading frames {scanned}/{total}"
+        elif phase == "scanning":
+            desc = f"scanning {scanned}/{total}, detect {detect * 100:.0f}%"
+        elif phase == "calibrating":
+            desc = f"calibrating (detect {detect * 100:.0f}%)"
+        else:
+            desc = phase
         try:
-            if phase == "scanning":
-                self._probe_spinner_progress.update(
-                    self._probe_task_id,
-                    total=max(1, total),
-                    completed=scanned,
-                    hit=detect,
-                )
-            else:
-                # calibrating phase — pulse bar (total=None) + keep hit value
-                self._probe_spinner_progress.update(
-                    self._probe_task_id,
-                    total=None,
-                    hit=detect,
-                )
+            self._probe_spinner_progress.update(
+                self._probe_task_id, description=desc)
         except Exception:
             pass
 
