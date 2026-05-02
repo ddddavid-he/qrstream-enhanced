@@ -57,9 +57,7 @@ try:  # Rich is a hard dependency (declared in pyproject.toml).
         Progress,
         ProgressColumn,
         SpinnerColumn,
-        TaskProgressColumn,
         TextColumn,
-        TimeRemainingColumn,
     )
     from rich.text import Text
     _RICH_AVAILABLE = True
@@ -679,34 +677,50 @@ class LogReporter:
 
 if _RICH_AVAILABLE:
 
-    class _HitColumn(ProgressColumn):
-        """Show sliding-window detection rate: ``(detect 93%)``."""
+    def _task_pct(task) -> str:
+        total = task.total
+        if total is None or total <= 0:
+            return " --%"
+        pct = max(0.0, min(100.0, task.completed / total * 100.0))
+        return f"{pct:3.0f}%"
+
+
+    class _DetectStatsColumn(ProgressColumn):
+        """Show percent + detection rate with a single-space gap."""
 
         def render(self, task):  # type: ignore[override]
             hit = task.fields.get("hit") if task.fields else None
+            pct = _task_pct(task)
             if hit is None:
-                return Text("", style="dim")
-            return Text(f"(detect {hit * 100:.0f}%)", style="bright_cyan")
+                return Text(pct, style="bright_cyan")
+            return Text(
+                f"{pct} (detect {hit * 100:.0f}%)",
+                style="bright_cyan",
+            )
 
 
     class _EncodeStatsColumn(ProgressColumn):
-        """Show fps + ETA in parens, comma-separated: ``(61.0 fps, ETA 00:05)``."""
+        """Show percent + fps/ETA with a single-space gap."""
 
         def render(self, task):  # type: ignore[override]
             fields = task.fields or {}
             fps = fields.get("fps")
             eta_override = fields.get("eta_override")
-            if fps is None and eta_override is None:
-                return Text("", style="dim")
             parts: list[str] = []
             if fps is not None:
                 parts.append(f"{fps:.1f} fps")
             if eta_override is not None:
                 parts.append(f"ETA {_fmt_duration(eta_override)}")
-            return Text(f"({', '.join(parts)})", style="bright_magenta")
+            pct = _task_pct(task)
+            if not parts:
+                return Text(pct, style="bright_magenta")
+            return Text(
+                f"{pct} ({', '.join(parts)})",
+                style="bright_magenta",
+            )
 
 else:  # pragma: no cover — exercised only when rich is unavailable
-    _HitColumn = _EncodeStatsColumn = None  # type: ignore[assignment]
+    _DetectStatsColumn = _EncodeStatsColumn = None  # type: ignore[assignment]
 
 
 class RichReporter:
@@ -883,9 +897,7 @@ class RichReporter:
             BarColumn(bar_width=None, complete_style="cyan",
                       finished_style="bright_cyan",
                       pulse_style="bright_cyan"),
-            TaskProgressColumn(),
-            TextColumn("  "),
-            _HitColumn(),
+            _DetectStatsColumn(),
             console=self._console,
             transient=False,
         )
@@ -939,9 +951,7 @@ class RichReporter:
             BarColumn(bar_width=None, complete_style="yellow",
                       finished_style="bright_yellow",
                       pulse_style="bright_yellow"),
-            TaskProgressColumn(),
-            TextColumn("  "),
-            _HitColumn(),
+            _DetectStatsColumn(),
             console=self._console,
             transient=False,
         )
@@ -1021,8 +1031,6 @@ class RichReporter:
             BarColumn(bar_width=None, complete_style="green",
                       finished_style="bright_green",
                       pulse_style="bright_green"),
-            TaskProgressColumn(),
-            TextColumn(" "),
             _EncodeStatsColumn(),
             console=self._console,
             transient=False,

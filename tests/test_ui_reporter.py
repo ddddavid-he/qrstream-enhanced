@@ -217,6 +217,8 @@ class TestRichReporter:
         assert scan_line.startswith("Scan")
         assert file_line.startswith("File")
         assert _first_bar_col(scan_line) == _first_bar_col(file_line)
+        assert "100% (detect 93%)" in scan_line
+        assert "100%    (detect" not in scan_line
         assert len(scan_line) == len(file_line)
 
 
