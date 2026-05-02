@@ -117,6 +117,14 @@ _PROBE_GAP_RATIO = 0.15
 # Per-seed detection probability target for sample_rate computation.
 _TARGET_DETECT_PROB = 0.95
 
+# ── Three-phase probe parameters ─────────────────────────────────
+# Phase 1: crop exploration — consecutive frames per probe window.
+_PROBE_CROP_BURST = 7
+# Phase 2: PPM sweep — consecutive frames per probe window.
+_PROBE_PPM_BURST = 5
+# Phase 3 reader queue capacity for pipelined read+detect.
+_PROBE_PIPELINE_QUEUE = 32
+
 # ── CLAHE preprocessing ─────────────────────────────────────────
 _CLAHE_CLIP_LIMIT = 2.0
 _CLAHE_TILE_GRID_SIZE = (8, 8)
@@ -379,6 +387,8 @@ _PPM_LEARN_SAFETY_MARGIN = 1.15
 # max_dim.  The sweep runs from full-res (1.0) down to ~35% of the
 # source; this range typically spans the ppm cliff.
 _PPM_SWEEP_FRACTIONS = (1.0, 0.7, 0.5, 0.35)
+# Reduced fractions for Phase 2 sweep (frac=1.0 reused from Phase 1).
+_PPM_SWEEP_FRACTIONS_REDUCED = (0.7, 0.5, 0.35)
 # Subsample ratio: use every Nth full-res probe frame for the sweep
 # to keep the cost manageable (~60 frames out of 360).
 _PPM_SWEEP_SUBSAMPLE = 6
@@ -701,10 +711,13 @@ def _multi_res_sweep(
     qr_side_full: float,
     modules: int,
     workers: int,
+    *,
+    fractions: tuple[float, ...] = _PPM_SWEEP_FRACTIONS,
+    subsample: int = _PPM_SWEEP_SUBSAMPLE,
 ) -> list[tuple[float, bool]]:
     """Re-detect a subset of probe frames at multiple resolutions.
 
-    For each candidate downscale fraction in ``_PPM_SWEEP_FRACTIONS``,
+    For each candidate downscale fraction in ``fractions``,
     downscale the frames and run QR detection (through
     ``_dispatch_detect`` — sandbox-safe).  For each frame × resolution
     combination, record ``(post_ppm, detected)`` where ``post_ppm``
@@ -720,13 +733,13 @@ def _multi_res_sweep(
     K = qr_side_full / (src_max * modules)
 
     # Subsample frames to keep sweep cost manageable.
-    subset = probe_frames[::_PPM_SWEEP_SUBSAMPLE]
+    subset = probe_frames[::subsample] if subsample > 1 else probe_frames
     if not subset:
         return []
 
     # Build work items: (frame_idx, downscaled_frame, candidate_ppm)
     work_items: list[tuple[int, np.ndarray, float]] = []
-    for frac in _PPM_SWEEP_FRACTIONS:
+    for frac in fractions:
         cand_max = max(_ADAPTIVE_MIN_DETECT_DIM, int(src_max * frac))
         cand_max = min(cand_max, src_max)
         cand_ppm = cand_max * K
@@ -1034,6 +1047,37 @@ def _build_probe_ranges(total_frames: int, window_size: int = 120,
     return _merge_ranges(ranges)
 
 
+def _build_phase_burst_ranges(
+    total_frames: int, burst: int, gap_ratio: float = _PROBE_GAP_RATIO,
+    offset: int = 0,
+) -> list[tuple[int, int]]:
+    """Build short burst ranges at probe window centres for Phase 1/2.
+
+    Returns 3 ranges of ``burst`` consecutive frames, positioned at the
+    same centres as :func:`_build_probe_ranges` but much shorter.
+    ``offset`` shifts the starting position within each window so
+    Phase 1 and Phase 2 sample different frames from the same windows.
+    """
+    if total_frames <= 0 or burst <= 0:
+        return []
+    if total_frames <= burst:
+        return [(0, total_frames - 1)]
+
+    centers = [0.5 - gap_ratio, 0.5, 0.5 + gap_ratio]
+    ranges = []
+    for ratio in centers:
+        ratio = min(max(ratio, 0.0), 1.0)
+        center = int(round((total_frames - 1) * ratio))
+        start = max(0, center - burst // 2 + offset)
+        end = start + burst - 1
+        if end >= total_frames:
+            end = total_frames - 1
+            start = max(0, end - burst + 1)
+        ranges.append((start, end))
+
+    return _merge_ranges(ranges)
+
+
 def _compute_auto_sample_rate(detect_rate: float, avg_repeat: float,
                               total_frames: int = 0,
                               K_estimate: int = 0) -> int:
@@ -1123,14 +1167,16 @@ def _probe_sample_rate(video_path: str, workers: int,
                        reporter: ProgressReporter | None = None):
     """Probe multiple windows of a video to determine optimal sample_rate.
 
-    Measures both repeat count (R) and detection rate (p), then computes
-    the optimal sample_rate so that each QR code has enough detection
-    chances to be reliably recovered.
+    Uses a three-phase pipeline to minimise detection cost:
 
-    Also derives:
-    - A per-video adaptive downscale cap via multi-resolution PPM
-      learning (replaces the legacy fixed constant).
-    - A crop ROI from probe bbox centre stability.
+      Phase 1 — Crop exploration: detect QR on a small number of
+        full-resolution frames to derive a crop ROI and video constants.
+      Phase 2 — Resolution exploration: run a multi-resolution PPM
+        sweep on cropped frames to learn the adaptive downscale cap.
+      Phase 3 — Sample rate estimation: detect QR on the full probe
+        window set using crop + adaptive resolution in a pipelined
+        read-detect mode, then compute sample_rate from detection
+        statistics.
 
     Returns:
         (sample_rate, probe_results, probe_count, leading_frames_probed,
@@ -1149,102 +1195,129 @@ def _probe_sample_rate(video_path: str, workers: int,
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
 
-    probe_ranges = _build_probe_ranges(
-        total_frames, _PROBE_WINDOW_SIZE, _PROBE_GAP_RATIO,
-    )
-    # Total frames we plan to read across all probe windows; used to
-    # drive the "reading" phase progress display.
-    _expected_read = sum(
-        max(0, end - start + 1) for start, end in probe_ranges
-    )
-    # Read probe frames at the source resolution (clamped to
-    # _PROBE_MAX_DETECT_DIM, which is generous enough for 8K input
-    # but stops us from feeding *truly* outsized arrays through the
-    # detector).  We need the full pixel grid here so the bbox
-    # derived from WeChat reflects the actual module pitch.
-    probe_frames = []
-    for _fd in _read_frame_ranges(
-            video_path, probe_ranges,
-            max_detect_dim=_PROBE_MAX_DETECT_DIM):
-        probe_frames.append(_fd)
-        reporter.probe_update(
-            scanned=len(probe_frames),
-            total=max(_expected_read, len(probe_frames)),
-            detect=0.0,
-            phase="reading",
-        )
-    probe_count = len(probe_frames)
-    leading_frames_probed = 0
-
-    if not probe_frames:
+    if total_frames <= 0:
         return 1, [], 0, 0, 0.0, 1.0, None, None
 
-    if verbose and len(probe_ranges) > 1:
-        ranges_str = ", ".join(f"{start}-{end}" for start, end in probe_ranges)
-        reporter.debug(f"Probe windows: {ranges_str}")
+    # ═══════════════════════════════════════════════════════════════
+    # PHASE 1: Crop Exploration
+    # ═══════════════════════════════════════════════════════════════
+    # Read a small burst of frames at full resolution from each probe
+    # window centre to derive crop_box and video constants.  Uses the
+    # same window centres as the full probe to ensure spatial coverage.
+    reporter.probe_update(scanned=0, total=0, detect=0.0, phase="crop")
 
-    # Detect QR codes in probe frames.
-    probe_raw = []
-    _probe_detected = 0
+    phase1_ranges = _build_phase_burst_ranges(
+        total_frames, _PROBE_CROP_BURST, _PROBE_GAP_RATIO, offset=0,
+    )
+    phase1_frames = list(_read_frame_ranges(
+        video_path, phase1_ranges, max_detect_dim=_PROBE_MAX_DETECT_DIM,
+    ))
+
+    if not phase1_frames:
+        return 1, [], 0, 0, 0.0, 1.0, None, None
+
+    # Detect on Phase 1 frames (full resolution, no crop).
+    phase1_raw: list = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_worker_probe_detect, fd): fd[0]
-                   for fd in probe_frames}
+                   for fd in phase1_frames}
         for future in as_completed(futures):
-            result = future.result()
-            probe_raw.append(result)
-            if result.seed is not None:
-                _probe_detected += 1
-            reporter.probe_update(
-                scanned=len(probe_raw),
-                total=probe_count,
-                detect=_probe_detected / len(probe_raw) if probe_raw else 0.0,
-                phase="scanning",
+            phase1_raw.append(future.result())
+    phase1_raw.sort(key=lambda x: x.frame_idx)
+
+    # Derive crop box from Phase 1 bbox observations.
+    probe_fh, probe_fw = 0, 0
+    for entry in phase1_raw:
+        if entry.frame_h > 0 and entry.frame_w > 0:
+            probe_fh, probe_fw = entry.frame_h, entry.frame_w
+            break
+
+    crop_box = _derive_crop_box(phase1_raw, probe_fh, probe_fw)
+
+    # Extract video-level constants (src_max, qr_side, modules).
+    _probe_obs = _extract_probe_video_constants(phase1_raw)
+
+    if verbose:
+        phase1_detect_count = sum(1 for o in phase1_raw if o.seed is not None)
+        reporter.debug(
+            f"Phase 1 (crop): {len(phase1_raw)} frames, "
+            f"detected={phase1_detect_count}/{len(phase1_raw)}"
+        )
+        if crop_box is not None:
+            y0, y1, x0, x1 = crop_box
+            reporter.debug(
+                f"Crop ROI: ({x0},{y0})-({x1},{y1}) "
+                f"= {x1-x0}x{y1-y0}px "
+                f"(frame {probe_fw}x{probe_fh})"
+            )
+        elif probe_fh > 0:
+            reporter.debug(
+                "Crop ROI: disabled (unstable QR position or insufficient data)"
             )
 
-    # Sort by frame index
-    probe_raw.sort(key=lambda x: x.frame_idx)
+    # ═══════════════════════════════════════════════════════════════
+    # PHASE 2: Resolution / PPM Exploration
+    # ═══════════════════════════════════════════════════════════════
+    reporter.probe_update(scanned=0, total=0, detect=0.0, phase="calibrating")
 
-    # Strip the bbox / mode metadata before downstream code (which
-    # expects the historical (frame_idx, block_bytes, seed) tuple).
-    probe_results = [
-        (t.frame_idx, t.block_bytes, t.seed) for t in probe_raw
-    ]
-
-    # ── Learn per-video ppm threshold via multi-resolution sweep ──
-    # Extract video-level constants from probe observations.
-    _probe_obs = _extract_probe_video_constants(probe_raw)
     learned_ppm: float | None = None
-
-    _final_detect = _probe_detected / probe_count if probe_count else 0.0
-    reporter.probe_update(
-        scanned=probe_count,
-        total=probe_count,
-        detect=_final_detect,
-        phase="calibrating",
-    )
 
     if _probe_obs is not None:
         src_max_obs, qr_side_obs, modules_obs = _probe_obs
 
-        sweep_samples = _multi_res_sweep(
-            probe_frames, src_max_obs, qr_side_obs, modules_obs, workers,
+        # Read a separate burst of frames WITH crop applied.
+        phase2_ranges = _build_phase_burst_ranges(
+            total_frames, _PROBE_PPM_BURST, _PROBE_GAP_RATIO,
+            offset=_PROBE_CROP_BURST,  # offset to avoid overlapping Phase 1
         )
+        phase2_frames = list(_read_frame_ranges(
+            video_path, phase2_ranges,
+            max_detect_dim=_PROBE_MAX_DETECT_DIM,
+            crop_box=crop_box,
+        ))
+
+        # Determine the effective src_max for the sweep — the max dim
+        # of the frames actually passed to _multi_res_sweep.
+        if crop_box is not None and phase2_frames:
+            _fh2, _fw2 = phase2_frames[0][1].shape[:2]
+            sweep_src_max = max(_fh2, _fw2)
+        else:
+            sweep_src_max = src_max_obs
+
+        # Run multi-resolution sweep at reduced fractions (skip 1.0,
+        # Phase 1 already provides full-resolution detection data).
+        sweep_samples = _multi_res_sweep(
+            phase2_frames, sweep_src_max, qr_side_obs, modules_obs,
+            workers,
+            fractions=_PPM_SWEEP_FRACTIONS_REDUCED,
+            subsample=1,  # use all Phase 2 frames (already small set)
+        )
+
+        # Inject Phase 1 full-resolution observations as frac=1.0 data.
+        # PPM at full resolution: qr_side_obs / modules_obs.
+        full_ppm = qr_side_obs / modules_obs if modules_obs > 0 else 0.0
+        if full_ppm > 0:
+            for entry in phase1_raw:
+                detected = entry.seed is not None or entry.bbox_side > 0
+                sweep_samples.append((full_ppm, detected))
+
+        sweep_samples.sort(key=lambda x: x[0])
         learned_ppm = _learn_ppm_threshold(sweep_samples)
 
         if verbose:
             if learned_ppm is not None:
                 reporter.debug(
-                    f"PPM learning: {len(sweep_samples)} samples → "
+                    f"Phase 2 (PPM): {len(sweep_samples)} samples → "
                     f"learned_target_ppm={learned_ppm:.2f}"
                 )
             else:
                 reporter.debug(
-                    f"PPM learning: {len(sweep_samples)} samples → "
+                    f"Phase 2 (PPM): {len(sweep_samples)} samples → "
                     f"insufficient data, "
                     f"fallback={_ADAPTIVE_TARGET_PPM_FALLBACK}"
                 )
 
-    adaptive_max_dim = _adaptive_max_dim_from_probe(probe_raw, learned_ppm)
+    adaptive_max_dim = _adaptive_max_dim_from_probe(phase1_raw, learned_ppm)
     effective_ppm = learned_ppm if learned_ppm is not None else _ADAPTIVE_TARGET_PPM_FALLBACK
     if verbose and adaptive_max_dim is not None:
         reporter.debug(
@@ -1253,50 +1326,117 @@ def _probe_sample_rate(video_path: str, workers: int,
             f"default would be {_MAX_DETECT_DIM}px)"
         )
 
-    # ── Derive crop ROI from bbox centre observations ─────────
-    # Use the probe-measured frame dimensions (from the first
-    # observation with valid fh/fw).
-    probe_fh, probe_fw = 0, 0
-    for entry in probe_raw:
-        if entry.frame_h > 0 and entry.frame_w > 0:
-            probe_fh, probe_fw = entry.frame_h, entry.frame_w
-            break
-    crop_box = _derive_crop_box(probe_raw, probe_fh, probe_fw)
-    if verbose:
-        if crop_box is not None:
-            y0, y1, x0, x1 = crop_box
-            # Recompute norm_iqr for reporting using the same validity
-            # predicate as _derive_crop_box, so x/y sample counts match.
-            _valid_crop_obs = [
-                e for e in probe_raw
-                if e.bbox_side > 0 and e.bbox_cx > 0 and e.bbox_cy > 0
-            ]
-            _cxs = sorted(e.bbox_cx for e in _valid_crop_obs)
-            _cys = sorted(e.bbox_cy for e in _valid_crop_obs)
-            _sides = sorted(e.bbox_side for e in _valid_crop_obs)
-            _q1 = len(_cxs) // 4
-            _q3 = 3 * len(_cxs) // 4
-            _med_side = _sides[len(_sides) // 2] if _sides else 0.0
-            _niqr = max(
-                (_cxs[_q3] - _cxs[_q1]) / probe_fw if probe_fw else 0,
-                (_cys[_q3] - _cys[_q1]) / probe_fh if probe_fh else 0,
-                (_sides[_q3] - _sides[_q1]) / _med_side if _med_side else 0,
-            ) if len(_cxs) >= _CROP_MIN_OBSERVATIONS else 0.0
-            _margin = _crop_margin_for_jitter(_niqr)
-            reporter.debug(
-                f"Crop ROI: ({x0},{y0})-({x1},{y1}) "
-                f"= {x1-x0}x{y1-y0}px "
-                f"(frame {probe_fw}x{probe_fh}, "
-                f"margin={_margin:.2f}, iqr={_niqr:.3f})"
-            )
-        elif probe_fh > 0:
-            reporter.debug(
-                "Crop ROI: disabled (unstable QR position or insufficient data)"
-            )
+    # ═══════════════════════════════════════════════════════════════
+    # PHASE 3: Sample Rate Exploration (pipelined read + detect)
+    # ═══════════════════════════════════════════════════════════════
+    # Use crop + adaptive resolution for bulk detection.
+    effective_max_dim = (
+        adaptive_max_dim if adaptive_max_dim is not None else _MAX_DETECT_DIM
+    )
+
+    probe_ranges = _build_probe_ranges(
+        total_frames, _PROBE_WINDOW_SIZE, _PROBE_GAP_RATIO,
+    )
+    _expected_read = sum(
+        max(0, end - start + 1) for start, end in probe_ranges
+    )
+
+    if verbose and len(probe_ranges) > 1:
+        ranges_str = ", ".join(f"{start}-{end}" for start, end in probe_ranges)
+        reporter.debug(f"Phase 3 probe windows: {ranges_str}")
+
+    # Pipelined execution: reader thread feeds a bounded queue,
+    # detector threads consume from it concurrently.
+    frame_queue: Queue = Queue(maxsize=_PROBE_PIPELINE_QUEUE)
+    read_done = Event()
+    probe_raw: list = []
+    _probe_detected = 0
+    _probe_lock = __import__('threading').Lock()
+
+    def _reader():
+        for fd in _read_frame_ranges(
+                video_path, probe_ranges,
+                max_detect_dim=effective_max_dim,
+                crop_box=crop_box):
+            frame_queue.put(fd)
+        read_done.set()
+
+    reader_thread = Thread(target=_reader, daemon=True)
+    reader_thread.start()
+
+    # Consume frames and submit detection work.
+    probe_count = 0
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        pending_futures = {}
+        frames_submitted = 0
+
+        while True:
+            # Try to fill the executor with work.
+            while len(pending_futures) < workers * 2:
+                try:
+                    fd = frame_queue.get(timeout=0.05)
+                except Exception:
+                    if read_done.is_set() and frame_queue.empty():
+                        break
+                    continue
+                fut = executor.submit(_worker_probe_detect, fd)
+                pending_futures[fut] = fd[0]
+                frames_submitted += 1
+                break  # submit one, then check for completions
+
+            # Harvest completed futures.
+            if pending_futures:
+                done_set, _ = _futures_wait(
+                    pending_futures, timeout=0.05,
+                    return_when=FIRST_COMPLETED,
+                )
+                for fut in done_set:
+                    result = fut.result()
+                    with _probe_lock:
+                        probe_raw.append(result)
+                        if result.seed is not None:
+                            _probe_detected += 1
+                    del pending_futures[fut]
+                    reporter.probe_update(
+                        scanned=len(probe_raw),
+                        total=max(_expected_read, len(probe_raw)),
+                        detect=(_probe_detected / len(probe_raw)
+                                if probe_raw else 0.0),
+                        phase="scanning",
+                    )
+
+            # Exit when reader is done and all work completed.
+            if (read_done.is_set() and frame_queue.empty()
+                    and not pending_futures):
+                break
+
+    reader_thread.join()
+    probe_count = len(probe_raw)
+    leading_frames_probed = 0
+
+    if not probe_raw:
+        return 1, [], 0, 0, 0.0, 1.0, adaptive_max_dim, crop_box
+
+    # Sort by frame index.
+    probe_raw.sort(key=lambda x: x.frame_idx)
+
+    # Build probe_results merging Phase 1/2/3 decoded blocks.
+    # Phase 3 is authoritative for sample_rate; Phase 1/2 blocks
+    # supplement the LT decoder with early data.
+    phase3_results = [
+        (t.frame_idx, t.block_bytes, t.seed) for t in probe_raw
+    ]
+    phase3_frame_set = {t.frame_idx for t in probe_raw}
+
+    # Collect Phase 1 decoded blocks not already in Phase 3.
+    extra_results = [
+        (t.frame_idx, t.block_bytes, t.seed)
+        for t in phase1_raw
+        if t.block_bytes is not None and t.frame_idx not in phase3_frame_set
+    ]
+    probe_results = extra_results + phase3_results
 
     # ── Extract K estimate from probe-decoded blocks ────────────
-    # The first successfully decoded block's header contains
-    # block_count (= K), which we use to clamp sample_rate.
     K_estimate = 0
     for _, block_bytes, seed in probe_results:
         if block_bytes is not None:
@@ -1309,7 +1449,8 @@ def _probe_sample_rate(video_path: str, workers: int,
 
     window_stats = []
     for start, end in probe_ranges:
-        window_results = [result for result in probe_results if start <= result[0] <= end]
+        window_results = [result for result in phase3_results
+                          if start <= result[0] <= end]
         stats = _analyze_probe_window(
             window_results,
             total_frames=total_frames,
