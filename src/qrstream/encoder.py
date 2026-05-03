@@ -299,25 +299,19 @@ def encode_to_video(input_path: str, output_path: str,
         h, w = first_qr.shape[:2]
 
         if workers is None:
-            # QR image generation is dominated by ``qrcode.QRCode.make()``,
-            # which is pure Python and holds the GIL.  Under a
-            # ``ThreadPoolExecutor`` more workers than ~4 mostly contend
-            # on the GIL without adding real parallelism, so we cap the
-            # *auto-picked* default here.  The writer thread still runs
-            # in the background for IO parallelism, so capping at 4
-            # does not starve the pipeline.
-            #
-            # Users on CPU-rich machines can still pass ``--workers``
-            # (CLI) or ``workers=N`` (API) to override this cap; we do
-            # not clamp the user-supplied value.
-            #
-            # FIXME(encoder-workers-cap): the "4" here was picked from
-            # GIL-bound reasoning rather than a real benchmark.  When
-            # we have throughput numbers for workers={1,2,4,8,cpu}
-            # across a few file sizes we should revisit whether this
-            # cap is too conservative (or too loose) and either raise
-            # it or make it adaptive.
-            workers = min(os.cpu_count() or 1, 4)
+            # Full-pipeline benchmarks show the default encoder path is
+            # usually VideoWriter-bound.  QR generation still uses segno
+            # (pure Python), so ThreadPoolExecutor does not provide
+            # reliable end-to-end speedups under the GIL.  Keep the
+            # automatic default conservative; users can still opt in to
+            # higher worker counts explicitly.
+            workers = 1
+        elif workers > 1:
+            reporter.warn(
+                "Encoder --workers > 1 is experimental: QR generation is "
+                "GIL-bound and full encode is often video-writer-bound, "
+                "so higher worker counts may not improve performance."
+            )
 
         if verbose:
             reporter.debug(
