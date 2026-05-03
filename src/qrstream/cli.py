@@ -250,7 +250,7 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
     enc.add_argument('--codec', choices=['mp4v', 'mjpeg'], default='mp4v',
                      help='Video codec: mp4v (default) or mjpeg (faster, larger)')
     enc.add_argument('-w', '--workers', type=int, default=None,
-                     help='Parallel workers for QR generation (default: CPU count)')
+                     help='Parallel workers for QR generation (default: 1; higher values may not improve performance)')
     enc.add_argument('--auto-mask', action='store_true',
                      help='Let segno evaluate all 8 ISO 18004 mask patterns '
                           'instead of using the fixed mask=0 fast path. '
