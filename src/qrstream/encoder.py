@@ -3,14 +3,16 @@ LT Fountain Code Encoder: file → LT encoded blocks → QR frames → video.
 """
 
 import mmap
+import multiprocessing
 import os
+import sys
 import time
 import zlib
 from itertools import repeat
 from math import ceil
 from queue import Queue
 from threading import Thread
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 import cv2
 import numpy as np
@@ -21,12 +23,54 @@ from .protocol import (
     auto_blocksize,
     pack_v3,
 )
-from .qr_utils import generate_qr_image
+from .qr_utils import generate_qr_gray_image, generate_qr_image
 from .ui import ProgressReporter, QuietReporter
 
 
 # Prefer mmap-backed random access for larger uncompressed inputs.
 _MMAP_THRESHOLD = 10 * 1024 * 1024
+
+# Encoder QR generation is pure-Python inside segno.  On GIL-enabled
+# CPython, threads mostly contend on the GIL, so explicit parallelism
+# uses spawned processes.  On free-threaded CPython, threads avoid IPC
+# overhead and should scale naturally.
+_PROCESS_WORKER_CAP = 6
+_THREAD_WORKER_CAP = 8
+_PROCESS_START_METHOD = "spawn"
+
+
+def _is_free_threaded_python() -> bool:
+    """Return True only when this interpreter is running without the GIL."""
+    is_gil_enabled = getattr(sys, "_is_gil_enabled", None)
+    if is_gil_enabled is None:
+        return False
+    return not is_gil_enabled()
+
+
+def _default_encode_workers(*, auto_mask: bool = False) -> int:
+    cpu_count = os.cpu_count() or 1
+    if _is_free_threaded_python():
+        return max(1, min(cpu_count, _THREAD_WORKER_CAP))
+    if auto_mask:
+        return max(1, min(cpu_count, _PROCESS_WORKER_CAP))
+    # With the fixed-mask segno fast path, full encode is usually
+    # VideoWriter-bound; spawning workers adds little or no wall-time
+    # benefit.  Keep the default conservative, while still using a
+    # process pool when callers explicitly request workers > 1.
+    return 1
+
+
+def _qr_executor_config(workers: int):
+    """Choose the executor for QR image generation."""
+    if workers <= 1:
+        return None, {}, "sequential"
+    if _is_free_threaded_python():
+        return ThreadPoolExecutor, {}, "threads"
+    return (
+        ProcessPoolExecutor,
+        {"mp_context": multiprocessing.get_context(_PROCESS_START_METHOD)},
+        f"processes/{_PROCESS_START_METHOD}",
+    )
 
 
 class MmapDataSource:
@@ -299,29 +343,13 @@ def encode_to_video(input_path: str, output_path: str,
         h, w = first_qr.shape[:2]
 
         if workers is None:
-            # QR image generation is dominated by ``qrcode.QRCode.make()``,
-            # which is pure Python and holds the GIL.  Under a
-            # ``ThreadPoolExecutor`` more workers than ~4 mostly contend
-            # on the GIL without adding real parallelism, so we cap the
-            # *auto-picked* default here.  The writer thread still runs
-            # in the background for IO parallelism, so capping at 4
-            # does not starve the pipeline.
-            #
-            # Users on CPU-rich machines can still pass ``--workers``
-            # (CLI) or ``workers=N`` (API) to override this cap; we do
-            # not clamp the user-supplied value.
-            #
-            # FIXME(encoder-workers-cap): the "4" here was picked from
-            # GIL-bound reasoning rather than a real benchmark.  When
-            # we have throughput numbers for workers={1,2,4,8,cpu}
-            # across a few file sizes we should revisit whether this
-            # cap is too conservative (or too loose) and either raise
-            # it or make it adaptive.
-            workers = min(os.cpu_count() or 1, 4)
+            workers = _default_encode_workers(auto_mask=auto_mask)
+        executor_cls, executor_kwargs, executor_label = _qr_executor_config(workers)
 
         if verbose:
             reporter.debug(
-                f"QR frame size: {w}x{h}, video FPS: {fps}, workers: {workers}"
+                f"QR frame size: {w}x{h}, video FPS: {fps}, "
+                f"workers: {workers}, executor: {executor_label}"
             )
 
         # User-facing encode summary (always shown, even without verbose):
@@ -362,6 +390,8 @@ def encode_to_video(input_path: str, output_path: str,
                 if frame.shape[:2] != (h, w):
                     frame = cv2.resize(frame, (w, h),
                                        interpolation=cv2.INTER_NEAREST)
+                if frame.ndim == 2:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
                 writer.write(frame)
 
         writer_thread = Thread(target=_writer_loop, daemon=False)
@@ -409,7 +439,7 @@ def encode_to_video(input_path: str, output_path: str,
             producer = Thread(target=_block_producer, daemon=True)
             producer.start()
 
-            with ThreadPoolExecutor(max_workers=workers) as pool:
+            with executor_cls(max_workers=workers, **executor_kwargs) as pool:
                 done = False
                 while not done:
                     batch = []
@@ -421,15 +451,24 @@ def encode_to_video(input_path: str, output_path: str,
                         batch.append(item)
                     if not batch:
                         break
-                    # generate_qr_image signature:
+                    # generate_qr_* signature:
                     #   (data, ec_level, box_size, border, version,
                     #    use_legacy, binary_mode, alphanumeric, auto_mask)
+                    chunksize = 1
+                    qr_generator = generate_qr_image
+                    if executor_cls is ProcessPoolExecutor:
+                        chunksize = max(1, len(batch) // (workers * 4))
+                        # Return grayscale frames from child processes to
+                        # cut IPC payload size by 3×; the writer thread
+                        # converts to BGR immediately before VideoWriter.write.
+                        qr_generator = generate_qr_gray_image
                     qr_imgs = list(pool.map(
-                        generate_qr_image, batch,
+                        qr_generator, batch,
                         repeat(ec_level), repeat(10), repeat(border_modules),
                         repeat(qr_version), repeat(use_legacy_qr),
                         repeat(None), repeat(high_density),
                         repeat(auto_mask),
+                        chunksize=chunksize,
                     ))
                     for qr_img in qr_imgs:
                         writer_queue.put(qr_img)

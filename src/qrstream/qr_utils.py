@@ -102,7 +102,29 @@ def generate_qr_image(data: bytes, ec_level: int = 1,
     Returns:
         BGR numpy array suitable for OpenCV.
     """
-    del use_legacy  # legacy parameter kept for API stability
+    gray = generate_qr_gray_image(
+        data,
+        ec_level=ec_level,
+        box_size=box_size,
+        border=border,
+        version=version,
+        use_legacy=use_legacy,
+        binary_mode=binary_mode,
+        alphanumeric=alphanumeric,
+        auto_mask=auto_mask,
+    )
+    return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+
+def generate_qr_gray_image(data: bytes, ec_level: int = 1,
+                           box_size: int = 10, border: float = 4,
+                           version: int | None = None,
+                           use_legacy: bool = False,
+                           binary_mode: bool | None = None,
+                           alphanumeric: bool | None = None,
+                           auto_mask: bool = False) -> np.ndarray:
+    """Generate a single-channel uint8 QR image via segno."""
+    del use_legacy
 
     if not HAS_SEGNO:
         raise RuntimeError(
@@ -110,7 +132,6 @@ def generate_qr_image(data: bytes, ec_level: int = 1,
             "install with `pip install segno`"
         )
 
-    # Resolve alphanumeric/binary_mode aliases. Default: alphanumeric.
     if alphanumeric is None:
         if binary_mode is None:
             use_alphanumeric = True
@@ -120,21 +141,20 @@ def generate_qr_image(data: bytes, ec_level: int = 1,
         use_alphanumeric = bool(alphanumeric)
 
     if use_alphanumeric:
-        # Import lazily so tests that stub protocol still work.
         from .protocol import base45_encode
         payload = base45_encode(data).decode("ascii")
     else:
         payload = _b64lib.b64encode(data).decode("ascii")
 
-    return _render_qr(payload, ec_level, box_size, border, version,
-                      use_alphanumeric, auto_mask)
+    return _render_qr_gray(payload, ec_level, box_size, border, version,
+                           use_alphanumeric, auto_mask)
 
 
-def _render_qr(payload: str, ec_level: int, box_size: int,
-               border: float, version: int | None,
-               alphanumeric: bool,
-               auto_mask: bool = False) -> np.ndarray:
-    """Render an ASCII payload string to a BGR numpy array via segno.
+def _render_qr_gray(payload: str, ec_level: int, box_size: int,
+                    border: float, version: int | None,
+                    alphanumeric: bool,
+                    auto_mask: bool = False) -> np.ndarray:
+    """Render an ASCII payload string to a grayscale image via segno.
 
     ``payload`` is a plain ASCII string (base45 or base64 encoded).
     segno receives it as a str; for the alphanumeric path we explicitly
@@ -188,7 +208,7 @@ def _render_qr(payload: str, ec_level: int, box_size: int,
     inner = slice(bd * bs, (bd + n) * bs)
     img[inner, inner] = np.where(expanded == 1, 0, 255)
 
-    return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    return img
 
 
 # ── QR Detection ─────────────────────────────────────────────────

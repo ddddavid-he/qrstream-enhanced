@@ -29,7 +29,12 @@ from math import ceil
 import numpy as np
 import pytest
 
-from qrstream.qr_utils import generate_qr_image, try_decode_qr, HAS_SEGNO
+from qrstream.qr_utils import (
+    generate_qr_gray_image,
+    generate_qr_image,
+    try_decode_qr,
+    HAS_SEGNO,
+)
 from qrstream.protocol import base45_encode, base45_decode, auto_blocksize
 from qrstream.encoder import LTEncoder
 
@@ -157,6 +162,16 @@ class TestImageProperties:
         assert isinstance(img, np.ndarray)
         assert img.ndim == 3
         assert img.shape[2] == 3  # BGR
+
+    def test_gray_output_matches_bgr_channels(self):
+        block = self._block()
+        gray = generate_qr_gray_image(block, version=10)
+        bgr = generate_qr_image(block, version=10)
+        assert gray.ndim == 2
+        assert gray.shape == bgr.shape[:2]
+        assert np.array_equal(gray, bgr[:, :, 0])
+        assert np.array_equal(gray, bgr[:, :, 1])
+        assert np.array_equal(gray, bgr[:, :, 2])
 
     def test_box_size_scales_image(self):
         block = self._block()

@@ -18,8 +18,10 @@ Forking a multi-threaded process is unsafe:
 - On CI (Linux, default fork), ~75% of decoded blocks returned from workers
   were corrupt — LT peeling stalled even at high overhead.
 
-v0.7.5 fix: replace ``ProcessPoolExecutor`` with ``ThreadPoolExecutor`` in
-both encoder and decoder.  Threads share the parent address space safely.
+v0.7.5 fix: replace the unsafe fork-backed ``ProcessPoolExecutor`` path with
+``ThreadPoolExecutor``.  The encoder may now use ``ProcessPoolExecutor`` again,
+but only with an explicit ``spawn`` context so workers do not inherit a
+multi-threaded parent snapshot.
 
 == Why previous tests did NOT catch this ==
 
@@ -46,11 +48,10 @@ not the real v0.7.4 failure.
 == What these tests cover ==
 
 - LT codec roundtrip at all requested sizes (50k–10M) — pure codec, no video
-- Full video encode→decode pipeline at small sizes verifying the
-  ProcessPool→ThreadPool switch by exercising ``encode_to_video`` +
-  ``extract_qr_from_video`` directly
-- Regression guard: ``encode_to_video`` must use ``ThreadPoolExecutor``,
-  not ``ProcessPoolExecutor``
+- Full video encode→decode pipeline at small sizes exercising
+  ``encode_to_video`` + ``extract_qr_from_video`` directly
+- Regression guard: any encoder process pool must use ``spawn`` rather than
+  Linux's unsafe default ``fork``
 - ``PRNG.get_src_blocks(seed=0)`` correctness (latent bug, not v0.7.4 trigger)
 """
 
@@ -62,6 +63,7 @@ from pathlib import Path
 
 import pytest
 
+import qrstream.encoder as encoder_mod
 from qrstream.lt_codec import PRNG, DEFAULT_C, DEFAULT_DELTA
 from qrstream.encoder import LTEncoder
 from qrstream.decoder import LTDecoder
@@ -94,16 +96,14 @@ def _roundtrip_lt(data: bytes, overhead: float = 3.5,
 
 
 # ─────────────────────────────────────────────────────────────────
-# 1. Regression guard: encoder/decoder must NOT use ProcessPoolExecutor
+# 1. Regression guard: process pools must never use unsafe fork
 # ─────────────────────────────────────────────────────────────────
 
-class TestNoProcessPoolExecutor:
+class TestEncoderPoolStrategy:
     """
-    The v0.7.4 bug was directly caused by ``ProcessPoolExecutor`` being used
-    together with a background thread (fork-safety violation on Linux).
-
-    These tests parse the source of the relevant modules and fail if
-    ``ProcessPoolExecutor`` is re-introduced.
+    The v0.7.4 bug was caused by a fork-backed ``ProcessPoolExecutor`` being
+    created while background threads were alive.  The encoder can use processes
+    for GIL-bound segno work, but it must force ``spawn``.
     """
 
     def _source_of(self, module_name: str) -> str:
@@ -111,25 +111,47 @@ class TestNoProcessPoolExecutor:
         mod = importlib.import_module(module_name)
         return inspect.getsource(mod)
 
-    def test_encoder_uses_thread_pool(self):
+    def test_encoder_process_pool_uses_spawn(self):
         src = self._source_of("qrstream.encoder")
-        assert "ThreadPoolExecutor" in src, \
-            "encoder.py must use ThreadPoolExecutor"
-        assert "ProcessPoolExecutor" not in src, \
-            "encoder.py must NOT use ProcessPoolExecutor (v0.7.4 fork-safety bug)"
+        assert "ProcessPoolExecutor" in src, \
+            "encoder.py should use ProcessPoolExecutor for GIL-bound segno work"
+        assert "get_context(_PROCESS_START_METHOD)" in src
+        assert '_PROCESS_START_METHOD = "spawn"' in src
 
-    def test_decoder_uses_thread_pool(self):
+    def test_encoder_default_workers_stay_single_for_fixed_mask(self, monkeypatch):
+        monkeypatch.setattr(encoder_mod, "_is_free_threaded_python", lambda: False)
+        monkeypatch.setattr(encoder_mod.os, "cpu_count", lambda: 14)
+        assert encoder_mod._default_encode_workers(auto_mask=False) == 1
+
+    def test_encoder_default_workers_use_processes_for_auto_mask(self, monkeypatch):
+        monkeypatch.setattr(encoder_mod, "_is_free_threaded_python", lambda: False)
+        monkeypatch.setattr(encoder_mod.os, "cpu_count", lambda: 14)
+        assert encoder_mod._default_encode_workers(auto_mask=True) == 6
+
+    def test_encoder_default_workers_are_capped_for_free_threaded(self, monkeypatch):
+        monkeypatch.setattr(encoder_mod, "_is_free_threaded_python", lambda: True)
+        monkeypatch.setattr(encoder_mod.os, "cpu_count", lambda: 14)
+        assert encoder_mod._default_encode_workers(auto_mask=False) == 8
+
+    def test_encoder_executor_selection_tracks_gil_state(self, monkeypatch):
+        monkeypatch.setattr(encoder_mod, "_is_free_threaded_python", lambda: False)
+        executor_cls, executor_kwargs, label = encoder_mod._qr_executor_config(4)
+        assert executor_cls is encoder_mod.ProcessPoolExecutor
+        assert label == "processes/spawn"
+        assert executor_kwargs["mp_context"].get_start_method() == "spawn"
+
+        monkeypatch.setattr(encoder_mod, "_is_free_threaded_python", lambda: True)
+        executor_cls, executor_kwargs, label = encoder_mod._qr_executor_config(4)
+        assert executor_cls is encoder_mod.ThreadPoolExecutor
+        assert executor_kwargs == {}
+        assert label == "threads"
+
+    def test_decoder_stays_thread_pool_only(self):
         src = self._source_of("qrstream.decoder")
         assert "ThreadPoolExecutor" in src, \
             "decoder.py must use ThreadPoolExecutor"
         assert "ProcessPoolExecutor" not in src, \
-            "decoder.py must NOT use ProcessPoolExecutor (v0.7.4 fork-safety bug)"
-
-    def test_encoder_no_mp_spawn_context(self):
-        """The spawn-context workaround was also removed in v0.7.5."""
-        src = self._source_of("qrstream.decoder")
-        assert "_MP_SPAWN_CTX" not in src, \
-            "decoder.py still references _MP_SPAWN_CTX — incomplete cleanup"
+            "decoder.py must NOT use ProcessPoolExecutor"
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -171,11 +193,11 @@ class TestVideoRoundtrip:
 
     @pytest.mark.parametrize("size_kb", [20, 50])
     def test_video_roundtrip_multiworker(self, size_kb, tmp_path):
-        """Multi-worker video encode+decode — exercises the fixed ThreadPoolExecutor path."""
+        """Multi-worker video encode+decode — exercises the encoder pool path."""
         data = _make_random_bytes(size_kb * 1024, seed=size_kb)
         result = self._video_roundtrip(data, tmp_path, workers=2)
         assert result is not None, \
-            f"Video decode stalled at {size_kb}KB (workers=2) — ProcessPoolExecutor regression?"
+            f"Video decode stalled at {size_kb}KB (workers=2) — encoder pool regression?"
         assert result == data, f"Data mismatch at {size_kb}KB"
 
     def test_video_roundtrip_single_worker(self, tmp_path):
