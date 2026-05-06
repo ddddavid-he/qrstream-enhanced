@@ -149,23 +149,17 @@ class TestBorderDefaults:
         assert _resolve_border_modules(20, 10.0) == pytest.approx(9.7)
 
 
-class TestWeChatDetector:
-    """Test WeChatQRCode detector integration."""
+class TestZxingDetector:
+    """Test zxing-cpp detector integration."""
 
     def test_reset(self):
         reset_strategy_stats()
 
-    def test_wechat_detects_base64_qr(self):
+    def test_detects_base64_qr(self):
         import base64
-        # Deterministic mixed-byte payload (see commit 1cb5e74 for the
-        # earlier half of this fix): WeChatQRCode's classifier has a
-        # known sporadic failure mode on Python 3.13 × ubuntu-latest
-        # (amd64) when fed certain random 64-byte base64-encoded
-        # strings — the QR module edges fall right on the detector's
-        # threshold. Using a deterministic payload here keeps the
-        # test from flaking once every few CI runs without weakening
-        # what the test actually checks (encode → WeChat detect →
-        # base64 decode → V3 unpack round-trip).
+        # Deterministic mixed-byte payload: using a fixed payload avoids
+        # flaky CI failures from random payloads that land on detector
+        # edge cases. Tests encode → zxing detect → base64 decode → unpack.
         reset_strategy_stats()
         data = bytes((i * 37 + 11) % 256 for i in range(64))
         packed = pack_v3(filesize=100, blocksize=64, block_count=2,
@@ -180,10 +174,8 @@ class TestWeChatDetector:
         assert header.seed == 42
         assert recovered == data
 
-    def test_wechat_detects_alphanumeric_qr(self):
+    def test_detects_alphanumeric_qr(self):
         """New default: base45 payload in QR alphanumeric mode."""
-        # Same flaky-on-py3.13-amd64 risk as the base64 case above;
-        # keep the payload deterministic.
         reset_strategy_stats()
         data = bytes((i * 53 + 7) % 256 for i in range(64))
         packed = pack_v3(filesize=100, blocksize=64, block_count=2,
@@ -199,7 +191,7 @@ class TestWeChatDetector:
         assert header.alphanumeric_qr is True
         assert recovered == data
 
-    def test_wechat_alphanumeric_qr_with_null_heavy_data(self):
+    def test_alphanumeric_qr_with_null_heavy_data(self):
         """base45 happily carries all-zero payloads (0x00 is legal)."""
         data = b'\x00' * 64
         packed = pack_v3(filesize=64, blocksize=64, block_count=1,
@@ -213,7 +205,7 @@ class TestWeChatDetector:
         assert block == packed
 
     def test_alphanumeric_qr_full_roundtrip(self):
-        """base45 QR: encode image -> WeChatQRCode detect -> base45 decode -> unpack."""
+        """base45 QR: encode image -> zxing detect -> base45 decode -> unpack."""
         reset_strategy_stats()
         # Use deterministic mixed bytes to avoid flaky CI failures from
         # unlucky random payloads that occasionally reduce detector stability.

@@ -342,11 +342,12 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                      help='Parallel workers (default: all CPU cores)')
     dec.add_argument(
         '--detect-isolation', choices=['on', 'off'], default='on',
-        help='Isolate the WeChat QR detector in subprocess helpers so a '
-             'native crash (opencv_contrib#3570) degrades to a single '
-             'dropped frame instead of killing the decode process. '
-             'Default: on. Use "off" to trade safety for ~20-30%% '
-             'throughput when you know your input is safe.')
+        help='[Deprecated] Previously isolated the WeChatQRCode detector '
+             'in subprocess helpers to survive native crashes '
+             '(opencv_contrib#3570). The backend is now zxing-cpp, which '
+             'does not crash. This flag is accepted for backward '
+             'compatibility but is ignored. Will be removed in a future '
+             'release.')
     _add_output_mode_group(dec)
 
     return parser

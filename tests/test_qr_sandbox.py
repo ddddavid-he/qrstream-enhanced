@@ -7,9 +7,16 @@ files are required.  Crash-injection tests use dedicated subclass
 helpers whose helper-loop function lives at module scope (required by
 the ``spawn`` start method: all targets must be pickle-safe top-level
 callables).
-"""
 
+.. deprecated::
+    qr_sandbox is deprecated since v0.9 (zxing-cpp backend, no crashes).
+    This entire test module is skipped.  It is retained only so that
+    ``git blame`` still shows why the sandbox existed.
+"""
 from __future__ import annotations
+
+import pytest
+pytestmark = pytest.mark.skip(reason="qr_sandbox deprecated since v0.9 (zxing-cpp backend)")
 
 import base64
 import os
