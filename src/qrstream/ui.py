@@ -59,6 +59,7 @@ try:  # Rich is a hard dependency (declared in pyproject.toml).
         SpinnerColumn,
         TextColumn,
     )
+    from rich.table import Column
     from rich.text import Text
     _RICH_AVAILABLE = True
 except Exception as _exc:  # pragma: no cover — rich missing/old → log/quiet
@@ -124,19 +125,82 @@ class SlidingHitWindow:
 # ── Block map / Range strip renderers ────────────────────────────
 
 
-# Density thresholds for bucket rendering.  Matches the design doc's
-# 0 / ≤33 / ≤66 / ≤99 / 100 buckets.
+# Density thresholds for bucket rendering.
+#
+# Design: the File row's colour progression must read at a glance
+# as "more recovered = warmer/brighter colour", matching the
+# qBittorrent "completed chunks" aesthetic.  The colour spine goes
+#
+#     grey  →  blue  →  cyan  →  green
+#
+# — a single monotonic path through the blue/green family that
+# aligns with the Scan row's cyan bar and the final "done" state
+# (bright_green).
+#
+# Two orthogonal axes combine to give 10 perceptually-distinct
+# tiers without ever reshuffling the hue:
+#
+#   Hue:      grey35 → grey50 → blue → bright_blue → cyan →
+#             bright_cyan → green → bright_green
+#   Glyph:    ░ (empty) → ▒ (half) → ▓ (full) → █ (solid)
+#
+# Both axes are monotone, so even on terminals that flatten some
+# hues into each other users can still read progress from the
+# glyph alone (and vice-versa for truecolor themes that wash out
+# the ░▒▓ difference).
+#
+# Low density (≤ 35 %) is deliberately fine-grained — on large
+# files that band dominates the whole scan and we want the user
+# to see *early* progress differentiation there, not a solid
+# colour block.  grey50 at density (0, 0.08] keeps the "first
+# chunk just landed" signal visible without breaking the hue spine.
 _DENSITY_CHAR_AND_STYLE: tuple[tuple[float, str, str], ...] = (
-    (0.0,    "░", "grey35"),
-    (0.33,   "▒", "blue"),
-    (0.66,   "▓", "cyan"),
-    (0.999,  "▓", "green"),
-    (1.0,    "█", "bright_green"),
+    (0.00,    "░", "grey35"),        # 0 ── untouched
+    (0.08,    "░", "grey50"),        # 1 ── first chunk landed
+    (0.20,    "░", "blue"),          # 2 ── sparse blue
+    (0.35,    "▒", "bright_blue"),   # 3 ── denser blue
+    (0.50,    "▒", "cyan"),          # 4 ── blue → cyan pivot
+    (0.65,    "▓", "cyan"),          # 5 ── cyan, glyph gains body
+    (0.80,    "▓", "bright_cyan"),   # 6 ── bright cyan
+    (0.92,    "▓", "green"),         # 7 ── entering green
+    (0.999,   "▓", "bright_green"),  # 8 ── near-complete
+    (1.00,    "█", "bright_green"),  # 9 ── fully recovered
 )
 
 
 def _density_cell(density: float) -> tuple[str, str]:
-    """Return ``(char, rich_style)`` for a bucket density in [0, 1]."""
+    """Return ``(char, rich_style)`` for a bucket density in [0, 1].
+
+    The ``_DENSITY_CHAR_AND_STYLE`` table is sorted by ascending
+    density threshold; the first tier whose threshold is ≥ the
+    input density wins.  Both the glyph (``░ → ▒ → ▓ → █``) and
+    the hue (``grey → blue → cyan → green``) advance monotonically
+    along the table, so users can read progress from either axis
+    alone when a terminal theme collapses some colours.
+
+    TODO(block-map-relative-density): In the current mapping every
+    cell is thresholded against absolute density (recovered /
+    bucket_size).  That works beautifully for small files where
+    ``k / width`` is O(1) — single-block recoveries immediately
+    push a cell into a higher colour tier, giving the familiar
+    qBittorrent-style "speckled" look.  For large files where
+    ``k >> width`` (e.g. k=20000 over width=80 → 250 source blocks
+    per cell) every cell's density stays glued to the global
+    ``file_pct`` for most of the scan, so the whole bar fades
+    through the same colour tier in lockstep and only snaps to
+    ``█ bright_green`` in the final peeling avalanche.
+
+    A future enhancement could remap the middle tiers from
+    "absolute density" to "density relative to the global
+    progress" so that cells slightly ahead of the average render
+    darker and cells behind render lighter — preserving the
+    block-map semantics (a cell's colour still corresponds to a
+    real region of the file) while restoring per-cell visual
+    contrast on large-k scans.  Not implemented yet: this would
+    slightly redefine what the colour means (ahead-of-average vs.
+    fully-recovered) and users may prefer the current honest
+    mapping.  Revisit if large-file UX feedback asks for it.
+    """
     density = max(0.0, min(1.0, density))
     for thresh, ch, style in _DENSITY_CHAR_AND_STYLE:
         if density <= thresh:
@@ -336,7 +400,10 @@ class ProgressReporter(Protocol):
                      detect: float, phase: str) -> None: ...
     def probe_done(self, *, sample: int, detect: float,
                    repeat: float,
-                   crop_reduction: float | None) -> None: ...
+                   crop_reduction: float | None,
+                   observed: int | None = None,
+                   total_probed: int | None = None,
+                   max_dim: int | None = None) -> None: ...
 
     def scan_start(self, *, total_frames: int,
                    total_blocks: int | None = None) -> None: ...
@@ -572,7 +639,10 @@ class LogReporter:
                          detect=f"{detect * 100:.0f}%")
 
     def probe_done(self, *, sample: int, detect: float, repeat: float,
-                   crop_reduction: float | None) -> None:
+                   crop_reduction: float | None,
+                   observed: int | None = None,
+                   total_probed: int | None = None,
+                   max_dim: int | None = None) -> None:
         fields = {
             "phase": "probe",
             "status": "done",
@@ -584,6 +654,12 @@ class LogReporter:
             fields["crop_reduction"] = "off"
         else:
             fields["crop_reduction"] = f"{crop_reduction * 100:.0f}%"
+        if observed is not None:
+            fields["observed"] = observed
+        if total_probed is not None:
+            fields["total_probed"] = total_probed
+        if max_dim is not None:
+            fields["max_dim"] = f"{max_dim}px"
         self._write_line(**fields)
 
     def scan_start(self, *, total_frames: int,
@@ -686,15 +762,30 @@ if _RICH_AVAILABLE:
 
 
     class _DetectStatsColumn(ProgressColumn):
-        """Show percent + detection rate with a single-space gap."""
+        """Show percent + detection/speed/ETA with a single-space gap.
+
+        The bracketed content is built from whichever ``task.fields``
+        are available, so the same column serves both Scan (fps + ETA
+        once calibrated) and Recover (detect only).
+        """
 
         def render(self, task):  # type: ignore[override]
-            hit = task.fields.get("hit") if task.fields else None
+            fields = task.fields or {}
+            hit = fields.get("hit")
+            fps = fields.get("fps")
+            eta = fields.get("eta")
+            parts: list[str] = []
+            if hit is not None:
+                parts.append(f"detect {hit * 100:.0f}%")
+            if fps is not None and fps > 0:
+                parts.append(f"{fps:.1f} fps")
+            if eta is not None:
+                parts.append(f"ETA {_fmt_duration(eta)}")
             pct = _task_pct(task)
-            if hit is None:
+            if not parts:
                 return Text(pct, style="bright_cyan")
             return Text(
-                f"{pct} (detect {hit * 100:.0f}%)",
+                f"{pct} ({' · '.join(parts)})",
                 style="bright_cyan",
             )
 
@@ -719,25 +810,254 @@ if _RICH_AVAILABLE:
                 style="bright_magenta",
             )
 
+
+    # ── Decode-phase shared columns (Scan + File rows) ───────────
+    #
+    # Scan and File live in the same :class:`Progress` so Rich
+    # lays out their columns (label / bar / stats) in a shared
+    # table and guarantees visual alignment.  Each task carries a
+    # ``kind`` field ("scan" / "file") that the custom columns
+    # dispatch on.
+
+
+    def _render_decode_bar(task, width: int) -> "Text":
+        """Render the decode bar for a single row.
+
+        Scan rows get a Rich-style thin bar (``━``) with a bright
+        tip glyph so the bar still shows motion in the first
+        percent of a long video.
+
+        File rows render the qBittorrent-style block map directly:
+        one cell per roughly ``k / width`` source blocks, coloured
+        by recovery density using the 10-tier palette defined in
+        :data:`_DENSITY_CHAR_AND_STYLE`.  No overlay / tip glyph —
+        the block map alone is the progress indicator; the
+        accompanying stats cell (``N/K blocks``) carries the
+        precise counter.
+        """
+        kind = (task.fields or {}).get("kind", "scan")
+        total = task.total or 1
+        pct = max(0.0, min(100.0, task.completed / total * 100.0))
+        if kind == "file":
+            recovered = (task.fields or {}).get("recovered") or {}
+            k = (task.fields or {}).get("k") or 0
+            text = Text()
+            if k > 0 and width > 0:
+                cells = compute_block_map_cells(recovered, k, width)
+                for ch, style, _density in cells:
+                    text.append(ch, style=style)
+            else:
+                # No graph yet — faint placeholder of the right
+                # width so Scan/File stay aligned before the
+                # decoder has seen its first QR.
+                text.append("░" * max(0, width), style="grey35")
+            return text
+        # Scan / Recover (kind == "scan")
+        tip_style = (task.fields or {}).get(
+            "bar_tip_style", "bright_cyan")
+        body_style = (task.fields or {}).get(
+            "bar_body_style", "cyan")
+        done_style = (task.fields or {}).get(
+            "bar_done_style", "bright_cyan")
+        text = Text()
+        if width <= 0:
+            return text
+        if pct >= 100.0:
+            text.append("━" * width, style=done_style)
+            return text
+        filled = pct / 100.0 * width
+        full_cells = int(filled)
+        frac = filled - full_cells
+        if full_cells > 0:
+            text.append("━" * full_cells, style=body_style)
+        if full_cells < width:
+            if frac > 0.5:
+                text.append("╸", style=tip_style)
+            else:
+                text.append("╺", style=tip_style)
+            remaining = width - full_cells - 1
+            if remaining > 0:
+                text.append("━" * remaining, style="grey23")
+        return text
+
+
+    class _DynamicDecodeBar:
+        """Bar renderable that fills whichever width Rich allots it.
+
+        Implementing :class:`rich.console.ConsoleRenderable` lets
+        us read ``options.max_width`` at render time and fill the
+        entire bar column, so Scan's right edge reaches the
+        terminal edge regardless of how wide the stats text
+        happens to be on any given frame.  Both Scan and File use
+        the same renderable class sharing the same column, so
+        their left- and right-edges are aligned by construction.
+        """
+
+        __slots__ = ("_task", "_min_width", "_max_width")
+
+        def __init__(self, task, min_width: int, max_width: int):
+            self._task = task
+            self._min_width = max(1, int(min_width))
+            self._max_width = max(self._min_width, int(max_width))
+
+        def __rich_console__(self, console, options):
+            allotted = options.max_width
+            if allotted is None or allotted <= 0:
+                allotted = self._min_width
+            width = max(self._min_width,
+                        min(self._max_width, int(allotted)))
+            yield _render_decode_bar(self._task, width)
+
+        def __rich_measure__(self, console, options):
+            from rich.measure import Measurement
+            return Measurement(self._min_width, self._max_width)
+
+
+    class _DecodeLabelColumn(ProgressColumn):
+        """Render the left-hand 'Scan' / 'File' label."""
+
+        def render(self, task):  # type: ignore[override]
+            fields = task.fields or {}
+            kind = fields.get("kind", "scan")
+            label = fields.get("label") or kind.capitalize()
+            style = fields.get("label_style", "bold cyan")
+            return Text(_pad_status_label(label), style=style)
+
+
+    class _DecodeBarColumn(ProgressColumn):
+        """Shared expanding bar column (Scan + File aligned).
+
+        The underlying :class:`_DynamicDecodeBar` renderable reads
+        its allotted width at render time, so when the stats cell
+        shortens (e.g. ETA hides early in the scan) the bar grows
+        to fill the right edge.  ``min_width`` / ``max_width``
+        bound the bar so it still has "breathing room" columns on
+        very narrow terminals and doesn't spam a 1000-cell block
+        map on very wide ones.
+        """
+
+        def __init__(self, min_width: int = 24, max_width: int = 200):
+            super().__init__(
+                table_column=Column(ratio=1, no_wrap=True),
+            )
+            self._min_width = max(1, int(min_width))
+            self._max_width = max(self._min_width, int(max_width))
+
+        def render(self, task):  # type: ignore[override]
+            return _DynamicDecodeBar(
+                task,
+                min_width=self._min_width,
+                max_width=self._max_width,
+            )
+
+
+    class _DecodeStatsColumn(ProgressColumn):
+        """Right-hand stats column.
+
+        Scan:  ``24.0% (ETA 00:42, det 74%)``
+        File:  ``24.0%  123/512 blocks``
+
+        The Scan bracket keeps only user-actionable metrics:
+        ETA (what people actually watch) and the detection rate
+        (a diagnostic flag — sudden drops usually mean the source
+        video hit a troublesome segment).  fps is intentionally
+        omitted: it's a derived number that rarely drives a
+        decision, and cutting it frees horizontal budget for the
+        block-map.  The fps value is still computed internally
+        because it's the EWMA estimator that feeds ETA; it just
+        isn't surfaced.
+        """
+
+        def render(self, task):  # type: ignore[override]
+            fields = task.fields or {}
+            kind = fields.get("kind", "scan")
+            total = task.total or 1
+            pct = max(0.0, min(100.0, task.completed / total * 100.0))
+            pct_str = f"{pct:5.1f}%"
+            if kind == "file":
+                k = fields.get("k") or 0
+                recovered = fields.get("recovered") or {}
+                if isinstance(recovered, dict):
+                    n = len(recovered)
+                elif hasattr(recovered, "__len__"):
+                    try:
+                        n = len(recovered)  # type: ignore[arg-type]
+                    except Exception:
+                        n = 0
+                else:
+                    n = 0
+                if k > 0:
+                    return Text(
+                        f"{pct_str}  {n}/{k} blocks",
+                        style="bold",
+                    )
+                return Text(pct_str, style="bold")
+            # Scan / Recover — ETA first, then detect rate.  fps
+            # is deliberately dropped: it's a non-actionable
+            # derived metric and the space is better spent on the
+            # bar itself.
+            hit = fields.get("hit")
+            eta = fields.get("eta")
+            parts: list[str] = []
+            if eta is not None:
+                parts.append(f"ETA {_fmt_duration(eta)}")
+            if hit is not None:
+                # Reserve a 3-digit slot ("  9%" / " 83%" / "100%")
+                # so the stats cell has a constant width.  Without
+                # this the bar column gets re-laid-out every time
+                # the detect-rate digit count changes and the
+                # whole row appears to twitch.
+                parts.append(f"det {hit * 100:>3.0f}%")
+            style = fields.get("stats_style", "bright_cyan")
+            if not parts:
+                return Text(pct_str, style=style)
+            return Text(
+                f"{pct_str} ({', '.join(parts)})",
+                style=style,
+            )
+
+
 else:  # pragma: no cover — exercised only when rich is unavailable
     _DetectStatsColumn = _EncodeStatsColumn = None  # type: ignore[assignment]
+    _DecodeLabelColumn = _DecodeBarColumn = None  # type: ignore[assignment]
+    _DecodeStatsColumn = None  # type: ignore[assignment]
 
 
 class RichReporter:
     """Animated Rich-driven reporter (interactive / verbose-on-tty).
 
-    Scan / Recover / Encode all use a short pip/rich-style thin bar.
-    File recovery is rendered as a wide coloured block map under
-    the bar; targeted recovery adds a segment strip.
+    Scan / Recover use a two-row layout (``Scan`` / ``File`` or
+    ``Recover`` / ``File``) sharing the same Rich :class:`Progress`
+    table so the label / bar / stats columns line up visually.  The
+    File row is the coloured block-map rendered as a fixed-width
+    bar; its stats column shows ``pct  N/K blocks`` so the user can
+    see exactly how many source blocks have been recovered.  The
+    Scan row's stats column adds ``fps`` and ``ETA`` once the
+    estimate has stabilised.  Targeted recovery additionally
+    renders the segment strip above the two rows.
     """
 
     _MAP_MIN_WIDTH = 24
-    _MAP_MAX_WIDTH = 80
-    _MAP_LABEL = _pad_stacked_status_label("File")
+    # Upper bound on the rendered bar width.  Must be generous
+    # enough that on an ultra-wide terminal the bar still reaches
+    # the right edge (≈ term_width − label − stats).  200 covers
+    # 4K terminals; below that we let the expanding column clamp
+    # us naturally.  Do NOT tighten this without checking that
+    # the Scan row still looks "full-width" on normal (~120-col)
+    # terminals — the previous 80-cell cap caused a visible gap
+    # between the bar and the stats cell.
+    _MAP_MAX_WIDTH = 200
     _RANGE_LABEL = _pad_stacked_status_label("Range")
-    # Throttle map updates so per-frame scan callbacks don't churn
-    # the Live renderer when the bucket output hasn't changed.
-    _MAP_QUANT_BUCKETS = 200.0  # 0.5% quantisation on file pct
+    # Rough width budget (chars) reserved on the right for the
+    # stats column.  A full Scan line looks like
+    # ``100.0% (ETA 00:08, det 93%)`` (~27 chars) which fits
+    # within this budget on an 80-column terminal and leaves
+    # more room for the shared bar.
+    _STATS_WIDTH = 28
+    # Smoothing constant for the exponentially-weighted fps
+    # estimator used by the Scan ETA.  0.3 balances responsiveness
+    # against jitter on short bursty scans.
+    _FPS_EWMA_ALPHA = 0.3
 
     def __init__(self, *, verbose: bool = False, stream=None):
         if not _RICH_AVAILABLE:
@@ -752,29 +1072,71 @@ class RichReporter:
         self._verbose = verbose
         self._live: Live | None = None
         self._progress: Progress | None = None
+        # Scan / Recover is the "driver" task; File is the
+        # companion row that reflects decoder state derived from
+        # the same event stream.
         self._task_id: int | None = None
-        # Cached last state for file / range maps.
-        self._file_map_text: Text | None = None
+        self._file_task_id: int | None = None
+        # Cached range-strip overlay (Recover only).
         self._range_map_text: Text | None = None
-        self._last_map_bucket: int = -1
-        self._last_map_k: int = -1
-        self._last_map_recovered_len: int = -1
         # Recover state
         self._recover_segments: Sequence[tuple[int, int]] = ()
         self._recover_total_frames: int = 0
         self._recover_scanned: list[tuple[int, int]] = []
         self._probe_spinner_progress: Progress | None = None
         self._probe_task_id: int | None = None
+        # Scan ETA/fps timing state.
+        self._scan_started_at: float = 0.0
+        self._scan_total_frames: int = 0
+        self._scan_last_fps: float = 0.0
+        self._scan_last_emit_ts: float = 0.0
 
     # ── internal ──────────────────────────────────────────────
-    def _map_width(self) -> int:
+    def _terminal_width(self) -> int:
+        """Best-effort console width (falls back to 80)."""
         try:
-            term_w = self._console.size.width
+            return self._console.size.width
         except Exception:
-            term_w = 80
-        # Leave room for label + trailing ' 37.8%'
-        body = max(self._MAP_MIN_WIDTH, term_w - len(self._MAP_LABEL) - 8)
-        return min(self._MAP_MAX_WIDTH, body)
+            return 80
+
+    def _reset_scan_timing(self) -> None:
+        self._scan_started_at = 0.0
+        self._scan_total_frames = 0
+        self._scan_last_fps = 0.0
+        self._scan_last_emit_ts = 0.0
+
+    def _estimate_scan_fps_eta(
+        self, video_pct: float,
+    ) -> tuple[float | None, float | None]:
+        """Return smoothed ``(fps, eta_sec)`` for the Scan row.
+
+        Uses wall-clock elapsed time against ``video_pct`` so the
+        estimator is robust even when the decoder skips frames
+        (sample_rate > 1).  Suppresses output for the first second
+        / first 1 % to avoid wildly unstable early estimates.
+        """
+        if self._scan_total_frames <= 0:
+            return None, None
+        now = time.monotonic()
+        elapsed = max(0.0, now - self._scan_started_at)
+        if elapsed < 1.0 or video_pct <= 1.0:
+            return None, None
+        done_frames = self._scan_total_frames * video_pct / 100.0
+        inst_fps = done_frames / elapsed if elapsed > 0 else 0.0
+        if self._scan_last_fps <= 0:
+            self._scan_last_fps = inst_fps
+        else:
+            alpha = self._FPS_EWMA_ALPHA
+            self._scan_last_fps = (
+                alpha * inst_fps + (1 - alpha) * self._scan_last_fps
+            )
+        remaining = max(0.0,
+                        self._scan_total_frames - done_frames)
+        if self._scan_last_fps > 0:
+            eta = remaining / self._scan_last_fps
+        else:
+            eta = None
+        return self._scan_last_fps, eta
 
     def _stop_live(self) -> None:
         if self._live is not None:
@@ -785,23 +1147,19 @@ class RichReporter:
             self._live = None
         self._progress = None
         self._task_id = None
-        self._file_map_text = None
+        self._file_task_id = None
         self._range_map_text = None
-        self._last_map_bucket = -1
-        self._last_map_k = -1
-        self._last_map_recovered_len = -1
+        self._reset_scan_timing()
 
     def _build_group(self) -> Group:
         parts: list[object] = []
-        if self._progress is not None:
-            parts.append(self._progress)
         if self._range_map_text is not None:
             range_line = Text()
             range_line.append(self._RANGE_LABEL, style="bold")
             range_line.append_text(self._range_map_text)
             parts.append(range_line)
-        if self._file_map_text is not None:
-            parts.append(self._file_map_text)
+        if self._progress is not None:
+            parts.append(self._progress)
         return Group(*parts)
 
     def _refresh(self) -> None:
@@ -811,6 +1169,25 @@ class RichReporter:
             self._live.update(self._build_group())
         except Exception:
             pass
+
+    def _build_decode_progress(self) -> Progress:
+        """Create a Progress configured for the Scan/File layout.
+
+        The bar column is configured to expand into whatever
+        horizontal space the stats cell doesn't use, so the bar
+        right-edge reaches the terminal edge on every frame.
+        """
+        return Progress(
+            _DecodeLabelColumn(),
+            _DecodeBarColumn(
+                min_width=self._MAP_MIN_WIDTH,
+                max_width=self._MAP_MAX_WIDTH,
+            ),
+            _DecodeStatsColumn(),
+            console=self._console,
+            transient=False,
+            expand=True,
+        )
 
     # ── generic ───────────────────────────────────────────────
     def info(self, message: str) -> None:
@@ -870,39 +1247,95 @@ class RichReporter:
             pass
 
     def probe_done(self, *, sample: int, detect: float, repeat: float,
-                   crop_reduction: float | None) -> None:
+                   crop_reduction: float | None,
+                   observed: int | None = None,
+                   total_probed: int | None = None,
+                   max_dim: int | None = None) -> None:
+        """Summarise the probe outcome and the derived decode plan.
+
+        The output is split into two lines so the observed metrics
+        ("what we saw") don't get visually mixed up with the plan
+        parameters ("what we'll do"):
+
+        .. code-block:: text
+
+           Probe   ✓ observed 281/360 frames  detect 78%
+           Plan    sample=1  repeat=2.5  crop=-43%  max_dim=1080px
+
+        ``observed`` / ``total_probed`` are optional; when absent
+        the first line degrades gracefully to just the detect rate.
+        ``max_dim`` (the adaptive downscale target) is only shown
+        when the probe produced a value.
+        """
         self._stop_live()
         self._probe_spinner_progress = None
         self._probe_task_id = None
+
+        # Line 1 — observations.
+        obs_bits: list[str] = []
+        if observed is not None and total_probed and total_probed > 0:
+            obs_bits.append(
+                f"observed "
+                f"[bold]{observed}[/bold]/[bold]{total_probed}[/bold] frames"
+            )
+        elif observed is not None:
+            obs_bits.append(f"observed [bold]{observed}[/bold] frames")
+        obs_bits.append(f"detect [bold]{detect * 100:.0f}%[/bold]")
+        self._console.print(
+            f"[bold cyan]{_pad_status_label('Probe')}[/bold cyan] "
+            f"[green]✓[/green]  " + "  ".join(obs_bits)
+        )
+
+        # Line 2 — plan parameters.
         if crop_reduction is None:
-            crop_str = "[dim]crop=off[/dim]"
+            crop_str = "crop=[dim]off[/dim]"
         else:
             crop_str = f"crop=[green]-{crop_reduction * 100:.0f}%[/green]"
+        plan_bits = [
+            f"sample=[bold]{sample}[/bold]",
+            f"repeat=[bold]{repeat:.1f}[/bold]",
+            crop_str,
+        ]
+        if max_dim is not None:
+            plan_bits.append(f"max_dim=[bold]{max_dim}px[/bold]")
         self._console.print(
-            f"[bold cyan]Probe[/bold cyan]  [green]✓[/green]  "
-            f"sample=[bold]{sample}[/bold]  "
-            f"detect=[bold]{detect * 100:.0f}%[/bold]  "
-            f"repeat=[bold]{repeat:.1f}[/bold]  "
-            f"{crop_str}"
+            f"[bold cyan]{_pad_status_label('Plan')}[/bold cyan]  "
+            + "  ".join(plan_bits)
         )
 
     # ── decode: scan ──────────────────────────────────────────
     def scan_start(self, *, total_frames: int,
                    total_blocks: int | None = None) -> None:
         self._stop_live()
-        self._progress = Progress(
-            TextColumn(
-                f"[bold cyan]{_pad_status_label('Scan')}[/bold cyan]"
-            ),
-            BarColumn(bar_width=None, complete_style="cyan",
-                      finished_style="bright_cyan",
-                      pulse_style="bright_cyan"),
-            _DetectStatsColumn(),
-            console=self._console,
-            transient=False,
-        )
+        self._progress = self._build_decode_progress()
         self._task_id = self._progress.add_task(
-            "scan", total=max(1, total_frames), hit=0.0)
+            "scan",
+            total=max(1, total_frames),
+            kind="scan",
+            label="Scan",
+            label_style="bold cyan",
+            stats_style="bright_cyan",
+            bar_body_style="cyan",
+            bar_tip_style="bright_cyan",
+            bar_done_style="bright_cyan",
+            hit=0.0,
+            fps=None,
+            eta=None,
+        )
+        self._file_task_id = self._progress.add_task(
+            "file",
+            total=100,
+            kind="file",
+            label="File",
+            label_style="bold cyan",
+            stats_style="bold",
+            recovered={},
+            k=total_blocks or 0,
+        )
+        self._scan_started_at = time.monotonic()
+        self._scan_total_frames = max(1, total_frames)
+        self._scan_last_fps = 0.0
+        self._scan_last_emit_ts = 0.0
         self._live = Live(
             self._build_group(),
             console=self._console,
@@ -914,16 +1347,37 @@ class RichReporter:
     def scan_update(self, *, video_pct: float, hit_window: float,
                     file_pct: float, recovered: object,
                     k: int | None) -> None:
-        if self._progress is None or self._task_id is None:
+        if (self._progress is None
+                or self._task_id is None
+                or self._file_task_id is None):
             return
         total = self._progress.tasks[self._task_id].total or 1
         completed = max(0.0, min(total, video_pct / 100.0 * total))
+        fps, eta = self._estimate_scan_fps_eta(video_pct)
         try:
-            self._progress.update(self._task_id, completed=completed,
-                                  hit=hit_window)
+            self._progress.update(
+                self._task_id,
+                completed=completed,
+                hit=hit_window,
+                fps=fps,
+                eta=eta,
+            )
         except Exception:
             pass
-        self._update_file_map(file_pct, recovered, k)
+        # File row — ``completed`` is a 0..100 percentage just so
+        # the task carries a percent that matches ``file_pct``;
+        # the bar itself paints from ``recovered`` / ``k`` via the
+        # block-map, not from this number.
+        file_completed = max(0.0, min(100.0, file_pct))
+        try:
+            self._progress.update(
+                self._file_task_id,
+                completed=file_completed,
+                recovered=recovered or {},
+                k=k or 0,
+            )
+        except Exception:
+            pass
         self._refresh()
 
     def scan_done(self) -> None:
@@ -943,25 +1397,50 @@ class RichReporter:
         self._recover_segments = list(segments)
         self._recover_total_frames = max(1, total_frames)
         self._recover_scanned = []
-        self._progress = Progress(
-            TextColumn(
-                f"[bold yellow]Recover[/bold yellow]  "
-                f"[dim]{level}[/dim] "
-            ),
-            BarColumn(bar_width=None, complete_style="yellow",
-                      finished_style="bright_yellow",
-                      pulse_style="bright_yellow"),
-            _DetectStatsColumn(),
-            console=self._console,
-            transient=False,
-        )
+        self._progress = self._build_decode_progress()
         self._task_id = self._progress.add_task(
-            "recover", total=1000, hit=0.0)
-        width = self._map_width()
+            "recover",
+            total=1000,
+            kind="scan",
+            label="Recover",
+            label_style="bold yellow",
+            stats_style="bright_yellow",
+            bar_body_style="yellow",
+            bar_tip_style="bright_yellow",
+            bar_done_style="bright_yellow",
+            hit=0.0,
+            fps=None,
+            eta=None,
+        )
+        self._file_task_id = self._progress.add_task(
+            "file",
+            total=100,
+            kind="file",
+            label="File",
+            label_style="bold cyan",
+            stats_style="bold",
+            recovered={},
+            k=0,
+        )
+        # Range strip width mirrors the bar column — fall back to
+        # a sensible middle ground since the expanding bar column
+        # resolves its final width only at render time.
+        range_width = max(self._MAP_MIN_WIDTH,
+                          min(self._MAP_MAX_WIDTH,
+                              self._terminal_width()
+                              - _STATUS_LABEL_WIDTH
+                              - self._STATS_WIDTH
+                              - 4))
         self._range_map_text = render_range_strip_rich(
             self._recover_segments,
             self._recover_total_frames,
-            width,
+            range_width,
+        )
+        # Announce the active level so the user knows which
+        # targeted-recovery strategy is running.
+        self._console.print(
+            f"[bold yellow]{_pad_status_label('Recover')}[/bold yellow] "
+            f"[dim]level={level}  segments={len(self._recover_segments)}[/dim]"
         )
         self._live = Live(
             self._build_group(),
@@ -975,25 +1454,42 @@ class RichReporter:
                        file_pct: float, recovered: object,
                        k: int | None,
                        current_range: tuple[int, int] | None) -> None:
-        if self._progress is None or self._task_id is None:
+        if (self._progress is None
+                or self._task_id is None
+                or self._file_task_id is None):
             return
         try:
-            self._progress.update(self._task_id,
-                                  completed=max(0.0, min(1000.0,
-                                                         progress_pct * 10.0)),
-                                  hit=hit_window)
+            self._progress.update(
+                self._task_id,
+                completed=max(0.0, min(1000.0, progress_pct * 10.0)),
+                hit=hit_window,
+            )
         except Exception:
             pass
-        # Range strip: rebuild only when current range changes.
-        width = self._map_width()
+        # Range strip — rebuild each update; it's cheap and the
+        # current range pointer shifts regularly.
+        range_width = max(self._MAP_MIN_WIDTH,
+                          min(self._MAP_MAX_WIDTH,
+                              self._terminal_width()
+                              - _STATUS_LABEL_WIDTH
+                              - self._STATS_WIDTH
+                              - 4))
         self._range_map_text = render_range_strip_rich(
             self._recover_segments,
             self._recover_total_frames,
-            width,
+            range_width,
             current=current_range,
             scanned=self._recover_scanned,
         )
-        self._update_file_map(file_pct, recovered, k)
+        try:
+            self._progress.update(
+                self._file_task_id,
+                completed=max(0.0, min(100.0, file_pct)),
+                recovered=recovered or {},
+                k=k or 0,
+            )
+        except Exception:
+            pass
         self._refresh()
 
     def recover_done(self) -> None:
@@ -1070,36 +1566,6 @@ class RichReporter:
             f"[bold green]Done[/bold green]   {output_path}  "
             f"[dim]{_fmt_size(size_bytes)}[/dim]"
         )
-
-    # ── helpers ───────────────────────────────────────────────
-    def _update_file_map(self, file_pct: float,
-                         recovered: object,
-                         k: int | None) -> None:
-        if k is None or k <= 0:
-            return
-        bucket = int(file_pct * (self._MAP_QUANT_BUCKETS / 100.0))
-        rec_len = -1
-        if isinstance(recovered, dict):
-            rec_len = len(recovered)
-        elif hasattr(recovered, "__len__"):
-            try:
-                rec_len = len(recovered)  # type: ignore[arg-type]
-            except Exception:
-                rec_len = -1
-        if (bucket == self._last_map_bucket and k == self._last_map_k
-                and rec_len == self._last_map_recovered_len
-                and self._file_map_text is not None):
-            return
-        width = self._map_width()
-        map_text = render_block_map_rich(recovered, k, width)
-        final = Text()
-        final.append(self._MAP_LABEL, style="bold")
-        final.append_text(map_text)
-        final.append(f"  {file_pct:4.1f}%", style="bold")
-        self._file_map_text = final
-        self._last_map_bucket = bucket
-        self._last_map_k = k
-        self._last_map_recovered_len = rec_len
 
 
 # ── Resolver ─────────────────────────────────────────────────────

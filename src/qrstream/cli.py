@@ -58,12 +58,76 @@ def _resolve_mode(args) -> OutputMode:
     return mode
 
 
+def _check_output_path_writable(output: str) -> str | None:
+    """Validate an ``-o / --output`` path *before* the heavy job.
+
+    encode / decode are long-running (often minutes for real
+    videos).  If the destination turns out to be unreachable —
+    parent directory missing, not writable, existing file
+    read-only — the user should hear about it in the first second,
+    not after they've waited through a probe + scan.
+
+    Contract:
+    * Parent directory must exist.  We deliberately do **not**
+      ``mkdir -p`` here: a typo like ``/tmp/typo/out.bin``
+      silently creating ``/tmp/typo/`` is worse than failing loud.
+    * Parent directory must be writable by the current process.
+    * If the output path already exists, it must be a regular
+      file (not a directory) and writable — so we can truncate
+      and overwrite it.
+
+    Returns ``None`` on success or a user-facing error message on
+    failure.  The caller is responsible for printing the message
+    and exiting with the appropriate status code.
+    """
+    if not output:
+        return "output path is empty"
+
+    # Resolve the parent directory.  An empty ``dirname`` (e.g.
+    # plain ``out.bin``) means "current working directory".
+    parent = os.path.dirname(os.path.abspath(output))
+    if not os.path.isdir(parent):
+        return (
+            f"output directory does not exist: {parent}\n"
+            f"Create it first (e.g. `mkdir -p {parent}`) or pick "
+            f"a different path with -o."
+        )
+    if not os.access(parent, os.W_OK):
+        return (
+            f"output directory is not writable: {parent}\n"
+            f"Check permissions or pick a different path with -o."
+        )
+
+    # If the file already exists, make sure we'll actually be
+    # able to truncate and overwrite it.
+    if os.path.exists(output):
+        if os.path.isdir(output):
+            return (
+                f"output path is an existing directory: {output}\n"
+                f"Specify a file path with -o, not a directory."
+            )
+        if not os.access(output, os.W_OK):
+            return (
+                f"output file exists but is not writable: {output}\n"
+                f"Remove it or adjust its permissions first."
+            )
+    return None
+
+
 def cmd_encode(args):
     """Handle the 'encode' subcommand."""
     from .encoder import encode_to_video
 
     if not os.path.exists(args.file):
         print(f"Error: File not found: {args.file}")
+        sys.exit(1)
+
+    # Fail fast on unreachable output paths so the user doesn't
+    # wait through a minutes-long encode before learning the
+    # destination directory doesn't exist or isn't writable.
+    err = _check_output_path_writable(args.output)
+    if err is not None:
+        print(f"Error: {err}", file=sys.stderr)
         sys.exit(1)
 
     if args.overhead < _MIN_OVERHEAD:
@@ -137,6 +201,14 @@ def cmd_decode(args):
 
     if not os.path.exists(args.video):
         print(f"Error: File not found: {args.video}")
+        sys.exit(1)
+
+    # Fail fast on unreachable output paths so users don't wait
+    # through a probe + scan before finding out the destination
+    # directory doesn't exist or isn't writable.
+    err = _check_output_path_writable(args.output)
+    if err is not None:
+        print(f"Error: {err}", file=sys.stderr)
         sys.exit(1)
 
     mode = _resolve_mode(args)
