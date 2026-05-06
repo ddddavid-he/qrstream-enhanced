@@ -200,26 +200,245 @@ class TestRichReporter:
     def test_scan_and_file_rows_align_in_interactive_output(self):
         buf = io.StringIO()
         r = RichReporter(stream=buf)
-        r.scan_start(total_frames=100)
+        r.scan_start(total_frames=100, total_blocks=32)
         r.scan_update(video_pct=100.0, hit_window=0.93,
                       file_pct=100.0,
                       recovered=set(range(32)), k=32)
         r.close()
 
         lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
-        scan_line = [ln for ln in lines if "Scan" in ln][-1]
-        file_line = [ln for ln in lines if "File" in ln][-1]
+        scan_line = [ln for ln in lines if ln.lstrip().startswith("Scan")][-1]
+        file_line = [ln for ln in lines if ln.lstrip().startswith("File")][-1]
 
         def _first_bar_col(line: str) -> int:
             cols = [line.find(ch) for ch in "━█▓▒░" if ch in line]
             return min(col for col in cols if col >= 0)
 
-        assert scan_line.startswith("Scan")
-        assert file_line.startswith("File")
+        def _last_bar_col(line: str) -> int:
+            cols = [line.rfind(ch) for ch in "━█▓▒░╸╺" if ch in line]
+            return max(col for col in cols if col >= 0)
+
+        # Label starts: Scan / File rows both begin at column 0 and
+        # carry the padded label set by ``_pad_status_label``.
+        assert scan_line.lstrip().startswith("Scan")
+        assert file_line.lstrip().startswith("File")
+        # The shared bar column must start at exactly the same
+        # column on both rows — this is what "progress bars are
+        # aligned" means to the user.
         assert _first_bar_col(scan_line) == _first_bar_col(file_line)
-        assert "100% (detect 93%)" in scan_line
-        assert "100%    (detect" not in scan_line
-        assert len(scan_line) == len(file_line)
+        # …and end at the same column too.  This guards against
+        # regressions where one of the rows grows a wider stats
+        # suffix and drags the bar shorter on that row alone.
+        assert _last_bar_col(scan_line) == _last_bar_col(file_line)
+        # Scan stats: at 100% the ETA/fps fields are suppressed
+        # (no smoothed estimate available for an instant scan) so
+        # only "det N%" is present — abbreviated from "detect" to
+        # keep the stats cell inside the width budget.  The detect
+        # percent is rendered with a fixed 3-character slot
+        # ("  9%" / " 83%" / "100%") so the stats width stays
+        # constant, so match with a regex rather than a literal.
+        import re
+        assert re.search(r"100\.0% \(det\s+93%\)", scan_line), (
+            f"scan_line: {scan_line!r}"
+        )
+        # File stats: N/K blocks counter is shown next to the %.
+        assert "32/32 blocks" in file_line
+        assert "100.0%" in file_line
+
+    def test_file_row_renders_as_pure_block_map(self):
+        """File row is the qBittorrent-style block map, with NO
+        extra tip / cursor / overlay glyph.
+
+        Covers the regression where an earlier design added a
+        1/8-cell "progress tip" on top of the map; users found it
+        visually confusing and wanted the block map to speak for
+        itself.  This test both guards against that regression and
+        makes the "block map is the single visual indicator"
+        contract explicit.
+        """
+        buf = io.StringIO()
+        r = RichReporter(stream=buf)
+        r.scan_start(total_frames=1000, total_blocks=32)
+        r.scan_update(video_pct=5.0, hit_window=0.5,
+                      file_pct=0.6,      # <1%: nothing recovered yet
+                      recovered=set(), k=32)
+        r.close()
+        lines = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+        file_line = next(ln for ln in lines
+                         if ln.lstrip().startswith("File"))
+        # qBittorrent-style block-map characters present.
+        assert any(ch in file_line for ch in "░▒▓█")
+        # No sub-cell tip glyphs (the removed 1/8-width blocks).
+        assert not any(ch in file_line for ch in "▏▎▍▌▋▊▉"), (
+            f"tip glyph leaked into File row: {file_line!r}"
+        )
+        # N/K counter reflects the recovered set size.
+        assert "0/32 blocks" in file_line
+
+    def test_file_row_full_recovery_uses_block_map_colours(self):
+        """Full recovery → block-map paints ‘█’, nothing else."""
+        buf = io.StringIO()
+        r = RichReporter(stream=buf)
+        r.scan_start(total_frames=100, total_blocks=16)
+        r.scan_update(video_pct=100.0, hit_window=1.0,
+                      file_pct=100.0,
+                      recovered=set(range(16)), k=16)
+        r.close()
+        file_line = next(
+            ln for ln in buf.getvalue().splitlines()
+            if ln.lstrip().startswith("File")
+        )
+        # Filled buckets use '█' (top density tier) — the classic
+        # qBittorrent "all chunks present" look.
+        assert "█" in file_line
+        # No tip / cursor glyphs.
+        assert not any(ch in file_line for ch in "▏▎▍▌▋▊▉")
+        assert "16/16 blocks" in file_line
+
+    def test_scan_row_reports_eta_after_warmup(self):
+        """After ≥1 s and >1% progress, Scan shows ETA + det%.
+
+        fps is intentionally NOT surfaced in the Scan stats cell
+        (it's still computed internally to feed the ETA EWMA).
+        This test both verifies the positive case (ETA + det
+        appear in the expected order) and locks in the "no fps"
+        contract so a future refactor can't silently put it back.
+        """
+        import qrstream.ui as ui_mod
+
+        buf = io.StringIO()
+        r = RichReporter(stream=buf)
+        r.scan_start(total_frames=1000)
+        # Fast-forward the reporter's internal clock so the ETA
+        # estimator has the warm-up it needs.  We monkey-patch
+        # ``time.monotonic`` inside the ui module to keep the test
+        # deterministic (no real sleeps).
+        r._scan_started_at = 0.0  # anchor "start" at t=0
+        real_monotonic = ui_mod.time.monotonic
+        try:
+            ui_mod.time.monotonic = lambda: 5.0  # type: ignore[assignment]
+            r.scan_update(video_pct=25.0, hit_window=0.8,
+                          file_pct=25.0,
+                          recovered=set(range(4)), k=16)
+        finally:
+            ui_mod.time.monotonic = real_monotonic
+        r.close()
+        out = buf.getvalue()
+        scan_line = [ln for ln in out.splitlines()
+                     if ln.lstrip().startswith("Scan")][-1]
+        # ETA + det appear inside the parenthesised stats.
+        # det uses a fixed-width 3-char slot so the stats cell
+        # doesn't jitter when the detect-rate digit count
+        # changes — match with a regex rather than a literal.
+        import re
+        assert "ETA" in scan_line
+        assert re.search(r"det\s+80%", scan_line), (
+            f"scan_line: {scan_line!r}"
+        )
+        # fps is NOT rendered — neither the unit nor a bare
+        # number before it.  Guard against regressions that would
+        # re-add a derived metric users explicitly asked to drop.
+        assert "fps" not in scan_line
+        # Order contract: ETA precedes det.
+        assert scan_line.index("ETA") < scan_line.index("det ")
+
+    def test_scan_stats_width_constant_across_detect_rates(self):
+        """det N% must occupy a fixed-width slot so the bar
+        doesn't twitch as the detect rate crosses digit-count
+        boundaries (9% → 10% → 100%).
+
+        This test renders three scan_updates with wildly different
+        detect rates at the same video percent and asserts that
+        the bar end column and overall line length are identical
+        on every frame.  A future change that drops the ``>3`` in
+        ``det {hit*100:>3.0f}%`` would re-introduce the jitter
+        and trip this test.
+        """
+        import qrstream.ui as ui_mod
+
+        def render_scan_line(hit: float) -> str:
+            buf = io.StringIO()
+            r = RichReporter(stream=buf)
+            # Pin console width so we're measuring the stats
+            # column alone, not terminal resize.
+            r._console.width = 120  # type: ignore[attr-defined]
+            r._console._width = 120  # type: ignore[attr-defined]
+            r.scan_start(total_frames=1000, total_blocks=100)
+            r._scan_started_at = 0.0
+            real = ui_mod.time.monotonic
+            try:
+                ui_mod.time.monotonic = lambda: 10.0  # type: ignore[assignment]
+                r.scan_update(video_pct=25.0, hit_window=hit,
+                              file_pct=10.0,
+                              recovered=set(range(10)), k=100)
+            finally:
+                ui_mod.time.monotonic = real
+            r.close()
+            for ln in buf.getvalue().splitlines():
+                if ln.lstrip().startswith("Scan"):
+                    return ln
+            raise AssertionError("Scan line not found")
+
+        lines = [render_scan_line(h) for h in (0.05, 0.09, 0.83, 1.00)]
+        lengths = {len(ln) for ln in lines}
+        assert len(lengths) == 1, (
+            f"scan lines have varying length across detect rates "
+            f"(stats cell is jittering): {lengths}; lines={lines}"
+        )
+        # Bar end column must also match — guards against the
+        # case where only trailing spaces change but the bar
+        # itself is being recomputed.
+        def _bar_end(ln: str) -> int:
+            return max(ln.rfind("━"), ln.rfind("╺"), ln.rfind("╸"))
+
+        bar_ends = {_bar_end(ln) for ln in lines}
+        assert len(bar_ends) == 1, (
+            f"bar right edge shifts across detect rates "
+            f"(indicates width-jitter regression): {bar_ends}"
+        )
+
+    def test_probe_done_emits_probe_and_plan_lines(self):
+        """probe_done splits observations and plan into two lines."""
+        buf = io.StringIO()
+        r = RichReporter(stream=buf)
+        r.probe_done(sample=1, detect=0.78, repeat=2.5,
+                     crop_reduction=0.43,
+                     observed=281, total_probed=360,
+                     max_dim=1080)
+        r.close()
+        out = buf.getvalue()
+        lines = [ln for ln in out.splitlines() if ln.strip()]
+        probe_line = next(ln for ln in lines
+                          if ln.lstrip().startswith("Probe"))
+        plan_line = next(ln for ln in lines
+                         if ln.lstrip().startswith("Plan"))
+        # Observations on the Probe line.
+        assert "281/360" in probe_line
+        assert "detect 78%" in probe_line
+        # Plan parameters on the second line, not mixed into the
+        # first — this is the readability fix users asked for.
+        assert "sample=1" in plan_line
+        assert "repeat=2.5" in plan_line
+        assert "-43%" in plan_line
+        assert "1080px" in plan_line
+        # Cross-check: the plan's parameters MUST NOT leak back
+        # into the Probe line.
+        assert "sample=" not in probe_line
+        assert "repeat=" not in probe_line
+
+    def test_probe_done_without_optional_fields_is_graceful(self):
+        """Legacy probe_done calls (no observed / max_dim) still render."""
+        buf = io.StringIO()
+        r = RichReporter(stream=buf)
+        r.probe_done(sample=2, detect=0.5, repeat=1.8,
+                     crop_reduction=None)
+        r.close()
+        out = buf.getvalue()
+        assert "Probe" in out
+        assert "Plan" in out
+        assert "detect 50%" in out
+        assert "crop=off" in out or "crop=" in out
+        assert "max_dim=" not in out  # only shown when provided
 
 
 class TestResolver:

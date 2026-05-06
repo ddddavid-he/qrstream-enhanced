@@ -226,12 +226,12 @@ Base45 (RFC 9285) is the default because QR's alphanumeric mode is denser per ch
 - For large **V3** inputs, the encoder uses `mmap` for random access, avoiding loading the entire file into memory.
 - When the input is large enough, V3 encoding automatically disables `zlib` compression to preserve the low-memory path; use `--force-compress` to override.
 - The decoder supports streaming writes with incremental decompression, reducing memory overhead.
-- Large file decoding shows **LT block decoding progress** and **output write progress** bars.
+- During decode, the interactive UI shows a two-row live block: a video-scan progress bar (percent, ETA, live detection rate) and a qBittorrent-style file-recovery block map (per-bucket colour density plus an `N/K blocks` counter).  Use `--output-mode log` for CI-friendly `key=value` lines or `--output-mode quiet` for scripted invocations.
 
 ### Decoding Pipeline
 
-1. **Probe phase**: Sample 3 spread-out windows in the video (120 frames each by default), measure detection rate and repetition per window, pick the most conservative `sample_rate`
-2. **Main scan**: Detect QR codes in parallel at the adaptive sample rate, feeding into the LT decoder in real time
+1. **Probe phase**: Sample 3 spread-out windows in the video (120 frames each by default), measure detection rate and repetition per window, pick the most conservative `sample_rate`; completion prints a two-line `Probe` + `Plan` summary (observations vs. derived parameters)
+2. **Main scan**: Detect QR codes in parallel at the adaptive sample rate, feeding into the LT decoder in real time.  The interactive UI shows a `Scan` row (video progress / ETA / detection rate) and a `File` row (qBittorrent-style block map + `N/K blocks` counter), aligned in a shared table
 3. **Targeted recovery**: If the first pass didn't recover all blocks, use linear regression on observed (seed, frame) pairs to locate missing seeds and re-scan those segments precisely
 4. **LT decode**: Belief propagation (peeling) to recover all source blocks
 5. **Output writeback**: Write recovered blocks sequentially; incremental decompression in compressed mode

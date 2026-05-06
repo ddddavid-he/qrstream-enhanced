@@ -1717,6 +1717,8 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
                 detect=detect_rate,
                 repeat=avg_repeat,
                 crop_reduction=crop_reduction,
+                observed=probe_count,
+                max_dim=adaptive_max_dim,
             )
 
             if verbose:
