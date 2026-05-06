@@ -12,7 +12,7 @@ Lock in:
 
 If a future segno upgrade changes the mask=0 bit layout these tests
 will flip red immediately; update the stored hashes only after
-verifying the new layout still decodes cleanly via WeChatQRCode on
+verifying the new layout still decodes cleanly via zxing-cpp on
 the real fixtures.
 """
 
@@ -69,7 +69,7 @@ def test_generate_qr_image_is_deterministic(payload, version, alphanumeric):
     (b"hello world", 5),
     (b"QRSTREAM-" * 10, 10),
 ])
-def test_generate_qr_image_round_trips_through_wechat(payload, version):
+def test_generate_qr_image_round_trips(payload, version):
     """Sanity: whichever mask we pinned to still scans cleanly.
 
     Uses the default alphanumeric=True (base45) path — the production
