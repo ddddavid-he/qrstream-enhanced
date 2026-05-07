@@ -15,12 +15,12 @@ Encoder                                     Decoder
 ```
 
 1. **Encode**: Split the file (optionally zlib-compressed) into blocks, generate redundant coded blocks via LT fountain codes, serialize each into a V3 protocol frame, base45-encode into QR alphanumeric-mode symbols, and output an MP4 video.
-2. **Decode**: Extract QR codes from video using WeChatQRCode (highly robust), base45-decode, CRC32-validate to discard corrupted frames, feed into the LT decoder for belief propagation (peeling), and reconstruct the original file. Legacy base64 and COBS videos (pre-v0.6) continue to decode via a fallback path.
+2. **Decode**: Extract QR codes from video using zxing-cpp (fast, robust, crash-free), base45-decode, CRC32-validate to discard corrupted frames, feed into the LT decoder for belief propagation (peeling), and reconstruct the original file. Legacy base64 and COBS videos (pre-v0.6) continue to decode via a fallback path.
 
 **Key Features**:
 - **LT Fountain Codes**: Rateless erasure codes — naturally tolerant of frame loss, blur, and occlusion
 - **Base45 + QR Alphanumeric Mode**: RFC 9285 base45 packs data into QR alphanumeric mode (5.5 bits/char vs 8 for byte mode); smaller and faster than base64 at the same QR version
-- **WeChatQRCode Detector**: Far more robust than standard QR detectors for phone-captured screens (perspective, moire, lighting)
+- **zxing-cpp Detector**: Native C++ QR detector (replaces WeChatQRCode since v0.9) — releases the GIL for true parallel detection, reentrant and crash-free on noisy inputs, 4–10× faster with equivalent detection rate
 - **Adaptive Sample Rate**: Automatically selects optimal sampling strategy based on detection rate and frame repetition
 - **Targeted Recovery**: After initial scan, precisely re-scans video segments where missing blocks are expected
 - **Low-Memory Paths**: mmap-backed encoding and streaming decode-to-file for large inputs
@@ -99,7 +99,7 @@ qrstream encode <file> -o output.mp4 [options]
 | `-o, --output` | **required** | Output video path |
 | `--overhead` | `2.0` | Encoding redundancy ratio (multiple of source block count) |
 | `--fps` | `10` | Output video frame rate |
-| `--ec-level` | `1` | QR error correction: 0=L(7%), 1=M(15%), 2=Q(25%), 3=H(30%) |
+| `--ec-level` | `1` | **Deprecated** (hidden since v0.9, will be removed in v0.10.0): QR error correction level. Redundant — LT `--overhead` already handles frame loss. Existing scripts continue to work but should stop using this option. |
 | `--qr-version` | `25` | QR code version 1-40 (higher = denser) |
 | `--border` | standard 4-module quiet zone | Quiet-zone width as a percentage of QR content width (`--border 10` = 10%, `--border 0` disables it) |
 | `--lead-in-seconds` | `0.0` | Insert white lead-in frames before the first QR frame |
@@ -107,9 +107,10 @@ qrstream encode <file> -o output.mp4 [options]
 | `--force-compress` | - | Force compression for large V3 inputs (higher memory usage) |
 | `--qr-mode` | `alphanumeric` | QR payload encoding: `alphanumeric` (base45, default, denser) or `base64` (byte mode, fallback) |
 | `--legacy-qr` | - | Accepted but ignored (kept for CLI backward compatibility) |
-| `--codec` | `mp4v` | Video codec: `mp4v` or `mjpeg` (faster but larger files) |
+| `--codec` | `h264` | Video codec: `h264` (default, good compression), `mp4v`, or `mjpeg` (faster encode, larger files) |
 | `-w, --workers` | `min(CPU count, 4)` | Parallel worker threads for QR generation. The auto-picked default is capped at 4 because, although QR matrix generation (`zxingcpp.create_barcode()`) is native C++ (GIL-free), the full pipeline is typically video-writer-bound. Pass a larger value explicitly to override the cap on CPU-rich machines if profiling shows benefit. |
-| `-v, --verbose` | - | Print extra detail (progress bars always shown) |
+| `--output-mode` | `auto` | Progress/status rendering: `auto` (Rich interactive on TTY, `log` otherwise), `log` (append-only `key=value` lines for CI), `quiet` (errors and final path only), `verbose` (full diagnostic output) |
+| `-v, --verbose` | - | Alias for `--output-mode verbose` (kept for backward compatibility) |
 
 ### Decode (QR Video → File)
 
@@ -122,23 +123,27 @@ qrstream decode <video> -o output_file [options]
 | `<video>` | - | Input video path (MP4, MOV, etc.) |
 | `-o, --output` | **required** | Output file path |
 | `-s, --sample-rate` | `0` (auto) | Sample every Nth frame (0 = adaptive probing) |
-| `-w, --workers` | All CPU cores | Parallel worker threads for QR detection. `WeChatQRCode` is implemented in C++ and releases the GIL during detection, so more threads scale close to linearly on multi-core machines. |
-| `-v, --verbose` | - | Print detailed progress |
+| `-w, --workers` | All CPU cores | Parallel worker threads for QR detection. zxing-cpp is native C++ and releases the GIL during detection, so more threads scale close to linearly on multi-core machines. |
+| `--output-mode` | `auto` | Progress/status rendering: `auto`, `log`, `quiet`, or `verbose` (same as encode) |
+| `-v, --verbose` | - | Alias for `--output-mode verbose` (kept for backward compatibility) |
 
 ### Examples
 
 ```bash
-# Encode a PDF (default: base45 alphanumeric mode, 2x redundancy)
-qrstream encode report.pdf -o report.mp4 --overhead 2.0 -v
+# Encode a PDF (default: base45 alphanumeric mode, 2x redundancy, h264)
+qrstream encode report.pdf -o report.mp4 --overhead 2.0 --output-mode verbose
 
 # Decode video (adaptive sample rate + targeted recovery)
-qrstream decode report.mp4 -o report_recovered.pdf -v
+qrstream decode report.mp4 -o report_recovered.pdf --output-mode verbose
 
-# Encode with high error correction (for phone screen capture)
-qrstream encode data.bin -o data.mp4 --ec-level 3 --qr-version 15
+# Encode with high QR version for phone screen capture
+qrstream encode data.bin -o data.mp4 --qr-version 20
 
 # Add a larger quiet zone and white lead-in before recording
 qrstream encode slides.zip -o slides.mp4 --border 10 --lead-in-seconds 1.5
+
+# CI-friendly decode with log output
+qrstream decode recording.mov -o out.bin --output-mode log
 ```
 
 ### Python API
@@ -181,12 +186,12 @@ project-root/
 │   ├── test_roundtrip.py      # Pure LT codec roundtrip tests (no video I/O)
 │   ├── test_qr_generate.py    # QR generation correctness + glog(0) regression
 │   ├── test_e2e_encode_decode.py  # End-to-end encode→video→decode SHA256 tests
-│   └── test_optimizations.py  # Perf optimizations + WeChatQR + legacy-fallback tests
+│   └── test_optimizations.py  # Perf optimizations + zxing-cpp + legacy-fallback tests
 └── dev/
     ├── benchmark.py           # Performance benchmarks
     ├── perf-profile/          # cProfile hotspot analysis scripts
     ├── test-container/        # Podman test container
-    └── wechatqrcode-mnn-poc/  # WeChatQRCode MNN acceleration POC
+    └── wechatqrcode-mnn-poc/  # Historical WeChatQRCode MNN acceleration POC (archived)
 ```
 
 ## Technical Details
@@ -258,20 +263,12 @@ uv run pytest -m e2e -v
 uv run pytest -m slow -v
 ```
 
-### Decoder native crashes
+### Utility Commands
 
-If `qrs decode` exits with `trace trap` or a SIGSEGV/SIGTRAP message,
-you are hitting a known unfixed crash in the WeChat QR detector
-bundled with `opencv_contrib` (upstream issue `opencv_contrib#3570`).
-Since v0.7.7, `qrs decode` runs detection in subprocess helpers by
-default, so a single crashing frame is caught and treated as a dropped
-frame — the decode continues and completes as long as LT overhead (see
-`--overhead`) is ≥ 1.5.
-
-To see whether the subprocess sandbox caught any crashes, look for a
-summary line like `[sandbox] detector crashed N time(s) during decode`.
-If you believe the sandbox overhead is unnecessary on your input, you
-can disable it at your own risk with `--detect-isolation off`.
+```bash
+# Display the colour palette used by the interactive UI
+qrstream colors
+```
 
 ## License
 
