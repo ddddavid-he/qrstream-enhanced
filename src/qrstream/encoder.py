@@ -12,8 +12,15 @@ from queue import Queue
 from threading import Thread
 from concurrent.futures import ThreadPoolExecutor
 
-import cv2
-import numpy as np
+from ._compat import suppress_native_stderr
+
+with suppress_native_stderr():
+    import cv2
+    import numpy as np
+    import av
+
+# Suppress verbose FFmpeg log output (info/warning level).
+av.logging.set_level(av.logging.FATAL)
 
 from .lt_codec import PRNG, DEFAULT_C, DEFAULT_DELTA, xor_bytes
 from .protocol import (
@@ -27,6 +34,10 @@ from .ui import ProgressReporter, QuietReporter
 
 # Prefer mmap-backed random access for larger uncompressed inputs.
 _MMAP_THRESHOLD = 10 * 1024 * 1024
+
+
+class _WriterFailure(RuntimeError):
+    """Raised when the background video writer fails."""
 
 
 class MmapDataSource:
@@ -177,9 +188,12 @@ def _load_payload(input_path: str, compress: bool,
 
 
 # Codec map for video output
-_CODEC_MAP = {
-    'mp4v': ('mp4v', '.mp4'),
-    'mjpeg': ('MJPG', '.avi'),
+# PyAV codec mapping: user-facing name → (pyav_codec, pix_fmt, ext, stream_options).
+_PYAV_CODEC_MAP = {
+    'h264': ('libx264', 'yuv420p', '.mp4',
+             {"preset": "ultrafast", "tune": "stillimage", "crf": "23"}),
+    'mp4v': ('mpeg4', 'yuv420p', '.mp4', {}),
+    'mjpeg': ('mjpeg', 'yuvj420p', '.avi', {"q:v": "2"}),
 }
 
 
@@ -201,7 +215,7 @@ def encode_to_video(input_path: str, output_path: str,
                     verbose: bool = False,
                     workers: int | None = None,
                     use_legacy_qr: bool = False,
-                    codec: str = 'mp4v',
+                    codec: str = 'h264',
                     binary_qr: bool = True,
                     alphanumeric_qr: bool | None = None,
                     force_compress: bool = False,
@@ -232,9 +246,11 @@ def encode_to_video(input_path: str, output_path: str,
 
     high_density = _resolve_alphanumeric_flag(binary_qr, alphanumeric_qr)
     payload = None
-    writer = None
+    output = None
     writer_thread = None
     writer_queue: Queue | None = None
+    writer_error: list[BaseException] = []
+    final_output_path = output_path
 
     try:
         payload, compress, used_mmap, raw_size = _load_payload(
@@ -330,41 +346,58 @@ def encode_to_video(input_path: str, output_path: str,
             overhead=overhead,
         )
 
-        fourcc_str, default_ext = _CODEC_MAP.get(codec, ('mp4v', '.mp4'))
-        fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
+        codec_info = _PYAV_CODEC_MAP.get(codec)
+        if codec_info is None:
+            raise ValueError(
+                f"Unsupported codec: {codec!r}. "
+                f"Choose from: {list(_PYAV_CODEC_MAP)}"
+            )
+        pyav_codec, pix_fmt, default_ext, stream_opts = codec_info
 
-        if codec == 'mjpeg' and output_path.endswith('.mp4'):
-            output_path = output_path[:-4] + default_ext
+        # Auto-correct file extension when codec requires a different container.
+        if not output_path.endswith(default_ext):
+            base, _ = os.path.splitext(output_path)
+            output_path = base + default_ext
+        final_output_path = output_path
 
-        writer = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
-        if not writer.isOpened():
-            raise RuntimeError(f"Cannot open video writer for {output_path}")
+        output = av.open(output_path, "w")
+        out_stream = output.add_stream(pyav_codec, rate=fps)
+        out_stream.width = w
+        out_stream.height = h
+        out_stream.pix_fmt = pix_fmt
+        if stream_opts:
+            out_stream.options = stream_opts
 
-        # ── VideoWriter runs on its own thread ──────────────────────
-        # Measured baseline (v0.6.1, 10 MB input, 14 workers):
-        #   VideoWriter.write was 54% of encode wall-time, blocking
-        #   the main thread between batches. Moving the write loop
-        #   to a dedicated thread lets pool.map() keep the workers
-        #   busy while the previous batch is being muxed.
+        # ── Encoder/muxer runs on its own thread ────────────────────
+        # x264 encode + mux overlaps with QR generation on the main
+        # thread so the pipeline stays compute-bound on the slowest
+        # stage rather than alternating between them.
         writer_queue: Queue = Queue(maxsize=max(workers * 8, 128))
 
         def _writer_loop():
-            while True:
-                frame = writer_queue.get()
-                if frame is None:
-                    return
-                if frame.shape[:2] != (h, w):
-                    frame = cv2.resize(frame, (w, h),
-                                       interpolation=cv2.INTER_NEAREST)
-                writer.write(frame)
+            try:
+                while True:
+                    frame = writer_queue.get()
+                    if frame is None:
+                        return
+                    if frame.shape[:2] != (h, w):
+                        frame = cv2.resize(frame, (w, h),
+                                           interpolation=cv2.INTER_NEAREST)
+                    frame_av = av.VideoFrame.from_ndarray(frame, format="bgr24")
+                    for packet in out_stream.encode(frame_av):
+                        output.mux(packet)
+            except BaseException as exc:
+                writer_error.append(exc)
 
-        writer_thread = Thread(target=_writer_loop, daemon=False)
+        writer_thread = Thread(target=_writer_loop, daemon=True)
         writer_thread.start()
 
         if lead_in_frames:
             blank_frame = np.full((h, w, 3), 255, dtype=first_qr.dtype)
             for _ in range(lead_in_frames):
                 writer_queue.put(blank_frame)
+            if writer_error:
+                raise _WriterFailure("video writer thread failed") from writer_error[0]
 
         batch_size = max(workers * 4, 64)
 
@@ -427,6 +460,8 @@ def encode_to_video(input_path: str, output_path: str,
                     ))
                     for qr_img in qr_imgs:
                         writer_queue.put(qr_img)
+                        if writer_error:
+                            raise _WriterFailure("video writer thread failed") from writer_error[0]
                     produced += len(batch)
                     _report_progress(time.monotonic())
 
@@ -445,6 +480,8 @@ def encode_to_video(input_path: str, output_path: str,
                     auto_mask=auto_mask,
                 )
                 writer_queue.put(qr_img)
+                if writer_error:
+                    raise _WriterFailure("video writer thread failed") from writer_error[0]
                 produced += 1
                 _report_progress(time.monotonic())
 
@@ -460,25 +497,36 @@ def encode_to_video(input_path: str, output_path: str,
         writer_queue.put(None)
         writer_thread.join()
         writer_thread = None
+        if writer_error:
+            raise _WriterFailure("video writer thread failed") from writer_error[0]
+
+        # Flush encoder: drain remaining frames and close the file.
+        for packet in out_stream.encode():
+            output.mux(packet)
+        output.close()
+        output = None  # Prevent double-close in finally block.
     finally:
         # On the exception path, make sure we don't leave the writer
-        # thread blocked on an empty queue (daemon=False would keep the
-        # process alive after an error).
+        # thread blocked on an empty queue (daemon=True would let it die
+        # with the process, but we still want a clean shutdown attempt).
         if writer_thread is not None and writer_thread.is_alive():
             if writer_queue is not None:
                 writer_queue.put(None)
             writer_thread.join(timeout=5)
-        if writer is not None:
-            writer.release()
+        if output is not None:
+            try:
+                output.close()
+            except Exception:
+                pass
         if payload is not None:
             close = getattr(payload, 'close', None)
             if callable(close):
                 close()
 
-    output_size = os.path.getsize(output_path)
-    reporter.encode_done(output_path=output_path, size_bytes=output_size)
+    output_size = os.path.getsize(final_output_path)
+    reporter.encode_done(output_path=final_output_path, size_bytes=output_size)
     if verbose:
         reporter.debug(
-            f"Output: {output_path} ({output_size} bytes, "
+            f"Output: {final_output_path} ({output_size} bytes, "
             f"{total_frames} frames)"
         )

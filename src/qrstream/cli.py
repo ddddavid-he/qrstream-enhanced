@@ -319,8 +319,8 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                      help='QR payload encoding: alphanumeric (default, base45 '
                           'into QR alphanumeric mode, ~29%% more capacity) '
                           'or base64 (standard, QR byte mode).')
-    enc.add_argument('--codec', choices=['mp4v', 'mjpeg'], default='mp4v',
-                     help='Video codec: mp4v (default) or mjpeg (faster, larger)')
+    enc.add_argument('--codec', choices=['h264', 'mp4v', 'mjpeg'], default='h264',
+                     help='Video codec: h264 (default), mp4v, or mjpeg (faster, larger)')
     enc.add_argument('-w', '--workers', type=int, default=None,
                      help='Parallel workers for QR generation (default: 1; higher values may not improve performance)')
     enc.add_argument('--auto-mask', action='store_true',

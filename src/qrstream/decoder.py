@@ -23,8 +23,15 @@ from concurrent.futures import (
     wait as _futures_wait,
 )
 
-import cv2
-import numpy as np
+from ._compat import suppress_native_stderr
+
+with suppress_native_stderr():
+    import cv2
+    import numpy as np
+    import av
+
+# Suppress verbose FFmpeg log output (info/warning level).
+av.logging.set_level(av.logging.FATAL)
 
 from .lt_codec import PRNG, BlockGraph, DEFAULT_C, DEFAULT_DELTA
 from .protocol import unpack
@@ -62,9 +69,21 @@ ProbeObservation = namedtuple("ProbeObservation", [
 ])
 
 
-# ── Sandbox constants (kept for qr_sandbox API compatibility) ────
-_DEFAULT_SANDBOX_POOL_CAP = 8
-_DEFAULT_SANDBOX_CRASH_ABORT_THRESHOLD = 3
+class _ReaderFailure(RuntimeError):
+    """Raised when a background frame reader fails."""
+
+
+def _open_video_container(video_path: str):
+    """Open a video via PyAV and normalise file-not-found behaviour."""
+    try:
+        return av.open(video_path)
+    except FileNotFoundError:
+        raise
+    except Exception as exc:
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"Cannot open video file: {video_path}") from exc
+        raise
+
 
 # ── Reader / progress constants ──────────────────────────────────
 # Maximum frames the reader thread may prefetch ahead of the worker
@@ -90,17 +109,6 @@ _PROBE_PIPELINE_QUEUE = 32
 # ── CLAHE preprocessing ─────────────────────────────────────────
 _CLAHE_CLIP_LIMIT = 2.0
 _CLAHE_TILE_GRID_SIZE = (8, 8)
-
-
-def _default_sandbox_pool_size(workers: int) -> int:
-    """Kept for API compatibility; sandbox is no longer used."""
-    cpu_count = os.cpu_count() or 1
-    return max(1, min(workers, cpu_count, _DEFAULT_SANDBOX_POOL_CAP))
-
-
-def _default_sandbox_crash_abort_threshold(pool_size: int) -> int:
-    """Kept for API compatibility; sandbox is no longer used."""
-    return max(_DEFAULT_SANDBOX_CRASH_ABORT_THRESHOLD, pool_size)
 
 
 class LTDecoder:
@@ -394,7 +402,7 @@ def _downscale_frame(
     scale = max_dim / src_max
     new_w = int(w * scale)
     new_h = int(h * scale)
-    return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
 
 def _bbox_side_pixels(bbox: np.ndarray) -> float:
@@ -446,7 +454,7 @@ def _prepare_frame(
     """
     frame = _crop_frame(frame, crop_box)
     frame = _downscale_frame(frame, max_dim=max_dim)
-    return np.ascontiguousarray(frame).copy()
+    return np.ascontiguousarray(frame)
 
 
 def _derive_crop_box(
@@ -910,45 +918,88 @@ def _try_cobs(qr_data: str, cobs_decode_fn) -> bytes | None:
         return None
 
 
+# ── Video metadata helper ─────────────────────────────────────────
+
+def _get_video_info(video_path: str) -> tuple[int, float, int, int]:
+    """Return (total_frames, fps, width, height) from a video file.
+
+    Uses a multi-tier fallback for total_frames because some container
+    formats (MKV, WebM, certain MOV) do not store nb_frames metadata
+    and PyAV reports ``stream.frames == 0`` even though the file has
+    decodable content.
+
+    Fallback tiers:
+      1. ``stream.frames`` — direct metadata field.
+      2. ``stream.duration * stream.time_base * fps`` — stream-level duration.
+      3. ``container.duration / AV_TIME_BASE * fps`` — container-level duration.
+    """
+    container = _open_video_container(video_path)
+    try:
+        stream = container.streams.video[0]
+
+        fps = float(stream.average_rate) if stream.average_rate else 0.0
+        width = stream.width or 0
+        height = stream.height or 0
+
+        # Tier 1: direct stream metadata (nb_frames).
+        total_frames = stream.frames if stream.frames and stream.frames > 0 else 0
+
+        # Tier 2: derive from stream duration + time_base + fps.
+        if total_frames <= 0 and stream.duration and stream.time_base and fps > 0:
+            duration_sec = float(stream.duration * stream.time_base)
+            total_frames = int(duration_sec * fps)
+
+        # Tier 3: derive from container-level duration (microseconds).
+        if total_frames <= 0 and container.duration and fps > 0:
+            duration_sec = container.duration / 1_000_000.0
+            total_frames = int(duration_sec * fps)
+
+        return total_frames, fps, width, height
+    finally:
+        container.close()
+
+
 def _read_frames(video_path, sample_rate, total_frames, start_frame=0,
                  max_detect_dim: int = _MAX_DETECT_DIM,
                  crop_box: tuple[int, int, int, int] | None = None):
-    """Generator that reads frames from video.
+    """Generator that reads frames from video using PyAV.
 
     Yields ``(frame_idx, frame_ndarray)`` tuples. Frames are optionally
     cropped to ``crop_box`` (y0, y1, x0, x1), then downscaled to
     ``max_detect_dim``.
 
-    Thread-safety note: ``cv2.VideoCapture.read()`` reuses an
-    internal frame buffer — each call returns an ndarray that
-    views the *same* memory overwritten on the next iteration.
-    Under a ``ThreadPoolExecutor`` a worker can see the live
-    buffer scribbled over mid-detect by the producer's next
-    ``read()``, which corrupts WeChat's output.  We therefore
-    force a contiguous *copy* before yielding so each worker
-    owns its frame outright.  ``np.ascontiguousarray`` alone is
-    not enough: if the array is already contiguous it returns
-    the same object without copying, so we chain ``.copy()``.
+    PyAV decodes directly to numpy via ``frame.to_ndarray()``, so
+    frames are independent and thread-safe without extra copying.
     """
-    cap = cv2.VideoCapture(video_path)
-    if start_frame > 0:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-    frame_idx = start_frame
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        if (frame_idx - start_frame) % sample_rate == 0:
-            frame = _prepare_frame(frame, crop_box, max_detect_dim)
-            yield (frame_idx, frame)
-        frame_idx += 1
-    cap.release()
+    container = _open_video_container(video_path)
+    stream = container.streams.video[0]
+    # Do not use stream.thread_type = "AUTO": FFmpeg frame-level threading
+    # deadlocks with Python generators when the internal decoded-frame
+    # queue fills while the generator is suspended at yield.  Decoding is
+    # already overlapped with detection via _prefetch_iter's producer thread.
+    frame_idx = 0
+    try:
+        for packet in container.demux(stream):
+            for frame in packet.decode():
+                if frame_idx < start_frame:
+                    frame_idx += 1
+                    continue
+                if (frame_idx - start_frame) % sample_rate == 0:
+                    img = frame.to_ndarray(format="bgr24")
+                    img = _prepare_frame(img, crop_box, max_detect_dim)
+                    yield (frame_idx, img)
+                frame_idx += 1
+    finally:
+        container.close()
 
 
 def _read_frame_ranges(video_path, frame_ranges,
                        max_detect_dim: int = _MAX_DETECT_DIM,
                        crop_box: tuple[int, int, int, int] | None = None):
-    """Generator that reads specific frame ranges from video.
+    """Generator that reads specific frame ranges from video using PyAV.
+
+    Seeks independently to each range for efficiency on long videos
+    where ranges may be widely spaced.
 
     Args:
         frame_ranges: list of (start_frame, end_frame) tuples (inclusive).
@@ -957,16 +1008,43 @@ def _read_frame_ranges(video_path, frame_ranges,
     """
     if not frame_ranges:
         return
-    cap = cv2.VideoCapture(video_path)
-    for start, end in sorted(frame_ranges):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start)
-        for fidx in range(start, end + 1):
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frame = _prepare_frame(frame, crop_box, max_detect_dim)
-            yield (fidx, frame)
-    cap.release()
+
+    sorted_ranges = sorted(frame_ranges)
+
+    container = _open_video_container(video_path)
+    stream = container.streams.video[0]
+    # Do not use stream.thread_type = "AUTO": frame-level threading
+    # deadlocks with Python generators (see _read_frames comment).
+
+    try:
+        fps = float(stream.average_rate) if stream.average_rate else 0.0
+        if not fps or not stream.time_base:
+            return
+
+        for range_start, range_end in sorted_ranges:
+            # Seek to the start of each range independently.
+            target_pts = int(range_start / fps / float(stream.time_base))
+            container.seek(target_pts, stream=stream)
+
+            for packet in container.demux(stream):
+                done_range = False
+                for frame in packet.decode():
+                    if frame.pts is None:
+                        continue
+                    frame_idx = round(
+                        float(frame.pts * stream.time_base) * fps
+                    )
+                    if frame_idx > range_end:
+                        done_range = True
+                        break
+                    if frame_idx >= range_start:
+                        img = frame.to_ndarray(format="bgr24")
+                        img = _prepare_frame(img, crop_box, max_detect_dim)
+                        yield (frame_idx, img)
+                if done_range:
+                    break
+    finally:
+        container.close()
 
 
 def _build_probe_ranges(total_frames: int, window_size: int = 120,
@@ -1142,9 +1220,7 @@ def _probe_sample_rate(video_path: str, workers: int,
     if reporter is None:
         reporter = QuietReporter()
 
-    cap = cv2.VideoCapture(video_path)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    cap.release()
+    total_frames, _, _, _ = _get_video_info(video_path)
 
     if total_frames <= 0:
         return 1, [], 0, 0, 0.0, 1.0, None, None
@@ -1298,19 +1374,26 @@ def _probe_sample_rate(video_path: str, workers: int,
 
     # Pipelined execution: reader thread feeds a bounded queue,
     # detector threads consume from it concurrently.
+    _QUEUE_SENTINEL = object()
     frame_queue: Queue = Queue(maxsize=_PROBE_PIPELINE_QUEUE)
     read_done = Event()
     probe_raw: list = []
     _probe_detected = 0
     _probe_lock = __import__('threading').Lock()
+    reader_error: list[BaseException] = []
 
     def _reader():
-        for fd in _read_frame_ranges(
-                video_path, probe_ranges,
-                max_detect_dim=effective_max_dim,
-                crop_box=crop_box):
-            frame_queue.put(fd)
-        read_done.set()
+        try:
+            for fd in _read_frame_ranges(
+                    video_path, probe_ranges,
+                    max_detect_dim=effective_max_dim,
+                    crop_box=crop_box):
+                frame_queue.put(fd)
+        except BaseException as exc:
+            reader_error.append(exc)
+        finally:
+            read_done.set()
+            frame_queue.put(_QUEUE_SENTINEL)
 
     reader_thread = Thread(target=_reader, daemon=True)
     reader_thread.start()
@@ -1330,6 +1413,8 @@ def _probe_sample_rate(video_path: str, workers: int,
                     if read_done.is_set() and frame_queue.empty():
                         break
                     continue
+                if fd is _QUEUE_SENTINEL:
+                    break
                 fut = executor.submit(_worker_probe_detect, fd)
                 pending_futures[fut] = fd[0]
                 frames_submitted += 1
@@ -1362,6 +1447,8 @@ def _probe_sample_rate(video_path: str, workers: int,
                 break
 
     reader_thread.join()
+    if reader_error:
+        raise _ReaderFailure("probe frame reader failed") from reader_error[0]
     probe_count = len(probe_raw)
     leading_frames_probed = 0
 
@@ -1585,17 +1672,9 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
     if reporter is None:
         reporter = QuietReporter()
 
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise FileNotFoundError(f"Cannot open video file: {video_path}")
-
-    src_fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames, src_fps, src_w, src_h = _get_video_info(video_path)
     src_max = max(src_w, src_h)
     duration = total_frames / src_fps if src_fps > 0 else 0
-    cap.release()
 
     if workers is None:
         workers = os.cpu_count() or 1
@@ -2077,6 +2156,7 @@ def _prefetch_iter(source_iter, capacity: int = _READER_QUEUE_CAPACITY):
     _SENTINEL = object()
     q: Queue = Queue(maxsize=capacity)
     stop_event = Event()
+    producer_error: list[BaseException] = []
 
     def _producer():
         try:
@@ -2084,6 +2164,8 @@ def _prefetch_iter(source_iter, capacity: int = _READER_QUEUE_CAPACITY):
                 if stop_event.is_set():
                     return
                 q.put(item)
+        except BaseException as exc:
+            producer_error.append(exc)
         finally:
             q.put(_SENTINEL)
 
@@ -2093,6 +2175,8 @@ def _prefetch_iter(source_iter, capacity: int = _READER_QUEUE_CAPACITY):
         while True:
             item = q.get()
             if item is _SENTINEL:
+                if producer_error:
+                    raise _ReaderFailure("prefetch reader failed") from producer_error[0]
                 return
             yield item
     finally:
@@ -2196,6 +2280,11 @@ def _stream_scan(executor: Executor, frame_iter, seen_seeds, unique_blocks,
     # the executor promptly.
     for fut in pending:
         fut.cancel()
+
+    # Explicitly close the prefetch generator so its producer thread
+    # and the underlying PyAV container are cleaned up without waiting
+    # for GC (which can be delayed indefinitely by thread references).
+    prefetched.close()
 
     return decoded_count, no_detect_count, early_done, detect_count
 

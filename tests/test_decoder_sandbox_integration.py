@@ -21,6 +21,14 @@ from qrstream.decoder import (
 )
 
 
+def _missing_video_exc():
+    try:
+        import av
+    except ModuleNotFoundError:
+        return (FileNotFoundError,)
+    return (FileNotFoundError, av.FFmpegError)
+
+
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "real-phone-v4" / "v073-10kB.mp4"
 FIXTURE_INPUT = pathlib.Path(__file__).parent / "fixtures" / "real-phone-v4" / "v073-10kB.input.bin"
 
@@ -85,7 +93,7 @@ def test_detect_isolation_on_emits_deprecation_warning(tmp_path):
                 str(bogus), sample_rate=0, verbose=False,
                 detect_isolation='on',
             )
-        except FileNotFoundError:
+        except _missing_video_exc():
             pass  # expected — bogus path
     dep_warns = [w for w in caught if issubclass(w.category, DeprecationWarning)
                  and "detect_isolation" in str(w.message).lower()]
@@ -102,7 +110,7 @@ def test_detect_isolation_off_emits_deprecation_warning(tmp_path):
                 str(bogus), sample_rate=0, verbose=False,
                 detect_isolation='off',
             )
-        except FileNotFoundError:
+        except _missing_video_exc():
             pass
     dep_warns = [w for w in caught if issubclass(w.category, DeprecationWarning)
                  and "detect_isolation" in str(w.message).lower()]

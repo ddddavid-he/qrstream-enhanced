@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from qrstream.encoder import encode_to_video
 
@@ -7,6 +8,7 @@ class _CaptureReporter:
     def __init__(self):
         self.warnings = []
         self.debugs = []
+        self.done = []
 
     def info(self, message):
         pass
@@ -27,26 +29,41 @@ class _CaptureReporter:
         pass
 
     def encode_done(self, **kwargs):
-        pass
+        self.done.append(kwargs)
 
     def close(self):
         pass
 
 
-class _FakeVideoWriter:
-    def __init__(self, output_path, *args):
+class _FakePacket:
+    pass
+
+
+class _FakeStream:
+    def __init__(self):
+        self.width = 0
+        self.height = 0
+        self.pix_fmt = None
+        self.options = None
+
+    def encode(self, frame=None):
+        return [_FakePacket()] if frame is not None else []
+
+
+class _FakeOutput:
+    def __init__(self, output_path):
         self.output_path = output_path
-        self._opened = True
+        self.stream = _FakeStream()
 
-    def isOpened(self):
-        return self._opened
+    def add_stream(self, codec, rate):
+        return self.stream
 
-    def write(self, frame):
+    def mux(self, packet):
         with open(self.output_path, "ab") as f:
-            f.write(b"frame\n")
+            f.write(b"packet\n")
 
-    def release(self):
-        self._opened = False
+    def close(self):
+        return None
 
 
 def _patch_fast_encode(monkeypatch):
@@ -57,8 +74,16 @@ def _patch_fast_encode(monkeypatch):
         "generate_qr_image",
         lambda *args, **kwargs: np.full((16, 16, 3), 255, dtype=np.uint8),
     )
-    monkeypatch.setattr(enc.cv2, "VideoWriter", _FakeVideoWriter)
-    monkeypatch.setattr(enc.cv2, "VideoWriter_fourcc", lambda *args: 0)
+    monkeypatch.setattr(
+        enc.av,
+        "open",
+        lambda output_path, mode: _FakeOutput(output_path),
+    )
+    monkeypatch.setattr(
+        enc.av.VideoFrame,
+        "from_ndarray",
+        lambda frame, format: frame,
+    )
 
 
 def test_encode_defaults_to_one_worker_without_warning(monkeypatch, tmp_path):
@@ -100,3 +125,42 @@ def test_encode_warns_when_manual_workers_exceeds_one(monkeypatch, tmp_path):
     assert "--workers > 1" in reporter.warnings[0]
     assert "may not improve performance" in reporter.warnings[0]
     assert out.exists() and out.stat().st_size > 0
+
+
+def test_encode_reports_rewritten_output_path(monkeypatch, tmp_path):
+    _patch_fast_encode(monkeypatch)
+    reporter = _CaptureReporter()
+    src = tmp_path / "input.bin"
+    requested = tmp_path / "out.mov"
+    expected = tmp_path / "out.mp4"
+    src.write_bytes(b"hello encoder workers")
+
+    encode_to_video(
+        str(src),
+        str(requested),
+        codec="h264",
+        reporter=reporter,
+    )
+
+    assert expected.exists() and expected.stat().st_size > 0
+    assert reporter.done
+    assert reporter.done[-1]["output_path"] == str(expected)
+
+
+def test_encode_surfaces_writer_thread_failures(monkeypatch, tmp_path):
+    import qrstream.encoder as enc
+
+    _patch_fast_encode(monkeypatch)
+    src = tmp_path / "input.bin"
+    out = tmp_path / "out.mp4"
+    src.write_bytes(b"hello encoder workers")
+
+    def _boom(packet):
+        raise RuntimeError("mux failed")
+
+    fake_output = _FakeOutput(str(out))
+    monkeypatch.setattr(enc.av, "open", lambda output_path, mode: fake_output)
+    fake_output.mux = _boom
+
+    with pytest.raises(RuntimeError, match="video writer thread failed"):
+        encode_to_video(str(src), str(out), reporter=_CaptureReporter())
