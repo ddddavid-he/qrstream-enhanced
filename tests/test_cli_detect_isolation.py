@@ -1,4 +1,4 @@
-"""CLI flag plumbing for --detect-isolation."""
+"""CLI flag plumbing for --detect-isolation (deprecated, accepted for compat)."""
 
 import pytest
 
@@ -27,6 +27,7 @@ def test_cli_accepts_detect_isolation_off():
 
 
 def test_cli_default_is_on():
+    # Default preserved for backward compatibility.
     args = _parse(['decode', 'x.mp4', '-o', 'y'])
     assert args.detect_isolation == 'on'
 

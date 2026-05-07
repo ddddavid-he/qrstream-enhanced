@@ -76,9 +76,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest       # x86_64 / amd64
-          - ubuntu-24.04-arm    # aarch64 / arm64
+        os: ${{ fromJSON((github.event_name == 'workflow_call' || github.ref == 'refs/heads/main' || github.base_ref == 'main') && '["ubuntu-latest","ubuntu-24.04-arm","macos-latest"]' || '["ubuntu-latest","ubuntu-24.04-arm"]') }}
     steps:
       - name: Check out code
         uses: actions/checkout@v5

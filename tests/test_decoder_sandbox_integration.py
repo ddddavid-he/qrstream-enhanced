@@ -1,24 +1,22 @@
-"""Integration tests for decoder ↔ sandbox wiring.
+"""Tests for detect_isolation parameter behaviour after zxing-cpp migration.
 
-These tests verify:
+Since qr_sandbox is deprecated and detect_isolation is now a no-op,
+these tests verify:
 
-  1. ``extract_qr_from_video(detect_isolation='on')`` and ``'off'``
-     produce decoded block lists that reconstruct the same payload.
-  2. The module-level ``_dispatch_detect`` hook is restored after each
-     call, regardless of mode.
-  3. Invalid isolation modes are rejected.
-  4. A sandbox construction failure degrades gracefully to in-process
-     detection rather than crashing the decode.
+  1. extract_qr_from_video still accepts 'on' and 'off' without error
+     (but emits DeprecationWarning).
+  2. Both modes produce correctly decoded output (same underlying detector).
+  3. Invalid isolation modes are still rejected with ValueError.
+  4. The DeprecationWarning is emitted whenever detect_isolation is passed.
 """
 
 import pathlib
+import warnings
 
 import pytest
 
-from qrstream import decoder as _decoder_mod
 from qrstream.decoder import (
     LTDecoder,
-    _in_process_detect,
     extract_qr_from_video,
 )
 
@@ -46,53 +44,29 @@ def test_extract_with_isolation_on_matches_off():
     if not FIXTURE.exists():
         pytest.skip("fixture video missing")
 
-    blocks_off = extract_qr_from_video(
-        str(FIXTURE), sample_rate=0, verbose=False,
-        detect_isolation='off',
-    )
-    blocks_on = extract_qr_from_video(
-        str(FIXTURE), sample_rate=0, verbose=False,
-        detect_isolation='on',
-    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        blocks_off = extract_qr_from_video(
+            str(FIXTURE), sample_rate=0, verbose=False,
+            detect_isolation='off',
+        )
+        blocks_on = extract_qr_from_video(
+            str(FIXTURE), sample_rate=0, verbose=False,
+            detect_isolation='on',
+        )
 
     out_off = _decode_blocks_to_bytes(blocks_off)
     out_on = _decode_blocks_to_bytes(blocks_on)
 
     assert out_off is not None, "isolation=off: LT decode failed"
     assert out_on is not None, "isolation=on: LT decode failed"
-    # Both should reconstruct the same original input file.
     expected = FIXTURE_INPUT.read_bytes()
     assert out_off == expected
     assert out_on == expected
 
 
-@pytest.mark.slow
-def test_dispatch_detect_is_restored_after_decode():
-    if not FIXTURE.exists():
-        pytest.skip("fixture video missing")
-
-    assert _decoder_mod._dispatch_detect is _in_process_detect
-
-    extract_qr_from_video(
-        str(FIXTURE), sample_rate=0, verbose=False,
-        detect_isolation='on',
-    )
-    assert _decoder_mod._dispatch_detect is _in_process_detect, (
-        "dispatch hook was not restored after isolation='on' decode"
-    )
-
-    extract_qr_from_video(
-        str(FIXTURE), sample_rate=0, verbose=False,
-        detect_isolation='off',
-    )
-    assert _decoder_mod._dispatch_detect is _in_process_detect, (
-        "dispatch hook was not restored after isolation='off' decode"
-    )
-
-
 def test_extract_rejects_invalid_isolation_mode(tmp_path):
-    # Use a non-existent path so we fail fast at the validator step
-    # before any I/O. The validator runs before VideoCapture.
+    # ValueError is still raised for unknown values to catch typos.
     bogus = tmp_path / "does-not-exist.mp4"
     with pytest.raises(ValueError, match="detect_isolation"):
         extract_qr_from_video(
@@ -101,89 +75,35 @@ def test_extract_rejects_invalid_isolation_mode(tmp_path):
         )
 
 
-@pytest.mark.parametrize(
-    ("workers", "cpu_count", "expected_pool_size",
-     "expected_abort_threshold"),
-    [
-        (1, 16, 1, 3),
-        (2, 16, 2, 3),
-        (16, 16, 8, 8),
-        (16, 4, 4, 4),
-    ],
-)
-def test_extract_scales_default_sandbox_pool_and_abort_threshold(
-    monkeypatch, tmp_path, workers, cpu_count,
-    expected_pool_size, expected_abort_threshold,
-):
-    observed = {}
-
-    class _FakeVideoCapture:
-        def isOpened(self):
-            return True
-
-        def get(self, prop):
-            if prop == _decoder_mod.cv2.CAP_PROP_FPS:
-                return 30.0
-            if prop == _decoder_mod.cv2.CAP_PROP_FRAME_COUNT:
-                return 0
-            return 0
-
-        def release(self):
-            return None
-
-    class _CaptureSandbox:
-        def __init__(self, *args, **kwargs):
-            observed.update(kwargs)
-            self.crash_count = 0
-
-        def detect(self, *_args, **_kwargs):
-            return None
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr(_decoder_mod.os, "cpu_count", lambda: cpu_count)
-    monkeypatch.setattr(
-        _decoder_mod.cv2, "VideoCapture", lambda *_a, **_kw: _FakeVideoCapture()
-    )
-    monkeypatch.setattr(
-        _decoder_mod, "_probe_sample_rate",
-        lambda *_a, **_kw: (1, [], 0, 0, 0.0, 1.0, None, None),
-    )
-    monkeypatch.setattr(_decoder_mod, "_read_frames", lambda *_a, **_kw: iter(()))
-    monkeypatch.setattr(
-        _decoder_mod.qr_sandbox, "SandboxedDetector", _CaptureSandbox
-    )
-
-    blocks = extract_qr_from_video(
-        str(tmp_path / "fake.mp4"), sample_rate=0, verbose=False,
-        workers=workers, detect_isolation='on',
-    )
-
-    assert blocks == []
-    assert observed["pool_size"] == expected_pool_size
-    assert observed["crash_abort_threshold"] == expected_abort_threshold
+def test_detect_isolation_on_emits_deprecation_warning(tmp_path):
+    """Passing detect_isolation='on' must raise DeprecationWarning."""
+    bogus = tmp_path / "does-not-exist.mp4"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            extract_qr_from_video(
+                str(bogus), sample_rate=0, verbose=False,
+                detect_isolation='on',
+            )
+        except FileNotFoundError:
+            pass  # expected — bogus path
+    dep_warns = [w for w in caught if issubclass(w.category, DeprecationWarning)
+                 and "detect_isolation" in str(w.message).lower()]
+    assert dep_warns, "Expected DeprecationWarning for detect_isolation='on'"
 
 
-@pytest.mark.slow
-def test_extract_falls_back_when_sandbox_init_fails(monkeypatch):
-    if not FIXTURE.exists():
-        pytest.skip("fixture video missing")
-
-    class _BoomSandbox:
-        def __init__(self, *a, **kw):
-            raise RuntimeError("simulated sandbox init failure")
-
-    monkeypatch.setattr(
-        _decoder_mod.qr_sandbox, "SandboxedDetector", _BoomSandbox
-    )
-
-    # Should not raise — should fall back to in-process detection and
-    # still produce decodable blocks.
-    blocks = extract_qr_from_video(
-        str(FIXTURE), sample_rate=0, verbose=False,
-        detect_isolation='on',
-    )
-    out = _decode_blocks_to_bytes(blocks)
-    expected = FIXTURE_INPUT.read_bytes()
-    assert out == expected
+def test_detect_isolation_off_emits_deprecation_warning(tmp_path):
+    """Passing detect_isolation='off' must also raise DeprecationWarning."""
+    bogus = tmp_path / "does-not-exist.mp4"
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            extract_qr_from_video(
+                str(bogus), sample_rate=0, verbose=False,
+                detect_isolation='off',
+            )
+        except FileNotFoundError:
+            pass
+    dep_warns = [w for w in caught if issubclass(w.category, DeprecationWarning)
+                 and "detect_isolation" in str(w.message).lower()]
+    assert dep_warns, "Expected DeprecationWarning for detect_isolation='off'"

@@ -36,9 +36,24 @@ Design notes
   within ``crash_abort_window`` seconds of the first crash, subsequent
   ``detect()`` calls raise ``RuntimeError``.  This stops a wedged input
   from consuming unbounded CPU respawning helpers.
+
+.. deprecated:: 0.9
+    The zxing-cpp backend (used since v0.9) is crash-free and requires
+    no subprocess sandbox.  This module is retained for backward
+    compatibility but will be removed in a future release.  Remove any
+    direct imports of ``qrstream.qr_sandbox`` from your code.
 """
 
 from __future__ import annotations
+
+import warnings as _warnings
+_warnings.warn(
+    "qrstream.qr_sandbox is deprecated and will be removed in a future "
+    "release. The zxing-cpp backend does not crash and requires no "
+    "subprocess sandbox. Remove any direct imports of this module.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 import multiprocessing
 import queue
