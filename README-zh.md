@@ -14,14 +14,15 @@
 ```
 
 1. **编码**：将文件（可选 zlib 压缩）分块，通过 LT 喷泉码生成冗余编码块，每块序列化为 V3 协议帧，经 base45 编码后嵌入 QR 码的 alphanumeric 模式，最终输出 MP4 视频。
-2. **解码**：使用 WeChatQRCode 从视频中高鲁棒性地提取 QR 码，base45 解码后 CRC32 校验去除损坏帧，喂入 LT 解码器进行信念传播（peeling），恢复所有源块后重建原始文件。旧版 base64/COBS 视频（v0.6 之前）会走 fallback 路径继续兼容。
+2. **解码**：使用 zxing-cpp 从视频中提取 QR 码（原生 C++，快速、鲁棒、无崩溃风险），base45 解码后 CRC32 校验去除损坏帧，喂入 LT 解码器进行信念传播（peeling），恢复所有源块后重建原始文件。旧版 base64/COBS 视频（v0.6 之前）会走 fallback 路径继续兼容。
 
 **核心优势**：
 - **LT 喷泉码**：无码率纠删码，天然容忍帧丢失、模糊、遮挡
 - **Base45 + QR Alphanumeric 模式**：RFC 9285 base45 让数据落到 QR 的 alphanumeric 模式（每字符 5.5 bit，byte 模式 8 bit），在同一 QR version 下比 base64 更密、视频更小、编解码更快
-- **WeChatQRCode 检测器**：对手机拍摄场景（透视、摩尔纹、光照）鲁棒性远超标准 QR 检测器
+- **zxing-cpp 检测器**：原生 C++ QR 检测器（v0.9 起取代 WeChatQRCode）——释放 GIL 支持真正并行检测，对噪声帧可重入且无崩溃，速度提升 4–10×，检测率持平
 - **自适应采样率**：根据检测率和帧重复数自动选择最优采样策略
 - **定向恢复**：首轮扫描后针对缺失块的时间位置精准补扫
+- **低内存路径**：mmap 编码 + 流式写文件解码，支持大文件场景
 
 ## 安装
 
@@ -97,7 +98,7 @@ qrstream encode <file> -o output.mp4 [options]
 | `-o, --output` | **必填** | 输出视频路径 |
 | `--overhead` | `2.0` | 编码冗余倍率（源块数的倍数） |
 | `--fps` | `10` | 输出视频帧率 |
-| `--ec-level` | `1` | QR 纠错等级：0=L(7%), 1=M(15%), 2=Q(25%), 3=H(30%) |
+| `--ec-level` | `1` | **已废弃**（v0.9 起隐藏，v0.10.0 将移除）：QR 纠错等级。在 qrstream 管线中实际多余——帧丢失已由 LT `--overhead` 处理。旧脚本可继续使用，但建议停止设置此参数。 |
 | `--qr-version` | `25` | QR 码版本 1-40（越大密度越高） |
 | `--border` | 标准 4 模块静区 | 静区宽度，按 QR 内容宽度百分比计算（`--border 10` = 10%，`--border 0` 可关闭） |
 | `--lead-in-seconds` | `0.0` | 在首个 QR 帧前插入白色引导帧，便于开始录屏 |
@@ -105,9 +106,10 @@ qrstream encode <file> -o output.mp4 [options]
 | `--force-compress` | - | 对大文件的 V3 编码强制整体压缩（会占用更多内存） |
 | `--qr-mode` | `alphanumeric` | QR 载荷编码：`alphanumeric`（base45，默认，更密）或 `base64`（byte 模式，fallback） |
 | `--legacy-qr` | - | 仅作 CLI 向后兼容保留，不再影响行为 |
-| `--codec` | `mp4v` | 视频编码器：`mp4v` 或 `mjpeg`（更快但文件更大） |
+| `--codec` | `h264` | 视频编码器：`h264`（默认，压缩率好）、`mp4v` 或 `mjpeg`（编码更快，文件更大） |
 | `-w, --workers` | `min(CPU 核心数, 4)` | QR 生成的并行工作线程数。自动值上限 4：QR 矩阵生成（`zxingcpp.create_barcode()`）为原生 C++（不持 GIL），但完整管线通常瓶颈在视频编码器。CPU 核心多且实测瓶颈确在 QR 生成时，可手动指定更大值覆盖该上限。 |
-| `-v, --verbose` | - | 输出额外详细信息（进度条始终显示） |
+| `--output-mode` | `auto` | 进度/状态渲染方式：`auto`（TTY 时 Rich 交互，否则 `log`）、`log`（CI 友好的 `key=value` 追加行）、`quiet`（仅输出错误和最终路径）、`verbose`（完整诊断输出） |
+| `-v, --verbose` | - | `--output-mode verbose` 的别名（向后兼容保留） |
 
 ### 解码（QR 码视频 → 文件）
 
@@ -120,23 +122,27 @@ qrstream decode <video> -o output_file [options]
 | `<video>` | - | 输入视频路径（MP4, MOV 等） |
 | `-o, --output` | **必填** | 输出文件路径 |
 | `-s, --sample-rate` | `0`（自动） | 每 N 帧采样一次（0=自适应探测） |
-| `-w, --workers` | 全部 CPU 核心 | QR 识别的并行工作线程数。`WeChatQRCode` 是 C++ 实现、执行期间释放 GIL，多线程能真正并行。 |
-| `-v, --verbose` | - | 输出详细进度信息；大任务会显示 probe、扫描、LT 解码和写文件进度 |
+| `-w, --workers` | 全部 CPU 核心 | QR 识别的并行工作线程数。zxing-cpp 是原生 C++ 实现，执行期间释放 GIL，多线程能真正并行。 |
+| `--output-mode` | `auto` | 进度/状态渲染方式：`auto`、`log`、`quiet`、`verbose`（与编码端同） |
+| `-v, --verbose` | - | `--output-mode verbose` 的别名（向后兼容保留） |
 
 ### 示例
 
 ```bash
-# 编码 PDF 文件（默认 base45 alphanumeric 模式，2 倍冗余）
-qrstream encode report.pdf -o report.mp4 --overhead 2.0 -v
+# 编码 PDF 文件（默认 base45 alphanumeric 模式，2 倍冗余，h264）
+qrstream encode report.pdf -o report.mp4 --overhead 2.0 --output-mode verbose
 
 # 解码视频（自适应采样率 + 定向恢复）
-qrstream decode report.mp4 -o report_recovered.pdf -v
+qrstream decode report.mp4 -o report_recovered.pdf --output-mode verbose
 
-# 编码时使用高纠错等级（适合手机拍屏场景）
-qrstream encode data.bin -o data.mp4 --ec-level 3 --qr-version 15
+# 编码时使用更高 QR 版本（适合手机拍屏场景）
+qrstream encode data.bin -o data.mp4 --qr-version 20
 
 # 录屏场景：加大静区 + 预留白屏起录
 qrstream encode slides.zip -o slides.mp4 --border 10 --lead-in-seconds 1.5
+
+# CI 场景：log 模式解码
+qrstream decode recording.mov -o out.bin --output-mode log
 ```
 
 ### 编程接口
@@ -178,12 +184,12 @@ project-root/
 │   ├── test_roundtrip.py      # 端到端回环测试
 │   ├── test_qr_generate.py    # QR 生成正确性 + glog(0) 回归测试
 │   ├── test_e2e_encode_decode.py  # 完整编码→视频→解码 SHA256 验证
-│   └── test_optimizations.py  # 性能优化 + WeChatQR + legacy fallback 测试
+│   └── test_optimizations.py  # 性能优化 + zxing-cpp + legacy fallback 测试
 └── dev/
     ├── benchmark.py           # 性能基准测试
     ├── perf-profile/          # cProfile 热点分析脚本
     ├── test-container/        # Podman 测试容器
-    └── wechatqrcode-mnn-poc/  # WeChatQRCode MNN 加速 POC
+    └── wechatqrcode-mnn-poc/  # 历史 WeChatQRCode MNN 加速 POC（已归档）
 ```
 
 ## 技术细节
@@ -255,18 +261,12 @@ uv run pytest -m e2e -v
 uv run pytest -m slow -v
 ```
 
-### 解码器原生崩溃（Troubleshooting）
+### 工具命令
 
-如果 `qrs decode` 出现 `trace trap`、`SIGSEGV` 或 `SIGTRAP` 相关退出消息，
-说明你正撞上 `opencv_contrib` 自带 WeChat QR 检测器的一个上游未修复 bug
-（issue `opencv_contrib#3570`）。从 v0.7.7 开始，`qrs decode` 默认会把
-检测放进子进程 helper 池中运行：单个导致崩溃的帧会被捕获并当作丢帧处理，
-只要 LT 冗余（`--overhead`）≥ 1.5，解码过程会自动继续并最终完成。
-
-如果想确认沙箱在本次解码中是否实际捕获过崩溃，可以在标准输出里寻找类似
-`[sandbox] detector crashed N time(s) during decode` 的汇总行。如果你确信
-自己的输入足够稳定、不想承担沙箱开销，可以通过 `--detect-isolation off`
-主动关闭它（风险自负）。
+```bash
+# 显示交互界面使用的色彩调色板
+qrstream colors
+```
 
 ## 许可证
 

@@ -41,6 +41,22 @@
 - `archive/*` 下的分支不参与 CI 验证链，仅作历史留存使用，不做后续推进。
 - CI 仅对 `main` 与 `dev` 的 `push` 生效；`feature/*`、`fix/*` 通过 PR 进入验证链。
 
+## 版本号同步
+
+项目使用 `hatch-vcs` 从 git tag 自动推导版本号，写入
+`src/qrstream/_version.py`。该文件 **仅在 build 时** 重新生成，普通
+`git commit` / `git checkout` 不会自动刷新它。
+
+切换分支或打完新 tag 后，需要执行一次 editable install 使版本号同步：
+
+```bash
+uv pip install -e .
+```
+
+> **Tip:** 仓库的 `.git/hooks/post-checkout` 已配置为切换分支时后台
+> 自动执行上述命令，无需手动操作。如果 hook 丢失（clone 新仓库时
+> `.git/hooks/` 不被 git 追踪），手动运行一次即可。
+
 ## 推荐提交流程
 
 1. 从 `dev` 拉出 `feature/*` 或 `fix/*` 分支。
