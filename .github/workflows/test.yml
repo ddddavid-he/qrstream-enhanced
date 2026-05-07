@@ -14,14 +14,90 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: test-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
-  test:
+  check-dev-gate:
     if: |
+      !(
+        github.event_name == 'push' &&
+        startsWith(github.event.head_commit.message || '', 'skip-ci:')
+      ) &&
+      !(
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/main' &&
+        startsWith(github.event.head_commit.message || '', 'skip-main-ci:')
+      )
+    runs-on: ubuntu-latest
+    outputs:
+      skip-py313: ${{ steps.query.outputs.skip-py313 }}
+      python-versions: ${{ steps.query.outputs.python-versions }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+
+      - name: Check matching dev gate
+        id: query
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref }}
+          BASE_REF: ${{ github.base_ref }}
+          SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set +e
+          SKIP="false"
+
+          if [ "$EVENT_NAME" = "push" ] && [ "$REF_NAME" = "refs/heads/main" ]; then
+            DEV_SHA=$(git rev-parse "$SHA^2" 2>/dev/null || git rev-parse "$SHA" 2>/dev/null)
+            if [ -n "$DEV_SHA" ]; then
+              MAIN_TREE=$(git rev-parse "$SHA^{tree}" 2>/dev/null)
+              DEV_TREE=$(git rev-parse "$DEV_SHA^{tree}" 2>/dev/null)
+              if [ "$MAIN_TREE" = "$DEV_TREE" ]; then
+                RESULT=$(gh run list \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --workflow "test.yml" \
+                  --branch dev \
+                  --commit "$DEV_SHA" \
+                  --status success \
+                  --limit 1 \
+                  --json databaseId 2>/dev/null)
+                if [ $? -eq 0 ] && [ "$(echo "$RESULT" | jq 'length' 2>/dev/null)" -gt 0 ]; then
+                  echo "::notice::dev test gate already passed for $DEV_SHA; skipping duplicated py3.13 cells on main."
+                  SKIP="true"
+                fi
+              fi
+            fi
+          fi
+
+          if [ "$EVENT_NAME" = "workflow_call" ] || [ "$REF_NAME" = "refs/heads/main" ] || [ "$BASE_REF" = "main" ]; then
+            PYTHON_VERSIONS='["3.10","3.11","3.12","3.13","3.14"]'
+            if [ "$SKIP" = "true" ]; then
+              PYTHON_VERSIONS='["3.10","3.11","3.12","3.14"]'
+            fi
+          else
+            PYTHON_VERSIONS='["3.13"]'
+          fi
+
+          {
+            echo "skip-py313=$SKIP"
+            echo "python-versions=$PYTHON_VERSIONS"
+          } >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: check-dev-gate
+    if: |
+      !(
+        github.event_name == 'push' &&
+        startsWith(github.event.head_commit.message || '', 'skip-ci:')
+      ) &&
       !(
         github.event_name == 'push' &&
         github.ref == 'refs/heads/main' &&
@@ -36,7 +112,7 @@ jobs:
           - ubuntu-latest
           - ubuntu-24.04-arm
           - macos-latest
-        python-version: ${{ fromJSON((github.event_name == 'workflow_call' || github.ref == 'refs/heads/main' || github.base_ref == 'main') && '["3.10","3.11","3.12","3.13","3.14"]' || '["3.13"]') }}
+        python-version: ${{ fromJSON(needs.check-dev-gate.outputs.python-versions) }}
 
     steps:
       - name: Check out code
