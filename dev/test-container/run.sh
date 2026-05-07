@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local test harness for the ThreadPoolExecutor refactor.
+# Local test harness for the PyAV backend migration.
 #
 # Builds dev/test-container/Containerfile (fedora:latest + uv + Tsinghua
 # mirror) on each target arch and runs the chosen mode inside it.
@@ -11,10 +11,10 @@
 #            ssh://root@<host>:<port>/run/podman/podman.sock`)
 #
 # Modes:
-#   fast   (default)  — pytest tests/ -m "not slow"
-#   slow              — pytest tests/ -m slow      (real phone fixtures)
-#   all               — fast, then slow, sequentially
-#   bench             — run dev/perf-profile/profile_{decode,encode}.py
+#   fast   (default)  — pytest tests/ -m "not slow and not e2e"
+#   e2e               — pytest tests/ -m e2e
+#   slow              — pytest tests/ -m slow         (real phone fixtures)
+#   all               — fast, e2e, slow sequentially
 #
 # Arch arg (positional 2):
 #   arm64             — run on the default local applehv machine
@@ -23,12 +23,10 @@
 #
 # Examples:
 #   ./dev/test-container/run.sh                 # fast, both arches
-#   ./dev/test-container/run.sh all both        # full gate, both
-#   ./dev/test-container/run.sh bench amd64     # ROI on amd64 only
+#   ./dev/test-container/run.sh all arm64       # full gate, arm64 only
+#   ./dev/test-container/run.sh e2e amd64       # e2e on amd64 only
 #
 # CI does NOT invoke this script — it is for local verification only.
-# GitHub Actions runs on its own Linux runners; layering podman on top
-# there would be pure overhead.
 
 set -euo pipefail
 
@@ -68,14 +66,22 @@ _run_on() {
         -f "${REPO_ROOT}/dev/test-container/Containerfile" \
         "${REPO_ROOT}"
 
-    echo "[run.sh] ${arch}: smoke — import cv2 + instantiate WeChatQRCode"
+    echo "[run.sh] ${arch}: smoke — import av + cv2 + zxing-cpp"
     "${prefix[@]}" run --rm "${IMG}" \
-        uv run python -c 'import cv2; cv2.wechat_qrcode_WeChatQRCode(); print("wechat OK")'
+        uv run python -c '
+import av, cv2, zxingcpp, numpy as np
+print(f"av={av.__version__}  cv2={cv2.__version__}  zxing={zxingcpp.__version__}")
+print("smoke OK")
+'
 
     case "${MODE}" in
         fast)
             "${prefix[@]}" run --rm "${IMG}" \
-                uv run pytest tests/ -v -m "not slow"
+                uv run pytest tests/ -v -m "not slow and not e2e"
+            ;;
+        e2e)
+            "${prefix[@]}" run --rm "${IMG}" \
+                uv run pytest tests/ -v -m e2e
             ;;
         slow)
             "${prefix[@]}" run --rm "${IMG}" \
@@ -83,18 +89,14 @@ _run_on() {
             ;;
         all)
             "${prefix[@]}" run --rm "${IMG}" \
-                uv run pytest tests/ -v -m "not slow"
+                uv run pytest tests/ -v -m "not slow and not e2e"
+            "${prefix[@]}" run --rm "${IMG}" \
+                uv run pytest tests/ -v -m e2e
             "${prefix[@]}" run --rm "${IMG}" \
                 uv run pytest tests/ -v -m slow
             ;;
-        bench)
-            "${prefix[@]}" run --rm "${IMG}" \
-                uv run python dev/perf-profile/profile_decode.py
-            "${prefix[@]}" run --rm "${IMG}" \
-                uv run python dev/perf-profile/profile_encode.py
-            ;;
         *)
-            echo "Usage: $0 [fast|slow|all|bench] [arm64|amd64|both]" >&2
+            echo "Usage: $0 [fast|e2e|slow|all] [arm64|amd64|both]" >&2
             exit 1
             ;;
     esac

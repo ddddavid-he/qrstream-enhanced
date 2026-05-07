@@ -1,26 +1,22 @@
-# Local verification container for the ThreadPoolExecutor refactor.
+# Local verification container for the PyAV backend migration.
 #
 # Not used in CI: the GitHub Actions workflows already run on their
 # own Linux runners.  This file exists purely so a developer can run
-# the full test suite (fast + slow / real-phone fixtures) plus the
-# perf-profile bench scripts on their own machine in a reproducible
-# fedora:latest environment.
+# the full test suite (fast + slow / real-phone fixtures) on their own
+# machine in a reproducible fedora:latest environment.
 #
 # Usage: see dev/test-container/run.sh
 
 FROM fedora:latest
 
-# System libs required by the opencv-contrib-python manylinux wheel
-# (the wheel bundles OpenCV itself, but needs these host shared libs).
-# install_weak_deps=False keeps the image lean.  `git` is needed at
-# build time so hatch-vcs can derive the package version from the
-# repo's .git metadata.
+# System libs required by opencv-contrib-python and PyAV manylinux wheels.
+# The wheels bundle OpenCV / FFmpeg themselves, but need these host shared
+# libs.  install_weak_deps=False keeps the image lean.  `git` is needed at
+# build time so hatch-vcs can derive the package version from the repo's
+# .git metadata.
 #
-# Python 3.13 is pinned explicitly.  The project's pyproject.toml
-# declares support up to 3.13 (the CI matrix also stops there), and
-# fedora:latest's default ``python3`` is 3.14 which is outside that
-# support window — letting uv pick 3.14 would surface spurious
-# failures unrelated to the code under test.
+# Python 3.13 is pinned explicitly — fedora:latest's default python3 is
+# 3.14 which is outside the project's support window.
 RUN dnf install -y --setopt=install_weak_deps=False \
         python3.13 python3.13-devel python3-pip \
         gcc gcc-c++ make \
@@ -32,8 +28,7 @@ RUN dnf install -y --setopt=install_weak_deps=False \
 WORKDIR /app
 
 # Tsinghua PyPI mirror for faster installs on CN networks.  uv reads
-# UV_INDEX_URL / UV_DEFAULT_INDEX; pip reads PIP_INDEX_URL.  All three
-# are set to the same mirror so any tool chosen later picks it up.
+# UV_INDEX_URL / UV_DEFAULT_INDEX; pip reads PIP_INDEX_URL.
 ENV UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
     UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple \
     PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
@@ -42,12 +37,9 @@ RUN pip install --no-cache-dir uv
 
 # Copy the full repo (including .git for hatch-vcs version derivation
 # and LICENSE / README.md required by hatchling metadata) then let uv
-# resolve everything in one shot.  The layering optimisation for
-# caching isn't worth it here — image builds are infrequent and the
-# dependency graph already needs .git + LICENSE + README to succeed.
+# resolve everything in one shot.
 COPY . .
-# Force Python 3.13 — see the dnf comment above.  `--python` tells uv
-# exactly which interpreter to build the project venv from.
+# Force Python 3.13 — see the dnf comment above.
 RUN uv sync --dev --python /usr/bin/python3.13
 
 # Default: run the fast unit test suite.  run.sh wraps other modes.
