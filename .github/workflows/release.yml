@@ -7,31 +7,115 @@ on:
       - '[0-9]*'
 
 permissions:
-  contents: write
+  contents: read
+  actions: read
 
 jobs:
-  # Release requires all three validation layers to pass first.
+  # ── Check if gate workflows already passed on main for this SHA ──
+  # Tag pushes always run on a commit that is already on main (the
+  # merge commit from dev → main).  If the three gate workflows
+  # already succeeded for this SHA, we skip re-running them.
+  #
+  # Robustness: never fail this job — if the API check errors for
+  # any reason, default to "run gate" (safe fallback).
+  check-gates:
+    runs-on: ubuntu-latest
+    outputs:
+      skip-unit: ${{ steps.query.outputs.skip-unit }}
+      skip-e2e: ${{ steps.query.outputs.skip-e2e }}
+      skip-real-world: ${{ steps.query.outputs.skip-real-world }}
+    steps:
+      - name: Check gate status for this SHA on main
+        id: query
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          # Never abort the script — safe fallback is "run the gate".
+          set +e
+
+          check() {
+            local WF="$1"
+            local RESULT
+            RESULT=$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow "$WF" \
+              --branch main \
+              --commit "$SHA" \
+              --status success \
+              --limit 1 \
+              --json databaseId 2>/dev/null)
+            # gh exit code non-zero (no match / API error) → run gate.
+            if [ $? -eq 0 ] && [ "$(echo "$RESULT" | jq 'length' 2>/dev/null)" -gt 0 ]; then
+              >&2 echo "::notice::Gate '$WF' already passed on main@$SHA — will skip."
+              echo "skip"
+            else
+              >&2 echo "::notice::Gate '$WF' not found on main@$SHA — will run."
+              echo "run"
+            fi
+          }
+
+          # Default: run all gates.
+          UNIT="false"; E2E="false"; RW="false"
+
+          [ "$(check 'test.yml')" = "skip" ] && UNIT="true"
+          [ "$(check 'e2e-encode-decode.yml')" = "skip" ] && E2E="true"
+          [ "$(check 'real-world-tests.yml')" = "skip" ] && RW="true"
+
+          {
+            echo "skip-unit=$UNIT"
+            echo "skip-e2e=$E2E"
+            echo "skip-real-world=$RW"
+          } >> "$GITHUB_OUTPUT"
+
+  # ── Gate 1: unit tests ──
   unit-test:
+    needs: check-gates
+    if: needs.check-gates.outputs.skip-unit != 'true'
     uses: ./.github/workflows/test.yml
     permissions:
       contents: read
 
+  # ── Gate 2: e2e encode/decode ──
   e2e:
+    needs: check-gates
+    if: needs.check-gates.outputs.skip-e2e != 'true'
     uses: ./.github/workflows/e2e-encode-decode.yml
     permissions:
       contents: read
 
+  # ── Gate 3: real-world phone recordings ──
   real-world:
+    needs: check-gates
+    if: needs.check-gates.outputs.skip-real-world != 'true'
     uses: ./.github/workflows/real-world-tests.yml
     permissions:
       contents: read
 
+  # ── Release (create GitHub Release) ──
+  # A gate job that was skipped still counts as "passed" for the
+  # purpose of `needs` resolution.  We only need to verify that no
+  # gate actually *failed*.
+  #
+  # Each gate job (unit-test / e2e / real-world) can end in one of:
+  #   success, failure, cancelled, skipped
+  #
+  # We allow: success or skipped.
+  # We block:  failure or cancelled.
   release:
     needs:
       - unit-test
       - e2e
       - real-world
+    if: |
+      always() &&
+      (needs.unit-test.result == 'success' || needs.unit-test.result == 'skipped') &&
+      (needs.e2e.result        == 'success' || needs.e2e.result        == 'skipped') &&
+      (needs.real-world.result == 'success' || needs.real-world.result == 'skipped')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Check out code
         uses: actions/checkout@v5
@@ -41,16 +125,13 @@ jobs:
       - name: Generate release notes
         id: notes
         run: |
-          # Get previous tag
           PREV_TAG=$(git tag --sort=-version:refname | head -n 2 | tail -n 1)
           TAG=${GITHUB_REF#refs/tags/}
 
           if [ -z "$PREV_TAG" ] || [ "$PREV_TAG" = "$TAG" ]; then
             echo "body=Initial release 🎉" >> "$GITHUB_OUTPUT"
           else
-            # Generate changelog from commits between tags
             LOG=$(git log "${PREV_TAG}..${TAG}" --pretty=format:"- %s (%h)" --no-merges)
-            # Write multiline output
             {
               echo "body<<EOF"
               echo "## What's Changed"
