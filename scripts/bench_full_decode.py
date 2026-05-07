@@ -12,9 +12,8 @@ Backend swap strategy:
   The decoder module exposes a module-level ``_dispatch_detect`` hook that
   ``_worker_detect_qr`` calls instead of ``try_decode_qr`` directly.
   We monkey-patch this hook (and its bbox-returning twin used by the probe)
-  to route calls through zxing-cpp.  The sandbox is disabled for both runs
-  (detect_isolation='off') so neither backend gets a subprocess overhead
-  advantage — this isolates the raw detector speed difference.
+  to route calls through zxing-cpp.  Both runs use the same zxing-cpp
+  backend — this isolates the raw detector speed difference.
 
 Usage:
   uv run python scripts/bench_full_decode.py [--video 9448|9432|both]
@@ -128,7 +127,6 @@ def run_full_decode(
         sample_rate=0,       # auto-probe
         verbose=False,
         workers=4,
-        detect_isolation="off",  # bypass sandbox for fair comparison
     )
     t_extract = time.perf_counter() - t0
 

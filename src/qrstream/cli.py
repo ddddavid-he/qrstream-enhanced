@@ -323,6 +323,14 @@ def cmd_encode(args):
             auto_mask=args.auto_mask,
             reporter=reporter,
         )
+    except KeyboardInterrupt:
+        # Remove partial/corrupt output file on interrupt.
+        try:
+            if os.path.exists(output):
+                os.unlink(output)
+        except OSError:
+            pass
+        raise
     finally:
         try:
             reporter.close()
@@ -357,10 +365,10 @@ def cmd_decode(args):
         sys.exit(2)
     verbose = mode is OutputMode.VERBOSE
 
+    output_path = args.output
     try:
         blocks = extract_qr_from_video(
             args.video, args.sample_rate, verbose, args.workers,
-            detect_isolation=args.detect_isolation,
             reporter=reporter,
         )
 
@@ -368,13 +376,20 @@ def cmd_decode(args):
             print("No QR codes detected. Check that the video clearly shows QR codes.")
             sys.exit(1)
 
-        output_path = args.output
         written = decode_blocks_to_file(
             blocks, output_path, verbose, reporter=reporter,
         )
 
         if written is None:
             sys.exit(1)
+    except KeyboardInterrupt:
+        # Remove partial output file on interrupt.
+        try:
+            if os.path.exists(output_path):
+                os.unlink(output_path)
+        except OSError:
+            pass
+        raise
     finally:
         try:
             reporter.close()
@@ -474,14 +489,6 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                      help='Process every Nth frame (default: 0=auto-detect)')
     dec.add_argument('-w', '--workers', type=int, default=None,
                      help='Parallel workers (default: all CPU cores)')
-    dec.add_argument(
-        '--detect-isolation', choices=['on', 'off'], default='on',
-        help='[Deprecated] Previously isolated the WeChatQRCode detector '
-             'in subprocess helpers to survive native crashes '
-             '(opencv_contrib#3570). The backend is now zxing-cpp, which '
-             'does not crash. This flag is accepted for backward '
-             'compatibility but is ignored. Will be removed in a future '
-             'release.')
     _add_output_mode_group(dec)
 
     # ── colors ───────────────────────────────────────────────────
@@ -497,15 +504,20 @@ def main(argv: list[str] | None = None):
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.command == 'encode':
-        cmd_encode(args)
-    elif args.command == 'decode':
-        cmd_decode(args)
-    elif args.command == 'colors':
-        cmd_colors()
-    else:
-        parser.print_help()
-        sys.exit(1)
+    try:
+        if args.command == 'encode':
+            cmd_encode(args)
+        elif args.command == 'decode':
+            cmd_decode(args)
+        elif args.command == 'colors':
+            cmd_colors()
+        else:
+            parser.print_help()
+            sys.exit(1)
+    except KeyboardInterrupt:
+        # Clean single-line message instead of a Python traceback.
+        print("\nInterrupted.", file=sys.stderr)
+        sys.exit(130)
 
 
 if __name__ == '__main__':
