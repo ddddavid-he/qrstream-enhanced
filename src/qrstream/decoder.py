@@ -925,17 +925,19 @@ def _read_frames(video_path, sample_rate, total_frames, start_frame=0,
     stream = container.streams.video[0]
     stream.thread_type = "AUTO"
     frame_idx = 0
-    for packet in container.demux(stream):
-        for frame in packet.decode():
-            if frame_idx < start_frame:
+    try:
+        for packet in container.demux(stream):
+            for frame in packet.decode():
+                if frame_idx < start_frame:
+                    frame_idx += 1
+                    continue
+                if (frame_idx - start_frame) % sample_rate == 0:
+                    img = frame.to_ndarray(format="bgr24")
+                    img = _prepare_frame(img, crop_box, max_detect_dim)
+                    yield (frame_idx, img)
                 frame_idx += 1
-                continue
-            if (frame_idx - start_frame) % sample_rate == 0:
-                img = frame.to_ndarray(format="bgr24")
-                img = _prepare_frame(img, crop_box, max_detect_dim)
-                yield (frame_idx, img)
-            frame_idx += 1
-    container.close()
+    finally:
+        container.close()
 
 
 def _read_frame_ranges(video_path, frame_ranges,
@@ -954,16 +956,18 @@ def _read_frame_ranges(video_path, frame_ranges,
     stream = container.streams.video[0]
     stream.thread_type = "AUTO"
     frame_idx = 0
-    for packet in container.demux(stream):
-        for frame in packet.decode():
-            for start, end in frame_ranges:
-                if start <= frame_idx <= end:
-                    img = frame.to_ndarray(format="bgr24")
-                    img = _prepare_frame(img, crop_box, max_detect_dim)
-                    yield (frame_idx, img)
-                    break
-            frame_idx += 1
-    container.close()
+    try:
+        for packet in container.demux(stream):
+            for frame in packet.decode():
+                for start, end in frame_ranges:
+                    if start <= frame_idx <= end:
+                        img = frame.to_ndarray(format="bgr24")
+                        img = _prepare_frame(img, crop_box, max_detect_dim)
+                        yield (frame_idx, img)
+                        break
+                frame_idx += 1
+    finally:
+        container.close()
 
 
 def _build_probe_ranges(total_frames: int, window_size: int = 120,

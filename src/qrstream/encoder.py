@@ -373,7 +373,7 @@ def encode_to_video(input_path: str, output_path: str,
                 for packet in out_stream.encode(frame_av):
                     output.mux(packet)
 
-        writer_thread = Thread(target=_writer_loop, daemon=False)
+        writer_thread = Thread(target=_writer_loop, daemon=True)
         writer_thread.start()
 
         if lead_in_frames:
