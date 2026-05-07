@@ -1625,7 +1625,7 @@ def _adaptive_max_dim_from_probe(
 
 def extract_qr_from_video(video_path: str, sample_rate: int = 0,
                            verbose: bool = False, workers: int | None = None,
-                           *, detect_isolation: str = "on",
+                           *,
                            reporter: ProgressReporter | None = None):
     """Extract unique QR code payloads from a video file.
 
@@ -1641,13 +1641,6 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
         verbose: Emit verbose diagnostic details (routed through
             ``reporter.debug``).
         workers: Number of parallel worker processes.
-        detect_isolation: Deprecated. Previously controlled whether QR
-            detection ran in a subprocess sandbox to isolate
-            WeChatQRCode native crashes.  Now that the backend is
-            zxing-cpp (crash-free), this parameter is ignored.
-            Passing any value other than ``'on'`` or ``'off'`` raises
-            ``DeprecationWarning``.  The parameter will be removed in a
-            future release.
         reporter: Optional :class:`qrstream.ui.ProgressReporter`.  When
             ``None`` a :class:`QuietReporter` is used (no progress
             output) so the function stays side-effect-free for
@@ -1655,20 +1648,6 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
 
     Returns a list of raw block byte strings.
     """
-    import warnings
-    if detect_isolation not in ("on", "off"):
-        raise ValueError(
-            f"detect_isolation must be 'on' or 'off', got {detect_isolation!r}"
-        )
-    if detect_isolation in ("on", "off"):
-        warnings.warn(
-            "The detect_isolation parameter is deprecated and will be removed "
-            "in a future release. The zxing-cpp backend does not crash and "
-            "requires no subprocess sandbox. The parameter is ignored.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
     if reporter is None:
         reporter = QuietReporter()
 
