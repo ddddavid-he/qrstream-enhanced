@@ -2197,6 +2197,11 @@ def _stream_scan(executor: Executor, frame_iter, seen_seeds, unique_blocks,
     for fut in pending:
         fut.cancel()
 
+    # Explicitly close the prefetch generator so its producer thread
+    # and the underlying PyAV container are cleaned up without waiting
+    # for GC (which can be delayed indefinitely by thread references).
+    prefetched.close()
+
     return decoded_count, no_detect_count, early_done, detect_count
 
 
