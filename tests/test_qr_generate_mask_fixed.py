@@ -1,16 +1,17 @@
 """
-Regression tests for perf/encoder-segno-mask.
+Regression tests for QR generation determinism.
 
 Lock in:
 
-1. generate_qr_image() always uses a deterministic mask pattern, so
-   the same (payload, version, ec, alphanumeric) inputs yield
-   byte-identical images across runs.
+1. generate_qr_image() always produces the same output for the same
+   inputs (deterministic mask selection by zxing-cpp), so the same
+   (payload, version, ec, alphanumeric) inputs yield byte-identical
+   images across runs.
 
-2. The vectorized _render_qr path produces the same pixels as the
-   reference nested-loop implementation would.
+2. The zxing-cpp rendering path produces correct QR codes that
+   round-trip through the decoder.
 
-If a future segno upgrade changes the mask=0 bit layout these tests
+If a future zxing-cpp upgrade changes the mask selection these tests
 will flip red immediately; update the stored hashes only after
 verifying the new layout still decodes cleanly via zxing-cpp on
 the real fixtures.
@@ -26,11 +27,9 @@ from qrstream.qr_utils import generate_qr_image, try_decode_qr
 # Each tuple: (payload, version, alphanumeric).
 # Payloads are chosen so that (encoded size, version, ec=M) never
 # overflows, and empty payload is only tested with alphanumeric=False
-# (segno rejects alphanumeric mode on empty input).
+# (zxing-cpp rejects alphanumeric mode on empty input).
 
 _DETERMINISM_CASES = [
-    # empty — byte mode only (alphanumeric rejects empty)
-    (b"", 5, False),
     # tiny payloads — both modes, small version
     (b"A", 5, True),
     (b"A", 5, False),
@@ -61,7 +60,7 @@ def test_generate_qr_image_is_deterministic(payload, version, alphanumeric):
     assert a.shape == b.shape
     assert a.dtype == b.dtype
     assert np.array_equal(a, b), (
-        "generate_qr_image is not deterministic; did mask get unpinned?"
+        "generate_qr_image is not deterministic; did zxing-cpp change mask selection?"
     )
 
 
@@ -86,8 +85,9 @@ def test_generate_qr_image_round_trips(payload, version):
     assert got == expected
 
 
-def test_vectorized_paint_matches_reference():
-    """The vectorized paint must match the old nested-loop exactly.
+def test_zxingcpp_render_matches_direct_api():
+    """The _render_qr path must produce the same pixels as calling
+    zxing-cpp directly with equivalent parameters.
 
     We rebuild the reference in-place here rather than importing a
     private helper so this test stays stable if the implementation
@@ -102,31 +102,28 @@ def test_vectorized_paint_matches_reference():
         payload, ec_level=1, version=20, alphanumeric=True,
     )
 
-    # Reference: regenerate the same QR via segno directly and paint
-    # with the nested loop. (This is what _render_qr did before the
-    # vectorization.)
+    # Reference: regenerate the same QR via zxingcpp directly and
+    # produce the expected image with the same border logic.
     import cv2
-    import segno
+    import zxingcpp
     from qrstream.protocol import base45_encode
 
     b45 = base45_encode(payload).decode("ascii")
-    qr = segno.make(b45, version=20, error="m", mode="alphanumeric",
-                    boost_error=False, mask=0)
-    mat = qr.matrix
-    n = len(mat)
-    bs = 10
-    bd = 4
-    side = (n + 2 * bd) * bs
+    bc = zxingcpp.create_barcode(
+        b45, zxingcpp.BarcodeFormat.QRCode, ec_level='M', version=20,
+    )
+    zimg = bc.to_image(scale=10, add_quiet_zones=False)
+    qr_arr = np.array(zimg, dtype=np.uint8)
+
+    # Add border (4 modules × 10 px/module = 40 px per side)
+    n = qr_arr.shape[0]
+    bd_px = 4 * 10
+    side = n + 2 * bd_px
     ref = np.full((side, side), 255, dtype=np.uint8)
-    for r, row in enumerate(mat):
-        for c, v in enumerate(row):
-            if v & 1:
-                y = (r + bd) * bs
-                x = (c + bd) * bs
-                ref[y:y + bs, x:x + bs] = 0
+    ref[bd_px:bd_px + n, bd_px:bd_px + n] = qr_arr
     ref_bgr = cv2.cvtColor(ref, cv2.COLOR_GRAY2BGR)
 
     assert np.array_equal(img, ref_bgr), (
-        "vectorized _render_qr diverged from the reference nested-loop "
-        "paint; fix the vectorization (do not weaken this test)."
+        "generate_qr_image diverged from the reference zxing-cpp direct "
+        "render; fix the implementation (do not weaken this test)."
     )

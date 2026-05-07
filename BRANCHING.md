@@ -57,21 +57,23 @@
 - `e2e-encode-decode.yml`
 - `real-world-tests.yml`
 
-## `skip-main-ci:` 约定
+## CI skip 约定
 
-当且仅当满足以下条件时，可以跳过 `main` 的 `push` CI：
+当且仅当满足以下条件时，可以跳过 `main` / `dev` 的 `push` CI：
 
-- 提交直接推送到 `main`
-- commit message 以 `skip-main-ci:` 开头
+- 提交直接推送到 `main` 或 `dev`
+- commit message 以 `skip-ci:` 开头
 
 例如：
 
 ```text
-skip-main-ci: docs only
+skip-ci: workflow-only update
 ```
 
-这个前缀**只影响 `main` 的 push 触发**，不会影响：
+`skip-ci:` **只影响分支 push 触发**，不会影响：
 
 - PR 检查
 - `workflow_call` 复用执行
 - 打标签后的发布 / PyPI 发布 gate
+
+兼容旧约定：`skip-main-ci:` 仍然只跳过 `main` 的 `push` CI，不影响 `dev`。

@@ -93,7 +93,7 @@ class TestE2EEncodeDecode:
 
         ``auto_blocksize(17574)`` returns 938 → K=19 blocks, v25 EC_M.
         This is the exact (payload_size, blocksize, version) triple that
-        triggered the ``qrcode 8.x glog(0)`` crash.  With segno as the
+        triggered the ``qrcode 8.x glog(0)`` crash.  With zxing-cpp as the
         QR backend it must complete and recover the file byte-exactly.
         """
         # Verify the trigger condition is still active

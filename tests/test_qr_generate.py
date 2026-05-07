@@ -11,13 +11,14 @@ size places the blocksize close to the QR version capacity boundary), so it
 was never caught by the existing codec-level tests, which bypassed the QR
 generation layer entirely.
 
-The fix was to replace ``qrcode`` with ``segno``, which has a correct RS
-implementation.  These tests ensure:
+The fix was to replace ``qrcode`` with ``segno`` (later replaced by
+``zxing-cpp`` for performance), which has a correct RS implementation.
+These tests ensure:
 
 1. ``generate_qr_image`` never raises for any LT block from a realistic
    payload — including the "zero-heavy" blocks that triggered the bug.
-2. The image is decodable by WechatQR (end-to-end sanity).
-3. The backend uses ``segno``, not ``qrcode``.
+2. The image is decodable by zxing-cpp (end-to-end sanity).
+3. The backend uses ``zxing-cpp``, not ``qrcode`` or ``segno``.
 4. Key encoding properties: version, size, border, EC level are honoured.
 5. Both alphanumeric (base45) and byte (base64) paths work.
 """
@@ -29,7 +30,7 @@ from math import ceil
 import numpy as np
 import pytest
 
-from qrstream.qr_utils import generate_qr_image, try_decode_qr, HAS_SEGNO
+from qrstream.qr_utils import generate_qr_image, try_decode_qr
 from qrstream.protocol import base45_encode, base45_decode, auto_blocksize
 from qrstream.encoder import LTEncoder
 
@@ -54,19 +55,25 @@ def _make_lt_blocks(raw: bytes, overhead: float = 2.0,
 # ── 1. Backend guard ──────────────────────────────────────────────
 
 class TestBackend:
-    def test_segno_is_available(self):
-        """segno must be installed — it is the sole QR backend."""
-        assert HAS_SEGNO, "segno not found; install with `pip install segno`"
+    def test_zxingcpp_is_available(self):
+        """zxing-cpp must be installed — it is the sole QR backend."""
+        import zxingcpp
+        assert hasattr(zxingcpp, 'create_barcode'), (
+            "zxing-cpp missing create_barcode; upgrade with "
+            "`pip install zxing-cpp>=3.0.0`"
+        )
 
-    def test_qr_utils_uses_segno(self):
-        """qr_utils must import segno, not qrcode, for generation."""
+    def test_qr_utils_uses_zxingcpp(self):
+        """qr_utils must import zxingcpp, not qrcode/segno, for generation."""
         import qrstream.qr_utils as mod
         import inspect
         src = inspect.getsource(mod)
-        assert "import segno" in src
-        # The old qrcode backend must not be referenced in generation code
+        assert "import zxingcpp" in src
+        assert "zxingcpp.create_barcode" in src
+        # The old qrcode/segno backends must not be referenced in generation
         assert "qrcode.QRCode" not in src
-        assert "_EC_MAP" in src  # segno ec map still present
+        assert "segno.make" not in src
+        assert "_EC_MAP" in src  # ec map still present
 
 
 # ── 2. glog(0) regression ─────────────────────────────────────────
@@ -194,7 +201,7 @@ class TestEncodeDecodeRoundtrip:
     """
     End-to-end: generate_qr_image → try_decode_qr must recover the data.
 
-    WechatQR occasionally fails to decode specific QR matrices (this is
+    zxing-cpp occasionally fails to decode specific QR matrices (this is
     a known sensitivity of any real-world detector).  We therefore test
     multiple independently-seeded blocks and require a high success rate
     rather than 100%.
@@ -222,12 +229,11 @@ class TestEncodeDecodeRoundtrip:
     def test_realistic_payload_high_success_rate(self):
         """
         Realistic LT blocks from a compressible payload must decode at
-        ≥70% success rate with WechatQR.
+        ≥70% success rate with zxing-cpp.
 
-        The threshold is intentionally below 100% because WechatQR has
-        documented sensitivity to certain QR mask patterns — this is
-        not a generation bug.  The same 70% threshold applies equally
-        to qrcode and segno (they produce identical pixels).
+        The threshold is intentionally below 100% because any detector
+        has documented sensitivity to certain QR mask patterns — this is
+        not a generation bug.
         """
         raw = _random_bytes(5_000, seed=0xDEAD)
         blocks = _make_lt_blocks(raw, overhead=2.0)[:30]
@@ -239,7 +245,7 @@ class TestEncodeDecodeRoundtrip:
 
         rate = ok / len(blocks)
         assert rate >= 0.70, (
-            f"WechatQR decode success rate too low: {ok}/{len(blocks)} = {rate:.0%}"
+            f"zxing-cpp decode success rate too low: {ok}/{len(blocks)} = {rate:.0%}"
         )
 
     def test_base64_path_roundtrip(self):

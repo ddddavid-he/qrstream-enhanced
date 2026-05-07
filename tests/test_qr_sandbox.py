@@ -38,9 +38,9 @@ from qrstream.qr_utils import generate_qr_image, try_decode_qr
 # path works too, but makes test expectations awkward.
 
 def _make_qr(payload: bytes, *, version: int = 5) -> np.ndarray:
-    """Synthesise a BGR QR image for ``payload`` via segno.
+    """Synthesise a BGR QR image for ``payload`` via zxing-cpp.
 
-    Returns the image; the decoded string from WeChatQRCode will be
+    Returns the image; the decoded string from zxing-cpp will be
     ``base64(payload).decode('ascii')``.
     """
     return generate_qr_image(

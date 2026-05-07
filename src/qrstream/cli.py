@@ -324,10 +324,9 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
     enc.add_argument('-w', '--workers', type=int, default=None,
                      help='Parallel workers for QR generation (default: 1; higher values may not improve performance)')
     enc.add_argument('--auto-mask', action='store_true',
-                     help='Let segno evaluate all 8 ISO 18004 mask patterns '
-                          'instead of using the fixed mask=0 fast path. '
-                          'Slower (~5× per frame) but may improve scan '
-                          'quality under adverse capture conditions.')
+                     help='Accepted for backward compatibility; ignored. '
+                          'zxing-cpp always evaluates all 8 ISO 18004 mask '
+                          'patterns in native C++ at negligible cost.')
     _add_output_mode_group(enc)
 
     # ── decode ────────────────────────────────────────────────────

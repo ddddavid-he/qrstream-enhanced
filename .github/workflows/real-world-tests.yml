@@ -58,25 +58,87 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: real-world-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
-  real-world:
+  check-dev-gate:
     if: |
+      !(
+        github.event_name == 'push' &&
+        startsWith(github.event.head_commit.message || '', 'skip-ci:')
+      ) &&
       !(
         github.event_name == 'push' &&
         github.ref == 'refs/heads/main' &&
         startsWith(github.event.head_commit.message || '', 'skip-main-ci:')
       )
+    runs-on: ubuntu-latest
+    outputs:
+      os-matrix: ${{ steps.query.outputs.os-matrix }}
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+
+      - name: Check matching dev gate
+        id: query
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref }}
+          BASE_REF: ${{ github.base_ref }}
+          SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set +e
+          DEV_PASSED="false"
+
+          if [ "$EVENT_NAME" = "push" ] && [ "$REF_NAME" = "refs/heads/main" ]; then
+            DEV_SHA=$(git rev-parse "$SHA^2" 2>/dev/null || git rev-parse "$SHA" 2>/dev/null)
+            if [ -n "$DEV_SHA" ]; then
+              MAIN_TREE=$(git rev-parse "$SHA^{tree}" 2>/dev/null)
+              DEV_TREE=$(git rev-parse "$DEV_SHA^{tree}" 2>/dev/null)
+              if [ "$MAIN_TREE" = "$DEV_TREE" ]; then
+                RESULT=$(gh run list \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --workflow "real-world-tests.yml" \
+                  --branch dev \
+                  --commit "$DEV_SHA" \
+                  --status success \
+                  --limit 1 \
+                  --json databaseId 2>/dev/null)
+                if [ $? -eq 0 ] && [ "$(echo "$RESULT" | jq 'length' 2>/dev/null)" -gt 0 ]; then
+                  echo "::notice::dev real-world gate already passed for $DEV_SHA; main will run only macOS coverage."
+                  DEV_PASSED="true"
+                fi
+              fi
+            fi
+          fi
+
+          if [ "$EVENT_NAME" = "workflow_call" ] || [ "$REF_NAME" = "refs/heads/main" ] || [ "$BASE_REF" = "main" ]; then
+            OS_MATRIX='["ubuntu-latest","ubuntu-24.04-arm","macos-latest"]'
+            if [ "$DEV_PASSED" = "true" ]; then
+              OS_MATRIX='["macos-latest"]'
+            fi
+          else
+            OS_MATRIX='["ubuntu-latest","ubuntu-24.04-arm"]'
+          fi
+
+          echo "os-matrix=$OS_MATRIX" >> "$GITHUB_OUTPUT"
+
+  real-world:
+    needs: check-dev-gate
     name: real-world (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON((github.event_name == 'workflow_call' || github.ref == 'refs/heads/main' || github.base_ref == 'main') && '["ubuntu-latest","ubuntu-24.04-arm","macos-latest"]' || '["ubuntu-latest","ubuntu-24.04-arm"]') }}
+        os: ${{ fromJSON(needs.check-dev-gate.outputs.os-matrix) }}
     steps:
       - name: Check out code
         uses: actions/checkout@v5

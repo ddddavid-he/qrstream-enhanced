@@ -316,17 +316,19 @@ def encode_to_video(input_path: str, output_path: str,
 
         if workers is None:
             # Full-pipeline benchmarks show the default encoder path is
-            # usually VideoWriter-bound.  QR generation still uses segno
-            # (pure Python), so ThreadPoolExecutor does not provide
-            # reliable end-to-end speedups under the GIL.  Keep the
-            # automatic default conservative; users can still opt in to
+            # usually VideoWriter-bound.  QR generation now uses
+            # zxing-cpp (native C++, releases the GIL), so
+            # ThreadPoolExecutor can provide real parallelism.  However
+            # the muxer thread is still the typical bottleneck, so keep
+            # the automatic default conservative; users can opt in to
             # higher worker counts explicitly.
             workers = 1
         elif workers > 1:
             reporter.warn(
-                "Encoder --workers > 1 is experimental: QR generation is "
-                "GIL-bound and full encode is often video-writer-bound, "
-                "so higher worker counts may not improve performance."
+                "Encoder --workers > 1 is experimental: full encode is "
+                "often video-writer-bound, so higher worker counts may "
+                "not improve end-to-end performance despite QR generation "
+                "itself being GIL-free (zxing-cpp native)."
             )
 
         if verbose:

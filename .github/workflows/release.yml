@@ -76,6 +76,7 @@ jobs:
     uses: ./.github/workflows/test.yml
     permissions:
       contents: read
+      actions: read
 
   # ── Gate 2: e2e encode/decode ──
   e2e:
@@ -84,6 +85,7 @@ jobs:
     uses: ./.github/workflows/e2e-encode-decode.yml
     permissions:
       contents: read
+      actions: read
 
   # ── Gate 3: real-world phone recordings ──
   real-world:
@@ -92,6 +94,7 @@ jobs:
     uses: ./.github/workflows/real-world-tests.yml
     permissions:
       contents: read
+      actions: read
 
   # ── Release (create GitHub Release) ──
   # A gate job that was skipped still counts as "passed" for the
