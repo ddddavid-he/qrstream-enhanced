@@ -14,6 +14,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
+import av
+
+# Suppress FFmpeg log noise from av+cv2 dual-dylib loading (harmless).
+av.logging.set_level(av.logging.FATAL)
 
 from .lt_codec import PRNG, DEFAULT_C, DEFAULT_DELTA, xor_bytes
 from .protocol import (
@@ -232,7 +236,7 @@ def encode_to_video(input_path: str, output_path: str,
 
     high_density = _resolve_alphanumeric_flag(binary_qr, alphanumeric_qr)
     payload = None
-    writer = None
+    output = None
     writer_thread = None
     writer_queue: Queue | None = None
 
@@ -330,22 +334,21 @@ def encode_to_video(input_path: str, output_path: str,
             overhead=overhead,
         )
 
-        fourcc_str, default_ext = _CODEC_MAP.get(codec, ('mp4v', '.mp4'))
-        fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
+        output = av.open(output_path, "w")
+        out_stream = output.add_stream("libx264", rate=fps)
+        out_stream.width = w
+        out_stream.height = h
+        out_stream.pix_fmt = "yuv420p"
+        out_stream.options = {
+            "preset": "ultrafast",
+            "tune": "stillimage",
+            "crf": "23",
+        }
 
-        if codec == 'mjpeg' and output_path.endswith('.mp4'):
-            output_path = output_path[:-4] + default_ext
-
-        writer = cv2.VideoWriter(output_path, fourcc, fps, (w, h))
-        if not writer.isOpened():
-            raise RuntimeError(f"Cannot open video writer for {output_path}")
-
-        # ── VideoWriter runs on its own thread ──────────────────────
-        # Measured baseline (v0.6.1, 10 MB input, 14 workers):
-        #   VideoWriter.write was 54% of encode wall-time, blocking
-        #   the main thread between batches. Moving the write loop
-        #   to a dedicated thread lets pool.map() keep the workers
-        #   busy while the previous batch is being muxed.
+        # ── Encoder/muxer runs on its own thread ────────────────────
+        # x264 encode + mux overlaps with QR generation on the main
+        # thread so the pipeline stays compute-bound on the slowest
+        # stage rather than alternating between them.
         writer_queue: Queue = Queue(maxsize=max(workers * 8, 128))
 
         def _writer_loop():
@@ -356,7 +359,9 @@ def encode_to_video(input_path: str, output_path: str,
                 if frame.shape[:2] != (h, w):
                     frame = cv2.resize(frame, (w, h),
                                        interpolation=cv2.INTER_NEAREST)
-                writer.write(frame)
+                frame_av = av.VideoFrame.from_ndarray(frame, format="bgr24")
+                for packet in out_stream.encode(frame_av):
+                    output.mux(packet)
 
         writer_thread = Thread(target=_writer_loop, daemon=False)
         writer_thread.start()
@@ -460,6 +465,11 @@ def encode_to_video(input_path: str, output_path: str,
         writer_queue.put(None)
         writer_thread.join()
         writer_thread = None
+
+        # Flush encoder: drain remaining frames and close the file.
+        for packet in out_stream.encode():
+            output.mux(packet)
+        output.close()
     finally:
         # On the exception path, make sure we don't leave the writer
         # thread blocked on an empty queue (daemon=False would keep the
@@ -468,8 +478,11 @@ def encode_to_video(input_path: str, output_path: str,
             if writer_queue is not None:
                 writer_queue.put(None)
             writer_thread.join(timeout=5)
-        if writer is not None:
-            writer.release()
+        if 'output' in locals() and output is not None:
+            try:
+                output.close()
+            except Exception:
+                pass
         if payload is not None:
             close = getattr(payload, 'close', None)
             if callable(close):

@@ -25,6 +25,10 @@ from concurrent.futures import (
 
 import cv2
 import numpy as np
+import av
+
+# Suppress FFmpeg log noise from av+cv2 dual-dylib loading (harmless).
+av.logging.set_level(av.logging.FATAL)
 
 from .lt_codec import PRNG, BlockGraph, DEFAULT_C, DEFAULT_DELTA
 from .protocol import unpack
@@ -62,10 +66,6 @@ ProbeObservation = namedtuple("ProbeObservation", [
 ])
 
 
-# ── Sandbox constants (kept for qr_sandbox API compatibility) ────
-_DEFAULT_SANDBOX_POOL_CAP = 8
-_DEFAULT_SANDBOX_CRASH_ABORT_THRESHOLD = 3
-
 # ── Reader / progress constants ──────────────────────────────────
 # Maximum frames the reader thread may prefetch ahead of the worker
 # pool.  Kept small to avoid memory bloat when detection is idle.
@@ -90,17 +90,6 @@ _PROBE_PIPELINE_QUEUE = 32
 # ── CLAHE preprocessing ─────────────────────────────────────────
 _CLAHE_CLIP_LIMIT = 2.0
 _CLAHE_TILE_GRID_SIZE = (8, 8)
-
-
-def _default_sandbox_pool_size(workers: int) -> int:
-    """Kept for API compatibility; sandbox is no longer used."""
-    cpu_count = os.cpu_count() or 1
-    return max(1, min(workers, cpu_count, _DEFAULT_SANDBOX_POOL_CAP))
-
-
-def _default_sandbox_crash_abort_threshold(pool_size: int) -> int:
-    """Kept for API compatibility; sandbox is no longer used."""
-    return max(_DEFAULT_SANDBOX_CRASH_ABORT_THRESHOLD, pool_size)
 
 
 class LTDecoder:
@@ -394,7 +383,7 @@ def _downscale_frame(
     scale = max_dim / src_max
     new_w = int(w * scale)
     new_h = int(h * scale)
-    return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
 
 
 def _bbox_side_pixels(bbox: np.ndarray) -> float:
@@ -446,7 +435,7 @@ def _prepare_frame(
     """
     frame = _crop_frame(frame, crop_box)
     frame = _downscale_frame(frame, max_dim=max_dim)
-    return np.ascontiguousarray(frame).copy()
+    return np.ascontiguousarray(frame)
 
 
 def _derive_crop_box(
@@ -913,42 +902,36 @@ def _try_cobs(qr_data: str, cobs_decode_fn) -> bytes | None:
 def _read_frames(video_path, sample_rate, total_frames, start_frame=0,
                  max_detect_dim: int = _MAX_DETECT_DIM,
                  crop_box: tuple[int, int, int, int] | None = None):
-    """Generator that reads frames from video.
+    """Generator that reads frames from video using PyAV.
 
     Yields ``(frame_idx, frame_ndarray)`` tuples. Frames are optionally
     cropped to ``crop_box`` (y0, y1, x0, x1), then downscaled to
     ``max_detect_dim``.
 
-    Thread-safety note: ``cv2.VideoCapture.read()`` reuses an
-    internal frame buffer — each call returns an ndarray that
-    views the *same* memory overwritten on the next iteration.
-    Under a ``ThreadPoolExecutor`` a worker can see the live
-    buffer scribbled over mid-detect by the producer's next
-    ``read()``, which corrupts WeChat's output.  We therefore
-    force a contiguous *copy* before yielding so each worker
-    owns its frame outright.  ``np.ascontiguousarray`` alone is
-    not enough: if the array is already contiguous it returns
-    the same object without copying, so we chain ``.copy()``.
+    PyAV decodes directly to numpy via ``frame.to_ndarray()``, so
+    frames are independent and thread-safe without extra copying.
     """
-    cap = cv2.VideoCapture(video_path)
-    if start_frame > 0:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-    frame_idx = start_frame
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        if (frame_idx - start_frame) % sample_rate == 0:
-            frame = _prepare_frame(frame, crop_box, max_detect_dim)
-            yield (frame_idx, frame)
-        frame_idx += 1
-    cap.release()
+    container = av.open(video_path)
+    stream = container.streams.video[0]
+    stream.thread_type = "AUTO"
+    frame_idx = 0
+    for packet in container.demux(stream):
+        for frame in packet.decode():
+            if frame_idx < start_frame:
+                frame_idx += 1
+                continue
+            if (frame_idx - start_frame) % sample_rate == 0:
+                img = frame.to_ndarray(format="bgr24")
+                img = _prepare_frame(img, crop_box, max_detect_dim)
+                yield (frame_idx, img)
+            frame_idx += 1
+    container.close()
 
 
 def _read_frame_ranges(video_path, frame_ranges,
                        max_detect_dim: int = _MAX_DETECT_DIM,
                        crop_box: tuple[int, int, int, int] | None = None):
-    """Generator that reads specific frame ranges from video.
+    """Generator that reads specific frame ranges from video using PyAV.
 
     Args:
         frame_ranges: list of (start_frame, end_frame) tuples (inclusive).
@@ -957,16 +940,20 @@ def _read_frame_ranges(video_path, frame_ranges,
     """
     if not frame_ranges:
         return
-    cap = cv2.VideoCapture(video_path)
-    for start, end in sorted(frame_ranges):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start)
-        for fidx in range(start, end + 1):
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frame = _prepare_frame(frame, crop_box, max_detect_dim)
-            yield (fidx, frame)
-    cap.release()
+    container = av.open(video_path)
+    stream = container.streams.video[0]
+    stream.thread_type = "AUTO"
+    frame_idx = 0
+    for packet in container.demux(stream):
+        for frame in packet.decode():
+            for start, end in frame_ranges:
+                if start <= frame_idx <= end:
+                    img = frame.to_ndarray(format="bgr24")
+                    img = _prepare_frame(img, crop_box, max_detect_dim)
+                    yield (frame_idx, img)
+                    break
+            frame_idx += 1
+    container.close()
 
 
 def _build_probe_ranges(total_frames: int, window_size: int = 120,
@@ -1142,9 +1129,10 @@ def _probe_sample_rate(video_path: str, workers: int,
     if reporter is None:
         reporter = QuietReporter()
 
-    cap = cv2.VideoCapture(video_path)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    cap.release()
+    container = av.open(video_path)
+    stream = container.streams.video[0]
+    total_frames = stream.frames if stream.frames > 0 else 0
+    container.close()
 
     if total_frames <= 0:
         return 1, [], 0, 0, 0.0, 1.0, None, None
@@ -1585,17 +1573,15 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
     if reporter is None:
         reporter = QuietReporter()
 
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise FileNotFoundError(f"Cannot open video file: {video_path}")
-
-    src_fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    container = av.open(video_path)
+    stream = container.streams.video[0]
+    src_fps = float(stream.average_rate) if stream.average_rate else 0.0
+    total_frames = stream.frames if stream.frames > 0 else 0
+    src_w = stream.width if stream.width else 0
+    src_h = stream.height if stream.height else 0
     src_max = max(src_w, src_h)
     duration = total_frames / src_fps if src_fps > 0 else 0
-    cap.release()
+    container.close()
 
     if workers is None:
         workers = os.cpu_count() or 1
