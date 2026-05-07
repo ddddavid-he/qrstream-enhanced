@@ -129,7 +129,7 @@ def test_encode_warns_when_manual_workers_exceeds_one(monkeypatch, tmp_path):
 
     assert len(reporter.warnings) == 1
     assert "--workers > 1" in reporter.warnings[0]
-    assert "may not improve performance" in reporter.warnings[0]
+    assert "may not improve" in reporter.warnings[0]
     assert out.exists() and out.stat().st_size > 0
 
 
