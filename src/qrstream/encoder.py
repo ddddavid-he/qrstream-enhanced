@@ -12,21 +12,11 @@ from queue import Queue
 from threading import Thread
 from concurrent.futures import ThreadPoolExecutor
 
-# Suppress objc duplicate-class warnings from cv2+av dual FFmpeg dylibs (harmless).
-import sys as _sys, os as _os
-_stderr_fd = _os.dup(2)          # save real stderr fd
-_devnull = _os.open(_os.devnull, _os.O_WRONLY)
-_os.dup2(_devnull, 2)            # redirect fd 2 → /dev/null
-_os.close(_devnull)
-
 import cv2
 import numpy as np
 import av
 
-_os.dup2(_stderr_fd, 2)          # restore fd 2
-_os.close(_stderr_fd)
-
-# Suppress any remaining FFmpeg log noise.
+# Suppress verbose FFmpeg log output (info/warning level).
 av.logging.set_level(av.logging.FATAL)
 
 from .lt_codec import PRNG, DEFAULT_C, DEFAULT_DELTA, xor_bytes
@@ -191,9 +181,12 @@ def _load_payload(input_path: str, compress: bool,
 
 
 # Codec map for video output
-_CODEC_MAP = {
-    'mp4v': ('mp4v', '.mp4'),
-    'mjpeg': ('MJPG', '.avi'),
+# PyAV codec mapping: user-facing name → (pyav_codec, pix_fmt, ext, stream_options).
+_PYAV_CODEC_MAP = {
+    'h264': ('libx264', 'yuv420p', '.mp4',
+             {"preset": "ultrafast", "tune": "stillimage", "crf": "23"}),
+    'mp4v': ('mpeg4', 'yuv420p', '.mp4', {}),
+    'mjpeg': ('mjpeg', 'yuvj420p', '.avi', {"q:v": "2"}),
 }
 
 
@@ -215,7 +208,7 @@ def encode_to_video(input_path: str, output_path: str,
                     verbose: bool = False,
                     workers: int | None = None,
                     use_legacy_qr: bool = False,
-                    codec: str = 'mp4v',
+                    codec: str = 'h264',
                     binary_qr: bool = True,
                     alphanumeric_qr: bool | None = None,
                     force_compress: bool = False,
@@ -344,16 +337,26 @@ def encode_to_video(input_path: str, output_path: str,
             overhead=overhead,
         )
 
+        codec_info = _PYAV_CODEC_MAP.get(codec)
+        if codec_info is None:
+            raise ValueError(
+                f"Unsupported codec: {codec!r}. "
+                f"Choose from: {list(_PYAV_CODEC_MAP)}"
+            )
+        pyav_codec, pix_fmt, default_ext, stream_opts = codec_info
+
+        # Auto-correct file extension when codec requires a different container.
+        if not output_path.endswith(default_ext):
+            base, _ = os.path.splitext(output_path)
+            output_path = base + default_ext
+
         output = av.open(output_path, "w")
-        out_stream = output.add_stream("libx264", rate=fps)
+        out_stream = output.add_stream(pyav_codec, rate=fps)
         out_stream.width = w
         out_stream.height = h
-        out_stream.pix_fmt = "yuv420p"
-        out_stream.options = {
-            "preset": "ultrafast",
-            "tune": "stillimage",
-            "crf": "23",
-        }
+        out_stream.pix_fmt = pix_fmt
+        if stream_opts:
+            out_stream.options = stream_opts
 
         # ── Encoder/muxer runs on its own thread ────────────────────
         # x264 encode + mux overlaps with QR generation on the main
@@ -480,15 +483,16 @@ def encode_to_video(input_path: str, output_path: str,
         for packet in out_stream.encode():
             output.mux(packet)
         output.close()
+        output = None  # Prevent double-close in finally block.
     finally:
         # On the exception path, make sure we don't leave the writer
-        # thread blocked on an empty queue (daemon=False would keep the
-        # process alive after an error).
+        # thread blocked on an empty queue (daemon=True would let it die
+        # with the process, but we still want a clean shutdown attempt).
         if writer_thread is not None and writer_thread.is_alive():
             if writer_queue is not None:
                 writer_queue.put(None)
             writer_thread.join(timeout=5)
-        if 'output' in locals() and output is not None:
+        if output is not None:
             try:
                 output.close()
             except Exception:

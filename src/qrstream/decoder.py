@@ -23,21 +23,11 @@ from concurrent.futures import (
     wait as _futures_wait,
 )
 
-# Suppress objc duplicate-class warnings from cv2+av dual FFmpeg dylibs (harmless).
-import sys as _sys, os as _os
-_stderr_fd = _os.dup(2)          # save real stderr fd
-_devnull = _os.open(_os.devnull, _os.O_WRONLY)
-_os.dup2(_devnull, 2)            # redirect fd 2 → /dev/null
-_os.close(_devnull)
-
 import cv2
 import numpy as np
 import av
 
-_os.dup2(_stderr_fd, 2)          # restore fd 2
-_os.close(_stderr_fd)
-
-# Suppress any remaining FFmpeg log noise.
+# Suppress verbose FFmpeg log output (info/warning level).
 av.logging.set_level(av.logging.FATAL)
 
 from .lt_codec import PRNG, BlockGraph, DEFAULT_C, DEFAULT_DELTA
@@ -909,6 +899,45 @@ def _try_cobs(qr_data: str, cobs_decode_fn) -> bytes | None:
         return None
 
 
+# ── Video metadata helper ─────────────────────────────────────────
+
+def _get_video_info(video_path: str) -> tuple[int, float, int, int]:
+    """Return (total_frames, fps, width, height) from a video file.
+
+    Uses a multi-tier fallback for total_frames because some container
+    formats (MKV, WebM, certain MOV) do not store nb_frames metadata
+    and PyAV reports ``stream.frames == 0`` even though the file has
+    decodable content.
+
+    Fallback tiers:
+      1. ``stream.frames`` — direct metadata field.
+      2. ``stream.duration * stream.time_base * fps`` — stream-level duration.
+      3. ``container.duration / AV_TIME_BASE * fps`` — container-level duration.
+    """
+    container = av.open(video_path)
+    stream = container.streams.video[0]
+
+    fps = float(stream.average_rate) if stream.average_rate else 0.0
+    width = stream.width or 0
+    height = stream.height or 0
+
+    # Tier 1: direct stream metadata (nb_frames).
+    total_frames = stream.frames if stream.frames and stream.frames > 0 else 0
+
+    # Tier 2: derive from stream duration + time_base + fps.
+    if total_frames <= 0 and stream.duration and stream.time_base and fps > 0:
+        duration_sec = float(stream.duration * stream.time_base)
+        total_frames = int(duration_sec * fps)
+
+    # Tier 3: derive from container-level duration (microseconds).
+    if total_frames <= 0 and container.duration and fps > 0:
+        duration_sec = container.duration / 1_000_000.0
+        total_frames = int(duration_sec * fps)
+
+    container.close()
+    return total_frames, fps, width, height
+
+
 def _read_frames(video_path, sample_rate, total_frames, start_frame=0,
                  max_detect_dim: int = _MAX_DETECT_DIM,
                  crop_box: tuple[int, int, int, int] | None = None):
@@ -923,7 +952,10 @@ def _read_frames(video_path, sample_rate, total_frames, start_frame=0,
     """
     container = av.open(video_path)
     stream = container.streams.video[0]
-    stream.thread_type = "AUTO"
+    # Do not use stream.thread_type = "AUTO": FFmpeg frame-level threading
+    # deadlocks with Python generators when the internal decoded-frame
+    # queue fills while the generator is suspended at yield.  Decoding is
+    # already overlapped with detection via _prefetch_iter's producer thread.
     frame_idx = 0
     try:
         for packet in container.demux(stream):
@@ -945,6 +977,9 @@ def _read_frame_ranges(video_path, frame_ranges,
                        crop_box: tuple[int, int, int, int] | None = None):
     """Generator that reads specific frame ranges from video using PyAV.
 
+    Seeks independently to each range for efficiency on long videos
+    where ranges may be widely spaced.
+
     Args:
         frame_ranges: list of (start_frame, end_frame) tuples (inclusive).
         max_detect_dim: per-call downscale cap (see :func:`_read_frames`).
@@ -952,20 +987,42 @@ def _read_frame_ranges(video_path, frame_ranges,
     """
     if not frame_ranges:
         return
+
+    sorted_ranges = sorted(frame_ranges)
+
     container = av.open(video_path)
     stream = container.streams.video[0]
-    stream.thread_type = "AUTO"
-    frame_idx = 0
+    # Do not use stream.thread_type = "AUTO": frame-level threading
+    # deadlocks with Python generators (see _read_frames comment).
+
     try:
-        for packet in container.demux(stream):
-            for frame in packet.decode():
-                for start, end in frame_ranges:
-                    if start <= frame_idx <= end:
+        fps = float(stream.average_rate) if stream.average_rate else 0.0
+        if not fps or not stream.time_base:
+            container.close()
+            return
+
+        for range_start, range_end in sorted_ranges:
+            # Seek to the start of each range independently.
+            target_pts = int(range_start / fps / float(stream.time_base))
+            container.seek(target_pts, stream=stream)
+
+            for packet in container.demux(stream):
+                done_range = False
+                for frame in packet.decode():
+                    if frame.pts is None:
+                        continue
+                    frame_idx = round(
+                        float(frame.pts * stream.time_base) * fps
+                    )
+                    if frame_idx > range_end:
+                        done_range = True
+                        break
+                    if frame_idx >= range_start:
                         img = frame.to_ndarray(format="bgr24")
                         img = _prepare_frame(img, crop_box, max_detect_dim)
                         yield (frame_idx, img)
-                        break
-                frame_idx += 1
+                if done_range:
+                    break
     finally:
         container.close()
 
@@ -1143,10 +1200,7 @@ def _probe_sample_rate(video_path: str, workers: int,
     if reporter is None:
         reporter = QuietReporter()
 
-    container = av.open(video_path)
-    stream = container.streams.video[0]
-    total_frames = stream.frames if stream.frames > 0 else 0
-    container.close()
+    total_frames, _, _, _ = _get_video_info(video_path)
 
     if total_frames <= 0:
         return 1, [], 0, 0, 0.0, 1.0, None, None
@@ -1587,15 +1641,9 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
     if reporter is None:
         reporter = QuietReporter()
 
-    container = av.open(video_path)
-    stream = container.streams.video[0]
-    src_fps = float(stream.average_rate) if stream.average_rate else 0.0
-    total_frames = stream.frames if stream.frames > 0 else 0
-    src_w = stream.width if stream.width else 0
-    src_h = stream.height if stream.height else 0
+    total_frames, src_fps, src_w, src_h = _get_video_info(video_path)
     src_max = max(src_w, src_h)
     duration = total_frames / src_fps if src_fps > 0 else 0
-    container.close()
 
     if workers is None:
         workers = os.cpu_count() or 1
