@@ -29,6 +29,141 @@ from .__init__ import __version__
 from .ui import OutputMode, resolve_output_mode
 
 
+def cmd_colors():
+    """Display all colour palettes used by the qrstream UI."""
+    try:
+        from rich.console import Console
+        from rich.text import Text
+    except ImportError:
+        print("Error: 'rich' is required for colour display. "
+              "Install with: pip install rich")
+        sys.exit(1)
+
+    from .ui import (
+        _DENSITY_CHAR_AND_STYLE,
+        _density_cell,
+        _density_cell_truecolor,
+        _detect_rate_style,
+        _detect_rate_markup,
+        _DET_GRADIENT_ANCHORS,
+    )
+
+    console = Console(stderr=False, highlight=False, force_terminal=True)
+    truecolor = (console.color_system == "truecolor")
+
+    console.print(
+        f"[bold]qrstream {__version__}[/bold] — UI colour palette\n"
+    )
+    console.print(f"  Terminal colour system: [bold]{console.color_system}[/bold]\n")
+
+    # ── Detect-rate gradient ──────────────────────────────────────
+    console.print("[bold underline]Detect-rate gradient[/bold underline]")
+    console.print(
+        "  Shown in the Scan/Recover stats column during decode.\n"
+        "  Anchors: <50% red → 60% orange → 70% yellow → 80%+ green\n"
+    )
+
+    # Show a continuous band — 50 cells mapping 0%–100%.
+    bar_width = 50
+    band = Text("  ")
+    for i in range(bar_width):
+        hit = i / (bar_width - 1)
+        style = _detect_rate_style(hit, truecolor=truecolor)
+        band.append("█", style=style)
+    console.print(band)
+    # Scale labels aligned to the bar (2-space indent + positions).
+    # Each cell = 2% → 50%=cell25, 60%=cell30, 70%=cell35, 80%=cell40
+    scale = Text("  ")
+    markers = [(0, "0%"), (25, "50%"), (30, "60%"), (35, "70%"),
+               (40, "80%"), (49, "100%")]
+    pos = 0
+    for col, label in markers:
+        if col > pos:
+            scale.append(" " * (col - pos))
+        scale.append(label)
+        pos = col + len(label)
+    console.print(scale)
+    console.print()
+
+    # Show discrete sample values
+    console.print("  Sample values:")
+    samples = [0, 10, 20, 30, 40, 50, 55, 60, 65, 70, 75, 80, 90, 100]
+    line = Text("  ")
+    for pct in samples:
+        hit = pct / 100.0
+        style = _detect_rate_style(hit, truecolor=truecolor)
+        line.append(f" {pct:>3d}%", style=style)
+    console.print(line)
+    console.print()
+
+    # Fallback (discrete) mode comparison
+    if truecolor:
+        console.print("  [dim]Discrete fallback (non-truecolor terminals):[/dim]")
+        line_fb = Text("  ")
+        for pct in samples:
+            hit = pct / 100.0
+            style = _detect_rate_style(hit, truecolor=False)
+            line_fb.append(f" {pct:>3d}%", style=style)
+        console.print(line_fb)
+        console.print()
+
+    # ── Block-map (File row) ──────────────────────────────────────
+    console.print("[bold underline]Block-map density[/bold underline]")
+    console.print(
+        "  Shown in the File row during decode — each cell represents\n"
+        "  a region of the output file coloured by recovery density.\n"
+        "  Gamma curve (0.55) stretches early colours for visibility.\n"
+    )
+
+    # Show a simulated block-map bar filling from 0% to 100%
+    console.print("  Truecolor gradient (0% → 100%):")
+    bar = Text("  ")
+    for i in range(50):
+        density = i / 49.0
+        ch, st = _density_cell_truecolor(density)
+        bar.append(ch, style=st)
+    console.print(bar)
+    console.print()
+
+    # Discrete fallback
+    console.print("  [dim]Discrete fallback (non-truecolor terminals):[/dim]")
+    bar_fb = Text("  ")
+    for i in range(50):
+        density = i / 49.0
+        ch, st = _density_cell(density)
+        bar_fb.append(ch, style=st)
+    console.print(bar_fb)
+    console.print()
+
+    # Tier table
+    console.print("  Discrete tiers:")
+    console.print("  Density    Glyph   Style")
+    prev_thresh = 0.0
+    for thresh, char, style_name in _DENSITY_CHAR_AND_STYLE:
+        label = f"  {prev_thresh*100:>5.1f}%–{thresh*100:>5.1f}%"
+        sample = Text(f"   {char} {char} {char}", style=style_name)
+        line = Text(f"{label}  ")
+        line.append_text(sample)
+        line.append(f"   {style_name}")
+        console.print(line)
+        prev_thresh = thresh
+    console.print()
+
+    # ── Phase label colours ───────────────────────────────────────
+    console.print("[bold underline]Phase labels[/bold underline]\n")
+    console.print("  [bold cyan]Probe[/bold cyan]   — probing video for QR detection rate")
+    console.print("  [bold cyan]Scan[/bold cyan]    — main decode pass")
+    console.print("  [bold yellow]Recover[/bold yellow] — targeted recovery of missing blocks")
+    console.print("  [bold cyan]File[/bold cyan]    — block-map / output file progress")
+    console.print("  [bold cyan]Plan[/bold cyan]    — decode plan parameters")
+    console.print()
+
+    # ── Status indicators ─────────────────────────────────────────
+    console.print("[bold underline]Status indicators[/bold underline]\n")
+    console.print("  [green]✓[/green] Success     [yellow]⚠[/yellow] Warning     [bold red]✗[/bold red] Error")
+    console.print()
+
+
 # Minimum overhead the default LT codec (SplitMix64 PRNG mixer,
 # qrstream ≥ 0.8) needs to converge on sequential seeds across all
 # K we've benchmarked (328..4096).  The empirical worst case is
@@ -349,6 +484,12 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
              'release.')
     _add_output_mode_group(dec)
 
+    # ── colors ───────────────────────────────────────────────────
+    subparsers.add_parser(
+        'colors',
+        help='Display the colour palette used by the UI '
+             '(detect-rate gradient, block-map, etc.)')
+
     return parser
 
 
@@ -360,6 +501,8 @@ def main(argv: list[str] | None = None):
         cmd_encode(args)
     elif args.command == 'decode':
         cmd_decode(args)
+    elif args.command == 'colors':
+        cmd_colors()
     else:
         parser.print_help()
         sys.exit(1)

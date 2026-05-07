@@ -59,6 +59,8 @@ try:  # Rich is a hard dependency (declared in pyproject.toml).
         SpinnerColumn,
         TextColumn,
     )
+    from rich.color import Color as _RichColor
+    from rich.style import Style as _RichStyle
     from rich.table import Column
     from rich.text import Text
     _RICH_AVAILABLE = True
@@ -167,6 +169,40 @@ _DENSITY_CHAR_AND_STYLE: tuple[tuple[float, str, str], ...] = (
     (1.00,    "█", "bright_green"),  # 9 ── fully recovered
 )
 
+# ── Block-map truecolor gradient ─────────────────────────────────
+# Smooth RGB gradient for the block-map with non-linear density
+# mapping.  LT fountain decoding recovers slowly at first (need
+# enough unique seeds) then accelerates sharply at the end — the
+# "peeling avalanche".  To make early progress visually prominent,
+# we apply a concave power curve (exponent < 1) so the colour
+# changes faster in the low-density region.
+#
+# Colour spine: dark teal → teal → cyan-green → green → bright_green
+# 100% done: hard jump to lighter green (signals completion).
+_BLOCK_GRADIENT_ANCHORS: list[tuple[float, tuple[int, int, int]]] = [
+    (0.00, (20, 30, 35)),       # near-black teal
+    (0.05, (20, 45, 55)),       # very dark teal
+    (0.10, (20, 60, 72)),       # dark teal
+    (0.18, (20, 75, 88)),       # teal emerging
+    (0.30, (22, 90, 98)),       # deep teal (desaturated)
+    (0.45, (28, 115, 110)),     # teal-cyan (muted)
+    (0.60, (32, 140, 105)),     # mid cyan-green
+    (0.75, (38, 162, 90)),      # cyan-green (muted)
+    (0.90, (45, 180, 70)),      # green (muted)
+    (1.00, (55, 200, 65)),      # muted green (gradient end)
+]
+
+# Non-linear density exponent: < 1 stretches the early region
+# (more colour change per unit density at the start, less at end).
+_BLOCK_GRADIENT_GAMMA = 0.55
+
+# Glyph thresholds for truecolor mode — use solid block throughout
+# so colour alone conveys density without glyph-induced brightness
+# jumps at tier boundaries.
+_BLOCK_GLYPH_THRESHOLDS: tuple[tuple[float, str], ...] = (
+    (1.00, "█"),
+)
+
 
 def _density_cell(density: float) -> tuple[str, str]:
     """Return ``(char, rich_style)`` for a bucket density in [0, 1].
@@ -208,10 +244,59 @@ def _density_cell(density: float) -> tuple[str, str]:
     return _DENSITY_CHAR_AND_STYLE[-1][1], _DENSITY_CHAR_AND_STYLE[-1][2]
 
 
+def _density_cell_truecolor(density: float) -> tuple[str, str]:
+    """Return ``(char, rgb_style_str)`` using smooth truecolor gradient.
+
+    Applies a non-linear gamma curve so colour changes are weighted
+    towards the lower densities (matching LT fountain's slow-start,
+    fast-finish recovery pattern).
+    """
+    density = max(0.0, min(1.0, density))
+
+    # Fully recovered: saturation jump — from muted green to vivid
+    # pure green.  Same brightness, much higher saturation.
+    if density >= 1.0:
+        return "█", "rgb(0,230,0)"
+
+    # Determine glyph from density.
+    glyph = _BLOCK_GLYPH_THRESHOLDS[-1][1]
+    for thresh, ch in _BLOCK_GLYPH_THRESHOLDS:
+        if density <= thresh:
+            glyph = ch
+            break
+
+    # Apply gamma curve: stretches early colours, compresses late.
+    t = density ** _BLOCK_GRADIENT_GAMMA
+
+    # Interpolate through the RGB anchors using the remapped t.
+    anchors = _BLOCK_GRADIENT_ANCHORS
+    if t <= anchors[0][0]:
+        r, g, b = anchors[0][1]
+    elif t >= anchors[-1][0]:
+        r, g, b = anchors[-1][1]
+    else:
+        for i in range(len(anchors) - 1):
+            lo_t, lo_col = anchors[i]
+            hi_t, hi_col = anchors[i + 1]
+            if lo_t <= t <= hi_t:
+                span = hi_t - lo_t
+                frac = (t - lo_t) / span if span > 0 else 0.0
+                r = int(lo_col[0] + (hi_col[0] - lo_col[0]) * frac)
+                g = int(lo_col[1] + (hi_col[1] - lo_col[1]) * frac)
+                b = int(lo_col[2] + (hi_col[2] - lo_col[2]) * frac)
+                break
+        else:
+            r, g, b = anchors[-1][1]
+
+    return glyph, f"rgb({r},{g},{b})"
+
+
 def compute_block_map_cells(
     recovered: Iterable[int] | set[int] | dict[int, object],
     k: int,
     width: int,
+    *,
+    truecolor: bool = False,
 ) -> list[tuple[str, str, float]]:
     """Compute ``(char, style, density)`` cells for a block map.
 
@@ -224,6 +309,9 @@ def compute_block_map_cells(
         Total number of source blocks.
     width
         Target number of cells (terminal columns) to render.
+    truecolor
+        When True, use smooth RGB gradient colours; otherwise use
+        discrete named-colour tiers.
 
     Notes
     -----
@@ -242,6 +330,7 @@ def compute_block_map_cells(
             else set(recovered)
         )
 
+    cell_fn = _density_cell_truecolor if truecolor else _density_cell
     cells: list[tuple[str, str, float]] = []
     scale = k / width
     for cell_idx in range(width):
@@ -250,12 +339,20 @@ def compute_block_map_cells(
         lo = int(math.floor(start))
         hi = min(k - 1, int(math.ceil(end) - 1))
         covered = 0.0
+        total_overlap = 0.0
         for block_idx in range(lo, hi + 1):
             overlap = min(end, block_idx + 1.0) - max(start, float(block_idx))
-            if overlap > 0.0 and block_idx in recovered_set:
-                covered += overlap
-        density = covered / scale if scale > 0 else 0.0
-        ch, style = _density_cell(density)
+            if overlap > 0.0:
+                total_overlap += overlap
+                if block_idx in recovered_set:
+                    covered += overlap
+        # Snap to 1.0 when all blocks in this cell are recovered
+        # (avoids floating-point near-miss like 0.99999).
+        if total_overlap > 0.0 and covered >= total_overlap - 1e-9:
+            density = 1.0
+        else:
+            density = covered / scale if scale > 0 else 0.0
+        ch, style = cell_fn(density)
         cells.append((ch, style, density))
     return cells
 
@@ -274,9 +371,11 @@ def render_block_map_rich(
     recovered: Iterable[int] | set[int] | dict[int, object],
     k: int,
     width: int,
+    *,
+    truecolor: bool = False,
 ) -> "Text":
     """Rich ``Text`` object with per-cell colour spans."""
-    cells = compute_block_map_cells(recovered, k, width)
+    cells = compute_block_map_cells(recovered, k, width, truecolor=truecolor)
     text = Text()
     for ch, style, _ in cells:
         text.append(ch, style=style)
@@ -762,6 +861,127 @@ if _RICH_AVAILABLE:
         pct = max(0.0, min(100.0, task.completed / total * 100.0))
         return f"{pct:3.0f}%"
 
+    # ── Detect-rate colour gradient ──────────────────────────────
+
+    # Colour anchor points for the detect-rate indicator.
+    # The gradient interpolates linearly between adjacent anchors:
+    #
+    #   0–50 %  : red       (255, 70, 70)   — detection too low
+    #   50–60 % : red→orange interpolation   — danger zone
+    #   60–70 % : orange→yellow→green        — marginal
+    #   70–80 % : transitioning to green     — good
+    #   80–100% : green     (0, 200, 80)     — perfect
+    #
+    _DET_GRADIENT_ANCHORS: list[tuple[float, tuple[int, int, int]]] = [
+        (0.00, (255, 70, 70)),    # red
+        (0.50, (255, 70, 70)),    # still red at 50%
+        (0.60, (255, 165, 0)),    # orange
+        (0.70, (220, 220, 0)),    # yellow
+        (0.80, (0, 200, 80)),     # green
+        (1.00, (0, 200, 80)),     # still green at 100%
+    ]
+
+    # Discrete named-colour fallback for terminals without truecolor
+    # (standard 16-color or 256-color that may not render RGB well).
+    _DET_DISCRETE_STYLES: list[tuple[float, str]] = [
+        (0.50, "bold red"),
+        (0.60, "bold bright_red"),
+        (0.70, "bold yellow"),
+        (0.80, "bold green"),
+    ]
+
+    def _lerp_rgb(
+        c1: tuple[int, int, int],
+        c2: tuple[int, int, int],
+        t: float,
+    ) -> tuple[int, int, int]:
+        """Linearly interpolate between two RGB colours."""
+        return (
+            int(c1[0] + (c2[0] - c1[0]) * t),
+            int(c1[1] + (c2[1] - c1[1]) * t),
+            int(c1[2] + (c2[2] - c1[2]) * t),
+        )
+
+    def _detect_rate_style(hit: float, truecolor: bool = True) -> _RichStyle:
+        """Return a Rich Style for the detect-rate value.
+
+        When *truecolor* is True, produces a smooth RGB gradient keyed
+        to the anchor points above.  When False, falls back to discrete
+        named colours that render correctly on any terminal.
+        """
+        hit = max(0.0, min(1.0, hit))
+
+        if not truecolor:
+            # Discrete fallback: walk thresholds from low to high.
+            style_name = "bold green"
+            for threshold, name in _DET_DISCRETE_STYLES:
+                if hit < threshold:
+                    style_name = name
+                    break
+            return _RichStyle.parse(style_name)
+
+        # Truecolor gradient: find the two surrounding anchors and
+        # interpolate between them.
+        anchors = _DET_GRADIENT_ANCHORS
+        # Clamp to the range of anchors.
+        if hit <= anchors[0][0]:
+            r, g, b = anchors[0][1]
+        elif hit >= anchors[-1][0]:
+            r, g, b = anchors[-1][1]
+        else:
+            # Find segment.
+            for i in range(len(anchors) - 1):
+                lo_pct, lo_col = anchors[i]
+                hi_pct, hi_col = anchors[i + 1]
+                if lo_pct <= hit <= hi_pct:
+                    span = hi_pct - lo_pct
+                    t = (hit - lo_pct) / span if span > 0 else 0.0
+                    r, g, b = _lerp_rgb(lo_col, hi_col, t)
+                    break
+            else:
+                r, g, b = anchors[-1][1]
+        return _RichStyle(color=_RichColor.from_rgb(r, g, b), bold=True)
+
+    def _detect_rate_markup(hit: float, truecolor: bool = True) -> str:
+        """Return a Rich markup string for the detect-rate percentage.
+
+        Used in contexts where the description is a plain string with
+        embedded Rich markup (e.g. probe spinner TextColumn).
+        """
+        hit = max(0.0, min(1.0, hit))
+        pct_text = f"{hit * 100:.0f}%"
+
+        if not truecolor:
+            if hit < 0.50:
+                return f"[bold red]{pct_text}[/bold red]"
+            elif hit < 0.60:
+                return f"[bold bright_red]{pct_text}[/bold bright_red]"
+            elif hit < 0.70:
+                return f"[bold yellow]{pct_text}[/bold yellow]"
+            elif hit < 0.80:
+                return f"[bold green]{pct_text}[/bold green]"
+            else:
+                return f"[bold green]{pct_text}[/bold green]"
+
+        # Truecolor: compute RGB via gradient and emit as markup.
+        anchors = _DET_GRADIENT_ANCHORS
+        if hit <= anchors[0][0]:
+            r, g, b = anchors[0][1]
+        elif hit >= anchors[-1][0]:
+            r, g, b = anchors[-1][1]
+        else:
+            for i in range(len(anchors) - 1):
+                lo_pct, lo_col = anchors[i]
+                hi_pct, hi_col = anchors[i + 1]
+                if lo_pct <= hit <= hi_pct:
+                    span = hi_pct - lo_pct
+                    t = (hit - lo_pct) / span if span > 0 else 0.0
+                    r, g, b = _lerp_rgb(lo_col, hi_col, t)
+                    break
+            else:
+                r, g, b = anchors[-1][1]
+        return f"[bold rgb({r},{g},{b})]{pct_text}[/bold rgb({r},{g},{b})]"
+
 
     class _DetectStatsColumn(ProgressColumn):
         """Show percent + detection/speed/ETA with a single-space gap.
@@ -822,7 +1042,7 @@ if _RICH_AVAILABLE:
     # dispatch on.
 
 
-    def _render_decode_bar(task, width: int) -> "Text":
+    def _render_decode_bar(task, width: int, truecolor: bool = False) -> "Text":
         """Render the decode bar for a single row.
 
         Scan rows get a Rich-style thin bar (``━``) with a bright
@@ -831,10 +1051,10 @@ if _RICH_AVAILABLE:
 
         File rows render the qBittorrent-style block map directly:
         one cell per roughly ``k / width`` source blocks, coloured
-        by recovery density using the 10-tier palette defined in
-        :data:`_DENSITY_CHAR_AND_STYLE`.  No overlay / tip glyph —
-        the block map alone is the progress indicator; the
-        accompanying stats cell (``N/K blocks``) carries the
+        by recovery density using either the smooth truecolor
+        gradient or the discrete named-colour tiers.  No overlay /
+        tip glyph — the block map alone is the progress indicator;
+        the accompanying stats cell (``N/K blocks``) carries the
         precise counter.
         """
         kind = (task.fields or {}).get("kind", "scan")
@@ -845,7 +1065,8 @@ if _RICH_AVAILABLE:
             k = (task.fields or {}).get("k") or 0
             text = Text()
             if k > 0 and width > 0:
-                cells = compute_block_map_cells(recovered, k, width)
+                cells = compute_block_map_cells(
+                    recovered, k, width, truecolor=truecolor)
                 for ch, style, _density in cells:
                     text.append(ch, style=style)
             else:
@@ -895,12 +1116,14 @@ if _RICH_AVAILABLE:
         their left- and right-edges are aligned by construction.
         """
 
-        __slots__ = ("_task", "_min_width", "_max_width")
+        __slots__ = ("_task", "_min_width", "_max_width", "_truecolor")
 
-        def __init__(self, task, min_width: int, max_width: int):
+        def __init__(self, task, min_width: int, max_width: int,
+                     truecolor: bool = False):
             self._task = task
             self._min_width = max(1, int(min_width))
             self._max_width = max(self._min_width, int(max_width))
+            self._truecolor = truecolor
 
         def __rich_console__(self, console, options):
             allotted = options.max_width
@@ -908,7 +1131,7 @@ if _RICH_AVAILABLE:
                 allotted = self._min_width
             width = max(self._min_width,
                         min(self._max_width, int(allotted)))
-            yield _render_decode_bar(self._task, width)
+            yield _render_decode_bar(self._task, width, self._truecolor)
 
         def __rich_measure__(self, console, options):
             from rich.measure import Measurement
@@ -938,18 +1161,21 @@ if _RICH_AVAILABLE:
         map on very wide ones.
         """
 
-        def __init__(self, min_width: int = 24, max_width: int = 200):
+        def __init__(self, min_width: int = 24, max_width: int = 200,
+                     truecolor: bool = False):
             super().__init__(
                 table_column=Column(ratio=1, no_wrap=True),
             )
             self._min_width = max(1, int(min_width))
             self._max_width = max(self._min_width, int(max_width))
+            self._truecolor = truecolor
 
         def render(self, task):  # type: ignore[override]
             return _DynamicDecodeBar(
                 task,
                 min_width=self._min_width,
                 max_width=self._max_width,
+                truecolor=self._truecolor,
             )
 
 
@@ -969,6 +1195,10 @@ if _RICH_AVAILABLE:
         because it's the EWMA estimator that feeds ETA; it just
         isn't surfaced.
         """
+
+        def __init__(self, *, truecolor: bool = True):
+            super().__init__()
+            self._truecolor = truecolor
 
         def render(self, task):  # type: ignore[override]
             fields = task.fields or {}
@@ -1000,23 +1230,34 @@ if _RICH_AVAILABLE:
             # bar itself.
             hit = fields.get("hit")
             eta = fields.get("eta")
-            parts: list[str] = []
+            style = fields.get("stats_style", "bright_cyan")
+            if hit is None and eta is None:
+                return Text(pct_str, style=style)
+            # Build a composite Text so detect-rate gets its own
+            # colour while pct / ETA keep the base style.
+            result = Text(pct_str, style=style)
+            result.append(" (", style=style)
+            first = True
             if eta is not None:
-                parts.append(f"ETA {_fmt_duration(eta)}")
+                result.append(f"ETA {_fmt_duration(eta)}", style=style)
+                first = False
             if hit is not None:
+                if not first:
+                    result.append(", ", style=style)
+                # Colour the detect-rate value by magnitude:
+                #   ≥ 70 %  → green  (healthy, efficient decode)
+                #   30–69 % → yellow (sub-optimal, needs more frames)
+                #   < 30 %  → red    (unreliable detection)
+                det_style = _detect_rate_style(hit, self._truecolor)
                 # Reserve a 3-digit slot ("  9%" / " 83%" / "100%")
                 # so the stats cell has a constant width.  Without
                 # this the bar column gets re-laid-out every time
                 # the detect-rate digit count changes and the
                 # whole row appears to twitch.
-                parts.append(f"det {hit * 100:>3.0f}%")
-            style = fields.get("stats_style", "bright_cyan")
-            if not parts:
-                return Text(pct_str, style=style)
-            return Text(
-                f"{pct_str} ({', '.join(parts)})",
-                style=style,
-            )
+                result.append("det ", style=style)
+                result.append(f"{hit * 100:>3.0f}%", style=det_style)
+            result.append(")", style=style)
+            return result
 
 
 else:  # pragma: no cover — exercised only when rich is unavailable
@@ -1071,6 +1312,7 @@ class RichReporter:
             highlight=False,
             soft_wrap=False,
         )
+        self._truecolor = (self._console.color_system == "truecolor")
         self._verbose = verbose
         self._live: Live | None = None
         self._progress: Progress | None = None
@@ -1184,8 +1426,9 @@ class RichReporter:
             _DecodeBarColumn(
                 min_width=self._MAP_MIN_WIDTH,
                 max_width=self._MAP_MAX_WIDTH,
+                truecolor=self._truecolor,
             ),
-            _DecodeStatsColumn(),
+            _DecodeStatsColumn(truecolor=self._truecolor),
             console=self._console,
             transient=False,
             expand=True,
@@ -1237,7 +1480,8 @@ class RichReporter:
         if phase == "reading":
             desc = f"reading frames {scanned}/{total}"
         elif phase == "scanning":
-            desc = f"scanning {scanned}/{total}, detect {detect * 100:.0f}%"
+            det_markup = _detect_rate_markup(detect, self._truecolor)
+            desc = f"scanning {scanned}/{total}, detect {det_markup}"
         elif phase == "calibrating":
             desc = "calibrating"
         else:
@@ -1282,7 +1526,9 @@ class RichReporter:
             )
         elif observed is not None:
             obs_bits.append(f"observed [bold]{observed}[/bold] frames")
-        obs_bits.append(f"detect [bold]{detect * 100:.0f}%[/bold]")
+        obs_bits.append(
+            f"detect {_detect_rate_markup(detect, self._truecolor)}"
+        )
         self._console.print(
             f"[bold cyan]{_pad_status_label('Probe')}[/bold cyan] "
             f"[green]✓[/green]  " + "  ".join(obs_bits)
