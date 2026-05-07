@@ -1042,6 +1042,40 @@ if _RICH_AVAILABLE:
     # dispatch on.
 
 
+    def _render_hit_colored_bar(
+        text: "Text",
+        hit_history: list[tuple[float, float]],
+        cell_count: int,
+        char: str,
+        bar_pct: float = 100.0,
+    ) -> None:
+        """Append *cell_count* characters to *text*, each coloured by
+        the detect rate at the corresponding position in the bar.
+
+        *hit_history* is a list of ``(video_pct, hit_rate)`` samples.
+        Each bar cell is mapped to a video position and the nearest
+        history sample's hit_rate determines its colour.
+        """
+        if not hit_history or cell_count <= 0:
+            return
+        for i in range(cell_count):
+            # Map cell position to video percentage.
+            cell_pct = (i + 0.5) / cell_count * bar_pct
+            # Find the nearest history sample by video_pct.
+            # Binary-search-like: history is roughly sorted by pct.
+            best_hit = hit_history[-1][1]
+            best_dist = float("inf")
+            for h_pct, h_hit in hit_history:
+                dist = abs(h_pct - cell_pct)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_hit = h_hit
+                elif h_pct > cell_pct:
+                    break  # history is sorted, no need to look further
+            style = _detect_rate_style(best_hit, truecolor=True)
+            text.append(char, style=style)
+
+
     def _render_decode_bar(task, width: int, truecolor: bool = False) -> "Text":
         """Render the decode bar for a single row.
 
@@ -1082,22 +1116,40 @@ if _RICH_AVAILABLE:
             "bar_body_style", "cyan")
         done_style = (task.fields or {}).get(
             "bar_done_style", "bright_cyan")
+        hit_history = (task.fields or {}).get("hit_history")
         text = Text()
         if width <= 0:
             return text
         if pct >= 100.0:
-            text.append("━" * width, style=done_style)
+            if hit_history and truecolor:
+                _render_hit_colored_bar(text, hit_history, width, "━")
+            else:
+                text.append("━" * width, style=done_style)
             return text
         filled = pct / 100.0 * width
         full_cells = int(filled)
         frac = filled - full_cells
         if full_cells > 0:
-            text.append("━" * full_cells, style=body_style)
-        if full_cells < width:
-            if frac > 0.5:
-                text.append("╸", style=tip_style)
+            if hit_history and truecolor:
+                _render_hit_colored_bar(
+                    text, hit_history, full_cells, "━",
+                    bar_pct=pct)
             else:
-                text.append("╺", style=tip_style)
+                text.append("━" * full_cells, style=body_style)
+        if full_cells < width:
+            # Tip glyph — use current detect rate colour if available.
+            if hit_history and truecolor:
+                current_hit = hit_history[-1][1] if hit_history else 0.0
+                tip_s = _detect_rate_style(current_hit, truecolor=True)
+                if frac > 0.5:
+                    text.append("╸", style=tip_s)
+                else:
+                    text.append("╺", style=tip_s)
+            else:
+                if frac > 0.5:
+                    text.append("╸", style=tip_style)
+                else:
+                    text.append("╺", style=tip_style)
             remaining = width - full_cells - 1
             if remaining > 0:
                 text.append("━" * remaining, style="grey23")
@@ -1584,6 +1636,7 @@ class RichReporter:
         self._scan_total_frames = max(1, total_frames)
         self._scan_last_fps = 0.0
         self._scan_last_emit_ts = 0.0
+        self._hit_history: list[tuple[float, float]] = []  # (video_pct, hit_rate)
         self._live = Live(
             self._build_group(),
             console=self._console,
@@ -1599,6 +1652,8 @@ class RichReporter:
                 or self._task_id is None
                 or self._file_task_id is None):
             return
+        # Record detect-rate history for the coloured scan bar.
+        self._hit_history.append((video_pct, hit_window))
         total = self._progress.tasks[self._task_id].total or 1
         completed = max(0.0, min(total, video_pct / 100.0 * total))
         fps, eta = self._estimate_scan_fps_eta(video_pct)
@@ -1609,6 +1664,7 @@ class RichReporter:
                 hit=hit_window,
                 fps=fps,
                 eta=eta,
+                hit_history=self._hit_history,
             )
         except Exception:
             pass
@@ -1645,6 +1701,7 @@ class RichReporter:
         self._recover_segments = list(segments)
         self._recover_total_frames = max(1, total_frames)
         self._recover_scanned = []
+        self._hit_history = []  # reset for recover phase
         self._progress = self._build_decode_progress()
         self._task_id = self._progress.add_task(
             "recover",
@@ -1706,11 +1763,13 @@ class RichReporter:
                 or self._task_id is None
                 or self._file_task_id is None):
             return
+        self._hit_history.append((progress_pct, hit_window))
         try:
             self._progress.update(
                 self._task_id,
                 completed=max(0.0, min(1000.0, progress_pct * 10.0)),
                 hit=hit_window,
+                hit_history=self._hit_history,
             )
         except Exception:
             pass
