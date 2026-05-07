@@ -66,6 +66,12 @@ class _FakeOutput:
         return None
 
 
+class _FakeVideoFrame:
+    @staticmethod
+    def from_ndarray(frame, format):
+        return frame
+
+
 def _patch_fast_encode(monkeypatch):
     import qrstream.encoder as enc
 
@@ -80,9 +86,9 @@ def _patch_fast_encode(monkeypatch):
         lambda output_path, mode: _FakeOutput(output_path),
     )
     monkeypatch.setattr(
-        enc.av.VideoFrame,
-        "from_ndarray",
-        lambda frame, format: frame,
+        enc.av,
+        "VideoFrame",
+        _FakeVideoFrame,
     )
 
 
