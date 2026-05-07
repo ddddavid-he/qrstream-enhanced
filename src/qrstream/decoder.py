@@ -25,15 +25,17 @@ from concurrent.futures import (
 
 # Suppress objc duplicate-class warnings from cv2+av dual FFmpeg dylibs (harmless).
 import sys as _sys, os as _os
-_stderr = _sys.stderr
-_sys.stderr = open(_os.devnull, 'w')  # redirect before any FFmpeg-bearing import
+_stderr_fd = _os.dup(2)          # save real stderr fd
+_devnull = _os.open(_os.devnull, _os.O_WRONLY)
+_os.dup2(_devnull, 2)            # redirect fd 2 → /dev/null
+_os.close(_devnull)
 
 import cv2
 import numpy as np
 import av
 
-_sys.stderr.close()
-_sys.stderr = _stderr
+_os.dup2(_stderr_fd, 2)          # restore fd 2
+_os.close(_stderr_fd)
 
 # Suppress any remaining FFmpeg log noise.
 av.logging.set_level(av.logging.FATAL)

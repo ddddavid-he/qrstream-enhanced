@@ -70,7 +70,7 @@ _run_on() {
     "${prefix[@]}" run --rm "${IMG}" \
         uv run python -c '
 import av, cv2, zxingcpp, numpy as np
-print(f"av={av.__version__}  cv2={cv2.__version__}  zxing={zxingcpp.__version__}")
+print(f"av={av.__version__}  cv2={cv2.__version__}  zxing-cpp OK")
 print("smoke OK")
 '
 
