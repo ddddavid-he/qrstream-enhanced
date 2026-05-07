@@ -23,9 +23,12 @@ from concurrent.futures import (
     wait as _futures_wait,
 )
 
-import cv2
-import numpy as np
-import av
+from ._compat import suppress_native_stderr
+
+with suppress_native_stderr():
+    import cv2
+    import numpy as np
+    import av
 
 # Suppress verbose FFmpeg log output (info/warning level).
 av.logging.set_level(av.logging.FATAL)
@@ -1373,6 +1376,7 @@ def _probe_sample_rate(video_path: str, workers: int,
 
     # Consume frames and submit detection work.
     probe_count = 0
+    _probe_seeds: set[int] = set()
     with ThreadPoolExecutor(max_workers=workers) as executor:
         pending_futures = {}
         frames_submitted = 0

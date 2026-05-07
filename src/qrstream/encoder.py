@@ -12,9 +12,12 @@ from queue import Queue
 from threading import Thread
 from concurrent.futures import ThreadPoolExecutor
 
-import cv2
-import numpy as np
-import av
+from ._compat import suppress_native_stderr
+
+with suppress_native_stderr():
+    import cv2
+    import numpy as np
+    import av
 
 # Suppress verbose FFmpeg log output (info/warning level).
 av.logging.set_level(av.logging.FATAL)

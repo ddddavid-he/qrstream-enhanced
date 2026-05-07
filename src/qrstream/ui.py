@@ -634,9 +634,11 @@ class LogReporter:
                      detect: float, phase: str) -> None:
         if not self._should_emit("probe", scanned / total * 100 if total else 0):
             return
-        self._write_line(phase="probe", status=phase,
-                         scanned=scanned, total=total,
-                         detect=f"{detect * 100:.0f}%")
+        fields: dict = {"phase": "probe", "status": phase,
+                        "scanned": scanned, "total": total}
+        if phase == "scanning":
+            fields["detect"] = f"{detect * 100:.0f}%"
+        self._write_line(**fields)
 
     def probe_done(self, *, sample: int, detect: float, repeat: float,
                    crop_reduction: float | None,
@@ -1237,7 +1239,7 @@ class RichReporter:
         elif phase == "scanning":
             desc = f"scanning {scanned}/{total}, detect {detect * 100:.0f}%"
         elif phase == "calibrating":
-            desc = f"calibrating (detect {detect * 100:.0f}%)"
+            desc = "calibrating"
         else:
             desc = phase
         try:
