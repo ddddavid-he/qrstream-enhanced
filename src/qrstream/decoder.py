@@ -23,11 +23,19 @@ from concurrent.futures import (
     wait as _futures_wait,
 )
 
+# Suppress objc duplicate-class warnings from cv2+av dual FFmpeg dylibs (harmless).
+import sys as _sys, os as _os
+_stderr = _sys.stderr
+_sys.stderr = open(_os.devnull, 'w')  # redirect before any FFmpeg-bearing import
+
 import cv2
 import numpy as np
 import av
 
-# Suppress FFmpeg log noise from av+cv2 dual-dylib loading (harmless).
+_sys.stderr.close()
+_sys.stderr = _stderr
+
+# Suppress any remaining FFmpeg log noise.
 av.logging.set_level(av.logging.FATAL)
 
 from .lt_codec import PRNG, BlockGraph, DEFAULT_C, DEFAULT_DELTA
