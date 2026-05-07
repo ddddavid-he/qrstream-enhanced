@@ -69,6 +69,22 @@ ProbeObservation = namedtuple("ProbeObservation", [
 ])
 
 
+class _ReaderFailure(RuntimeError):
+    """Raised when a background frame reader fails."""
+
+
+def _open_video_container(video_path: str):
+    """Open a video via PyAV and normalise file-not-found behaviour."""
+    try:
+        return av.open(video_path)
+    except FileNotFoundError:
+        raise
+    except Exception as exc:
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"Cannot open video file: {video_path}") from exc
+        raise
+
+
 # ── Reader / progress constants ──────────────────────────────────
 # Maximum frames the reader thread may prefetch ahead of the worker
 # pool.  Kept small to avoid memory bloat when detection is idle.
@@ -917,28 +933,30 @@ def _get_video_info(video_path: str) -> tuple[int, float, int, int]:
       2. ``stream.duration * stream.time_base * fps`` — stream-level duration.
       3. ``container.duration / AV_TIME_BASE * fps`` — container-level duration.
     """
-    container = av.open(video_path)
-    stream = container.streams.video[0]
+    container = _open_video_container(video_path)
+    try:
+        stream = container.streams.video[0]
 
-    fps = float(stream.average_rate) if stream.average_rate else 0.0
-    width = stream.width or 0
-    height = stream.height or 0
+        fps = float(stream.average_rate) if stream.average_rate else 0.0
+        width = stream.width or 0
+        height = stream.height or 0
 
-    # Tier 1: direct stream metadata (nb_frames).
-    total_frames = stream.frames if stream.frames and stream.frames > 0 else 0
+        # Tier 1: direct stream metadata (nb_frames).
+        total_frames = stream.frames if stream.frames and stream.frames > 0 else 0
 
-    # Tier 2: derive from stream duration + time_base + fps.
-    if total_frames <= 0 and stream.duration and stream.time_base and fps > 0:
-        duration_sec = float(stream.duration * stream.time_base)
-        total_frames = int(duration_sec * fps)
+        # Tier 2: derive from stream duration + time_base + fps.
+        if total_frames <= 0 and stream.duration and stream.time_base and fps > 0:
+            duration_sec = float(stream.duration * stream.time_base)
+            total_frames = int(duration_sec * fps)
 
-    # Tier 3: derive from container-level duration (microseconds).
-    if total_frames <= 0 and container.duration and fps > 0:
-        duration_sec = container.duration / 1_000_000.0
-        total_frames = int(duration_sec * fps)
+        # Tier 3: derive from container-level duration (microseconds).
+        if total_frames <= 0 and container.duration and fps > 0:
+            duration_sec = container.duration / 1_000_000.0
+            total_frames = int(duration_sec * fps)
 
-    container.close()
-    return total_frames, fps, width, height
+        return total_frames, fps, width, height
+    finally:
+        container.close()
 
 
 def _read_frames(video_path, sample_rate, total_frames, start_frame=0,
@@ -953,7 +971,7 @@ def _read_frames(video_path, sample_rate, total_frames, start_frame=0,
     PyAV decodes directly to numpy via ``frame.to_ndarray()``, so
     frames are independent and thread-safe without extra copying.
     """
-    container = av.open(video_path)
+    container = _open_video_container(video_path)
     stream = container.streams.video[0]
     # Do not use stream.thread_type = "AUTO": FFmpeg frame-level threading
     # deadlocks with Python generators when the internal decoded-frame
@@ -993,7 +1011,7 @@ def _read_frame_ranges(video_path, frame_ranges,
 
     sorted_ranges = sorted(frame_ranges)
 
-    container = av.open(video_path)
+    container = _open_video_container(video_path)
     stream = container.streams.video[0]
     # Do not use stream.thread_type = "AUTO": frame-level threading
     # deadlocks with Python generators (see _read_frames comment).
@@ -1001,7 +1019,6 @@ def _read_frame_ranges(video_path, frame_ranges,
     try:
         fps = float(stream.average_rate) if stream.average_rate else 0.0
         if not fps or not stream.time_base:
-            container.close()
             return
 
         for range_start, range_end in sorted_ranges:
@@ -1357,19 +1374,26 @@ def _probe_sample_rate(video_path: str, workers: int,
 
     # Pipelined execution: reader thread feeds a bounded queue,
     # detector threads consume from it concurrently.
+    _QUEUE_SENTINEL = object()
     frame_queue: Queue = Queue(maxsize=_PROBE_PIPELINE_QUEUE)
     read_done = Event()
     probe_raw: list = []
     _probe_detected = 0
     _probe_lock = __import__('threading').Lock()
+    reader_error: list[BaseException] = []
 
     def _reader():
-        for fd in _read_frame_ranges(
-                video_path, probe_ranges,
-                max_detect_dim=effective_max_dim,
-                crop_box=crop_box):
-            frame_queue.put(fd)
-        read_done.set()
+        try:
+            for fd in _read_frame_ranges(
+                    video_path, probe_ranges,
+                    max_detect_dim=effective_max_dim,
+                    crop_box=crop_box):
+                frame_queue.put(fd)
+        except BaseException as exc:
+            reader_error.append(exc)
+        finally:
+            read_done.set()
+            frame_queue.put(_QUEUE_SENTINEL)
 
     reader_thread = Thread(target=_reader, daemon=True)
     reader_thread.start()
@@ -1389,6 +1413,8 @@ def _probe_sample_rate(video_path: str, workers: int,
                     if read_done.is_set() and frame_queue.empty():
                         break
                     continue
+                if fd is _QUEUE_SENTINEL:
+                    break
                 fut = executor.submit(_worker_probe_detect, fd)
                 pending_futures[fut] = fd[0]
                 frames_submitted += 1
@@ -1421,6 +1447,8 @@ def _probe_sample_rate(video_path: str, workers: int,
                 break
 
     reader_thread.join()
+    if reader_error:
+        raise _ReaderFailure("probe frame reader failed") from reader_error[0]
     probe_count = len(probe_raw)
     leading_frames_probed = 0
 
@@ -2128,6 +2156,7 @@ def _prefetch_iter(source_iter, capacity: int = _READER_QUEUE_CAPACITY):
     _SENTINEL = object()
     q: Queue = Queue(maxsize=capacity)
     stop_event = Event()
+    producer_error: list[BaseException] = []
 
     def _producer():
         try:
@@ -2135,6 +2164,8 @@ def _prefetch_iter(source_iter, capacity: int = _READER_QUEUE_CAPACITY):
                 if stop_event.is_set():
                     return
                 q.put(item)
+        except BaseException as exc:
+            producer_error.append(exc)
         finally:
             q.put(_SENTINEL)
 
@@ -2144,6 +2175,8 @@ def _prefetch_iter(source_iter, capacity: int = _READER_QUEUE_CAPACITY):
         while True:
             item = q.get()
             if item is _SENTINEL:
+                if producer_error:
+                    raise _ReaderFailure("prefetch reader failed") from producer_error[0]
                 return
             yield item
     finally:

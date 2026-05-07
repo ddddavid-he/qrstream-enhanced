@@ -36,6 +36,10 @@ from .ui import ProgressReporter, QuietReporter
 _MMAP_THRESHOLD = 10 * 1024 * 1024
 
 
+class _WriterFailure(RuntimeError):
+    """Raised when the background video writer fails."""
+
+
 class MmapDataSource:
     """Random-access file-backed data source backed by mmap."""
 
@@ -245,6 +249,8 @@ def encode_to_video(input_path: str, output_path: str,
     output = None
     writer_thread = None
     writer_queue: Queue | None = None
+    writer_error: list[BaseException] = []
+    final_output_path = output_path
 
     try:
         payload, compress, used_mmap, raw_size = _load_payload(
@@ -352,6 +358,7 @@ def encode_to_video(input_path: str, output_path: str,
         if not output_path.endswith(default_ext):
             base, _ = os.path.splitext(output_path)
             output_path = base + default_ext
+        final_output_path = output_path
 
         output = av.open(output_path, "w")
         out_stream = output.add_stream(pyav_codec, rate=fps)
@@ -368,16 +375,19 @@ def encode_to_video(input_path: str, output_path: str,
         writer_queue: Queue = Queue(maxsize=max(workers * 8, 128))
 
         def _writer_loop():
-            while True:
-                frame = writer_queue.get()
-                if frame is None:
-                    return
-                if frame.shape[:2] != (h, w):
-                    frame = cv2.resize(frame, (w, h),
-                                       interpolation=cv2.INTER_NEAREST)
-                frame_av = av.VideoFrame.from_ndarray(frame, format="bgr24")
-                for packet in out_stream.encode(frame_av):
-                    output.mux(packet)
+            try:
+                while True:
+                    frame = writer_queue.get()
+                    if frame is None:
+                        return
+                    if frame.shape[:2] != (h, w):
+                        frame = cv2.resize(frame, (w, h),
+                                           interpolation=cv2.INTER_NEAREST)
+                    frame_av = av.VideoFrame.from_ndarray(frame, format="bgr24")
+                    for packet in out_stream.encode(frame_av):
+                        output.mux(packet)
+            except BaseException as exc:
+                writer_error.append(exc)
 
         writer_thread = Thread(target=_writer_loop, daemon=True)
         writer_thread.start()
@@ -386,6 +396,8 @@ def encode_to_video(input_path: str, output_path: str,
             blank_frame = np.full((h, w, 3), 255, dtype=first_qr.dtype)
             for _ in range(lead_in_frames):
                 writer_queue.put(blank_frame)
+            if writer_error:
+                raise _WriterFailure("video writer thread failed") from writer_error[0]
 
         batch_size = max(workers * 4, 64)
 
@@ -448,6 +460,8 @@ def encode_to_video(input_path: str, output_path: str,
                     ))
                     for qr_img in qr_imgs:
                         writer_queue.put(qr_img)
+                        if writer_error:
+                            raise _WriterFailure("video writer thread failed") from writer_error[0]
                     produced += len(batch)
                     _report_progress(time.monotonic())
 
@@ -466,6 +480,8 @@ def encode_to_video(input_path: str, output_path: str,
                     auto_mask=auto_mask,
                 )
                 writer_queue.put(qr_img)
+                if writer_error:
+                    raise _WriterFailure("video writer thread failed") from writer_error[0]
                 produced += 1
                 _report_progress(time.monotonic())
 
@@ -481,6 +497,8 @@ def encode_to_video(input_path: str, output_path: str,
         writer_queue.put(None)
         writer_thread.join()
         writer_thread = None
+        if writer_error:
+            raise _WriterFailure("video writer thread failed") from writer_error[0]
 
         # Flush encoder: drain remaining frames and close the file.
         for packet in out_stream.encode():
@@ -505,10 +523,10 @@ def encode_to_video(input_path: str, output_path: str,
             if callable(close):
                 close()
 
-    output_size = os.path.getsize(output_path)
-    reporter.encode_done(output_path=output_path, size_bytes=output_size)
+    output_size = os.path.getsize(final_output_path)
+    reporter.encode_done(output_path=final_output_path, size_bytes=output_size)
     if verbose:
         reporter.debug(
-            f"Output: {output_path} ({output_size} bytes, "
+            f"Output: {final_output_path} ({output_size} bytes, "
             f"{total_frames} frames)"
         )
