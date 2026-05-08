@@ -11,8 +11,8 @@
 This note records the decode-side performance experiments run after the
 `zxing-cpp` migration landed on `dev`.
 
-The goal was not to re-benchmark detector quality; that already exists in
-[`dev/DISCOVERY-zxing-backend.md`](./DISCOVERY-zxing-backend.md). The goal
+The goal was not to re-benchmark detector quality; that work had already been
+completed on the feature branch that introduced `zxing-cpp`. The goal
 here is to identify which decode-pipeline optimizations are still worth
 implementing now that:
 

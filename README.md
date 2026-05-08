@@ -107,8 +107,8 @@ qrstream encode <file> -o output.mp4 [options]
 | `--force-compress` | - | Force compression for large V3 inputs (higher memory usage) |
 | `--qr-mode` | `alphanumeric` | QR payload encoding: `alphanumeric` (base45, default, denser) or `base64` (byte mode, fallback) |
 | `--legacy-qr` | - | Accepted but ignored (kept for CLI backward compatibility) |
-| `--codec` | `h264` | Video codec: `h264` (default, good compression), `mp4v`, or `mjpeg` (faster encode, larger files) |
-| `-w, --workers` | `min(CPU count, 4)` | Parallel worker threads for QR generation. The auto-picked default is capped at 4 because, although QR matrix generation (`zxingcpp.create_barcode()`) is native C++ (GIL-free), the full pipeline is typically video-writer-bound. Pass a larger value explicitly to override the cap on CPU-rich machines if profiling shows benefit. |
+| `--codec` | `h264` | Video codec: `h264` (default, good compression), `mp4v`, or `mjpeg` (faster encode, larger files). qrstream writes the matching container explicitly and keeps your filename suffix unchanged; if the suffix looks inconsistent, it emits a warning. |
+| `-w, --workers` | `1` | Parallel worker threads for QR generation. The default stays at 1 because the full encode pipeline is typically video-writer-bound even though QR matrix generation (`zxingcpp.create_barcode()`) is native C++ (GIL-free). Pass a larger value explicitly only if profiling on your machine shows a win. |
 | `--output-mode` | `auto` | Progress/status rendering: `auto` (Rich interactive on TTY, `log` otherwise), `log` (append-only `key=value` lines for CI), `quiet` (errors and final path only), `verbose` (full diagnostic output) |
 | `-v, --verbose` | - | Alias for `--output-mode verbose` (kept for backward compatibility) |
 
