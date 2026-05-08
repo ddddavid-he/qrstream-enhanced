@@ -157,3 +157,58 @@ def test_probe_results_include_phase1_unique_blocks(monkeypatch):
         (100, b"p3", 201),
         (101, None, None),
     ]
+
+
+def test_scan_progress_tracker_accounts_for_skips_and_hits():
+    class _Reporter:
+        def __init__(self):
+            self.calls = []
+
+        def scan_update(self, **kwargs):
+            self.calls.append(kwargs)
+
+    reporter = _Reporter()
+    decoder = dec.LTDecoder()
+    tracker = dec._ScanProgressTracker(
+        total_frames=100,
+        leading_frames_probed=10,
+        lt_decoder=decoder,
+        reporter=reporter,
+    )
+
+    tracker.mark_skipped_until(14)
+    tracker.on_frame(14, True)
+
+    assert reporter.calls
+    update = reporter.calls[-1]
+    assert update["video_pct"] == 15.0
+    assert update["hit_window"] == 1.0
+    assert update["file_pct"] == 0.0
+    assert update["k"] is None
+
+
+def test_tracked_read_frames_marks_skipped_positions(monkeypatch):
+    seen = []
+
+    def _fake_read_frames(*_args, **_kwargs):
+        yield (5, "a")
+        yield (8, "b")
+
+    class _Tracker:
+        def mark_skipped_until(self, frame_idx):
+            seen.append(frame_idx)
+
+    monkeypatch.setattr(dec, "_read_frames", _fake_read_frames)
+
+    frames = list(dec._tracked_read_frames(
+        "dummy.mp4",
+        2,
+        100,
+        start_frame=0,
+        max_detect_dim=720,
+        crop_box=None,
+        scan_tracker=_Tracker(),
+    ))
+
+    assert frames == [(5, "a"), (8, "b")]
+    assert seen == [5, 8]

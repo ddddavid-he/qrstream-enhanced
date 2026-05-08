@@ -1627,6 +1627,78 @@ def _adaptive_max_dim_from_probe(
     return int(mid)
 
 
+class _ScanProgressTracker:
+    """Track main-scan progress and throttle reporter churn."""
+
+    _EMIT_INTERVAL = 0.1
+
+    def __init__(self, *, total_frames: int,
+                 leading_frames_probed: int,
+                 lt_decoder: LTDecoder,
+                 reporter: ProgressReporter):
+        self.total_frames = total_frames
+        self.processed_frames = leading_frames_probed
+        self.lt_decoder = lt_decoder
+        self.reporter = reporter
+        self.hit_window = SlidingHitWindow(capacity=128)
+        self.last_emit_ts = 0.0
+
+    def mark_skipped_until(self, frame_idx: int) -> None:
+        if frame_idx > self.processed_frames:
+            self.processed_frames = frame_idx
+
+    def _payload(self, *, video_pct: float | None = None) -> dict[str, object]:
+        if video_pct is None:
+            video_pct = (
+                self.processed_frames / self.total_frames * 100
+                if self.total_frames > 0 else 100.0
+            )
+        recovered = (
+            self.lt_decoder.block_graph.eliminated
+            if self.lt_decoder.initialized else {}
+        )
+        k = self.lt_decoder.K if self.lt_decoder.initialized else None
+        return {
+            "video_pct": video_pct,
+            "hit_window": self.hit_window.ratio,
+            "file_pct": self.lt_decoder.progress * 100,
+            "recovered": recovered,
+            "k": k,
+        }
+
+    def on_frame(self, frame_idx: int, hit: bool) -> None:
+        if frame_idx + 1 > self.processed_frames:
+            self.processed_frames = frame_idx + 1
+        self.hit_window.push(hit)
+        now = time.monotonic()
+        if now - self.last_emit_ts < self._EMIT_INTERVAL:
+            return
+        self.last_emit_ts = now
+        self.reporter.scan_update(**self._payload())
+
+    def emit_final(self) -> None:
+        try:
+            self.reporter.scan_update(**self._payload(video_pct=100.0))
+        except Exception:
+            pass
+
+
+def _tracked_read_frames(video_path: str, sample_rate: int,
+                         total_frames: int,
+                         *, start_frame: int,
+                         max_detect_dim: int,
+                         crop_box: tuple[int, int, int, int] | None,
+                         scan_tracker: _ScanProgressTracker):
+    """Wrap ``_read_frames`` while accounting for skipped frame positions."""
+    for frame_data in _read_frames(
+            video_path, sample_rate, total_frames,
+            start_frame=start_frame,
+            max_detect_dim=max_detect_dim,
+            crop_box=crop_box):
+        scan_tracker.mark_skipped_until(frame_data[0])
+        yield frame_data
+
+
 def extract_qr_from_video(video_path: str, sample_rate: int = 0,
                            verbose: bool = False, workers: int | None = None,
                            *,
@@ -1759,86 +1831,43 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
 
     # ── Main scan (remaining frames) ─────────────────────────
     reporter.scan_start(total_frames=total_frames)
-    hit_window = SlidingHitWindow(capacity=128)
-    # Track how much "video progress" has accrued from skipped +
-    # processed frames.  The reporter receives percentage updates.
-    scan_state = {
-        "processed_frames": leading_frames_probed,
-        "last_emit_ts": 0.0,
-    }
-    _EMIT_INTERVAL = 0.1  # seconds — rate-limit Rich Live churn
-
-    def _scan_update(fidx: int, hit: bool) -> None:
-        # Account for this processed frame + any frames skipped
-        # since the last reported position.  ``fidx`` is monotonic
-        # in practice (main scan reads frames in order).
-        prev = scan_state["processed_frames"]
-        if fidx + 1 > prev:
-            scan_state["processed_frames"] = fidx + 1
-        hit_window.push(hit)
-        now = time.monotonic()
-        if now - scan_state["last_emit_ts"] < _EMIT_INTERVAL:
-            return
-        scan_state["last_emit_ts"] = now
-        video_pct = (
-            scan_state["processed_frames"] / total_frames * 100
-            if total_frames > 0 else 100.0
-        )
-        file_pct = lt_decoder.progress * 100
-        recovered = (
-            lt_decoder.block_graph.eliminated
-            if lt_decoder.initialized else {}
-        )
-        k = lt_decoder.K if lt_decoder.initialized else None
-        reporter.scan_update(
-            video_pct=video_pct,
-            hit_window=hit_window.ratio,
-            file_pct=file_pct,
-            recovered=recovered,
-            k=k,
-        )
-
+    scan_tracker = _ScanProgressTracker(
+        total_frames=total_frames,
+        leading_frames_probed=leading_frames_probed,
+        lt_decoder=lt_decoder,
+        reporter=reporter,
+    )
     early_done = False
-
-    def _tracking_frame_iter():
-        last_reported = leading_frames_probed - 1
-        for frame_data in _read_frames(
-                video_path, sample_rate, total_frames,
-                start_frame=leading_frames_probed,
-                max_detect_dim=active_max_dim,
-                crop_box=crop_box):
-            skipped = frame_data[0] - last_reported - 1
-            if skipped > 0 and frame_data[0] > scan_state["processed_frames"]:
-                scan_state["processed_frames"] = frame_data[0]
-            last_reported = frame_data[0]
-            yield frame_data
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         decoded_count, no_detect_count, early_done, detect_count = _stream_scan(
-            executor, _tracking_frame_iter(),
-            seen_seeds, unique_blocks,
-            decoded_count, no_detect_count, lt_decoder,
-            _scan_update, verbose, seed_frame_map, workers,
-            reporter=reporter)
+            executor,
+            _tracked_read_frames(
+                video_path,
+                sample_rate,
+                total_frames,
+                start_frame=leading_frames_probed,
+                max_detect_dim=active_max_dim,
+                crop_box=crop_box,
+                scan_tracker=scan_tracker,
+            ),
+            seen_seeds,
+            unique_blocks,
+            decoded_count,
+            no_detect_count,
+            lt_decoder,
+            scan_tracker.on_frame,
+            verbose,
+            seed_frame_map,
+            workers,
+            reporter=reporter,
+        )
         if early_done and verbose:
             reporter.debug(
                 "Early termination: all source blocks recovered!"
             )
 
-    # Final full-bar tick before closing scan.
-    try:
-        reporter.scan_update(
-            video_pct=100.0,
-            hit_window=hit_window.ratio,
-            file_pct=lt_decoder.progress * 100,
-            recovered=(
-                lt_decoder.block_graph.eliminated
-                if lt_decoder.initialized else {}
-            ),
-            k=lt_decoder.K if lt_decoder.initialized else None,
-        )
-    except Exception:
-        pass
+    scan_tracker.emit_final()
     reporter.scan_done()
 
     total_sampled = detect_count + no_detect_count
