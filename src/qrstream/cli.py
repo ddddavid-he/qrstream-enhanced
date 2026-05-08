@@ -249,6 +249,27 @@ def _check_output_path_writable(output: str) -> str | None:
     return None
 
 
+def _build_reporter(args) -> tuple[OutputMode, object]:
+    """Resolve CLI output mode and build the matching reporter."""
+    mode = _resolve_mode(args)
+    try:
+        reporter = resolve_output_mode(
+            mode,
+            explicit=(getattr(args, 'output_mode', 'auto') != 'auto'),
+        )
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
+    return mode, reporter
+
+
+def _close_reporter(reporter) -> None:
+    try:
+        reporter.close()
+    except Exception:
+        pass
+
+
 def cmd_encode(args):
     """Handle the 'encode' subcommand."""
     from .encoder import encode_to_video
@@ -292,15 +313,7 @@ def cmd_encode(args):
 
     alphanumeric_qr = (args.qr_mode == 'alphanumeric')
 
-    mode = _resolve_mode(args)
-    try:
-        reporter = resolve_output_mode(
-            mode,
-            explicit=(getattr(args, 'output_mode', 'auto') != 'auto'),
-        )
-    except RuntimeError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(2)
+    mode, reporter = _build_reporter(args)
     verbose = mode is OutputMode.VERBOSE
 
     try:
@@ -332,10 +345,7 @@ def cmd_encode(args):
             pass
         raise
     finally:
-        try:
-            reporter.close()
-        except Exception:
-            pass
+        _close_reporter(reporter)
 
 
 def cmd_decode(args):
@@ -354,15 +364,7 @@ def cmd_decode(args):
         print(f"Error: {err}", file=sys.stderr)
         sys.exit(1)
 
-    mode = _resolve_mode(args)
-    try:
-        reporter = resolve_output_mode(
-            mode,
-            explicit=(getattr(args, 'output_mode', 'auto') != 'auto'),
-        )
-    except RuntimeError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(2)
+    mode, reporter = _build_reporter(args)
     verbose = mode is OutputMode.VERBOSE
 
     output_path = args.output
@@ -391,10 +393,7 @@ def cmd_decode(args):
             pass
         raise
     finally:
-        try:
-            reporter.close()
-        except Exception:
-            pass
+        _close_reporter(reporter)
 
 
 def _add_output_mode_group(sub: argparse.ArgumentParser) -> None:
