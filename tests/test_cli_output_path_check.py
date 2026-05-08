@@ -19,6 +19,7 @@ import pytest
 
 from qrstream.cli import (
     _check_output_path_writable,
+    _close_reporter,
     build_parser,
     cmd_decode,
     cmd_encode,
@@ -250,3 +251,11 @@ class TestCmdDecodeGate:
             assert not called
         finally:
             out.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+
+def test_close_reporter_swallows_reporter_close_errors():
+    class _BrokenReporter:
+        def close(self):
+            raise RuntimeError("boom")
+
+    _close_reporter(_BrokenReporter())
