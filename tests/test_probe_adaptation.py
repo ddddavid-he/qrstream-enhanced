@@ -1,8 +1,10 @@
 """
-Unit tests for the probe-time adaptive crop ROI (continuous margin).
+Unit tests for probe-time adaptation helpers.
 
 Pure/synthetic: no video I/O and no real QR detector.
 """
+
+import threading
 
 from qrstream import decoder as dec
 from qrstream.decoder import ProbeObservation
@@ -85,3 +87,73 @@ def test_derive_crop_box_disables_crop_for_unstable_qr():
     observations = [_obs(i, 300 + i * 40, 500) for i in range(10)]
 
     assert dec._derive_crop_box(observations, 1000, 1000) is None
+
+
+def test_probe_results_include_phase1_unique_blocks(monkeypatch):
+    phase1 = [
+        ProbeObservation(10, b"p1", 101, 100, True, 200.0, 1000, 1000, 500.0, 500.0),
+    ]
+    phase3 = [
+        ProbeObservation(100, b"p3", 201, 100, True, 200.0, 1000, 1000, 500.0, 500.0),
+        ProbeObservation(101, None, None, 100, True, 0.0, 1000, 1000, 0.0, 0.0),
+    ]
+
+    monkeypatch.setattr(dec, "_get_video_info", lambda _path: (500, 30.0, 1000, 1000))
+    monkeypatch.setattr(dec, "_build_phase_burst_ranges", lambda *a, **k: [(0, 0)])
+    monkeypatch.setattr(dec, "_build_probe_ranges", lambda *a, **k: [(100, 101)])
+
+    def _fake_read_frame_ranges(_video_path, ranges, **_kwargs):
+        if ranges == [(0, 0)]:
+            yield (10, object())
+        else:
+            yield (100, object())
+            yield (101, object())
+
+    monkeypatch.setattr(dec, "_read_frame_ranges", _fake_read_frame_ranges)
+    monkeypatch.setattr(
+        dec,
+        "_worker_probe_detect",
+        lambda fd: phase1[0] if fd[0] == 10 else phase3[fd[0] - 100],
+    )
+    monkeypatch.setattr(dec, "_derive_crop_box", lambda *a, **k: None)
+    monkeypatch.setattr(dec, "_extract_probe_video_constants", lambda *_a, **_k: None)
+    monkeypatch.setattr(dec, "_adaptive_max_dim_from_probe", lambda *_a, **_k: None)
+    monkeypatch.setattr(dec, "_analyze_probe_window", lambda *a, **k: {
+        'frame_count': 2,
+        'detect_rate': 0.5,
+        'avg_repeat': 1.0,
+        'distinct_seed_count': 1,
+        'sample_rate': 1,
+    })
+
+    real_thread = threading.Thread
+
+    class _InlineThread:
+        def __init__(self, target=None, daemon=None):
+            self._target = target
+            self.daemon = daemon
+
+        def start(self):
+            if self._target is not None:
+                self._target()
+
+        def join(self, timeout=None):
+            return None
+
+    monkeypatch.setattr(dec, "Thread", _InlineThread)
+
+    try:
+        sample_rate, probe_results, probe_count, leading, *_rest = dec._probe_sample_rate(
+            "dummy.mp4", workers=1, verbose=False,
+        )
+    finally:
+        monkeypatch.setattr(dec, "Thread", real_thread)
+
+    assert sample_rate == 1
+    assert probe_count == 2
+    assert leading == 0
+    assert probe_results == [
+        (10, b"p1", 101),
+        (100, b"p3", 201),
+        (101, None, None),
+    ]

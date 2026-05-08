@@ -196,6 +196,38 @@ _PYAV_CODEC_MAP = {
     'mjpeg': ('mjpeg', 'yuvj420p', '.avi', {"q:v": "2"}),
 }
 
+_PYAV_CONTAINER_FORMAT = {
+    'h264': 'mp4',
+    'mp4v': 'mp4',
+    'mjpeg': 'avi',
+}
+
+
+def _warn_if_output_extension_mismatches_codec(
+    output_path: str,
+    codec: str,
+    reporter: ProgressReporter,
+) -> None:
+    """Warn when the requested filename extension disagrees with the container."""
+    codec_info = _PYAV_CODEC_MAP.get(codec)
+    if codec_info is None:
+        raise ValueError(
+            f"Unsupported codec: {codec!r}. "
+            f"Choose from: {list(_PYAV_CODEC_MAP)}"
+        )
+
+    _, _, expected_ext, _ = codec_info
+    actual_ext = os.path.splitext(output_path)[1].lower()
+    if not actual_ext or actual_ext == expected_ext:
+        return
+
+    reporter.warn(
+        f"Output filename extension {actual_ext!r} does not match codec "
+        f"{codec!r} (expected {expected_ext!r}). The file will be written "
+        f"using the {codec!r} container/codec settings while keeping the "
+        f"user-provided path unchanged."
+    )
+
 
 def _resolve_border_modules(qr_version: int, border: float | None) -> float:
     """Resolve CLI/API border input to QR quiet-zone width in modules."""
@@ -354,15 +386,20 @@ def encode_to_video(input_path: str, output_path: str,
                 f"Unsupported codec: {codec!r}. "
                 f"Choose from: {list(_PYAV_CODEC_MAP)}"
             )
-        pyav_codec, pix_fmt, default_ext, stream_opts = codec_info
+        pyav_codec, pix_fmt, _default_ext, stream_opts = codec_info
+        container_format = _PYAV_CONTAINER_FORMAT[codec]
 
-        # Auto-correct file extension when codec requires a different container.
-        if not output_path.endswith(default_ext):
-            base, _ = os.path.splitext(output_path)
-            output_path = base + default_ext
         final_output_path = output_path
+        if os.path.abspath(input_path) == os.path.abspath(final_output_path):
+            raise ValueError(
+                f"Output path is the same as the input file: {final_output_path}. "
+                "Choose a different output path."
+            )
 
-        output = av.open(output_path, "w")
+        _warn_if_output_extension_mismatches_codec(
+            final_output_path, codec, reporter)
+
+        output = av.open(output_path, "w", format=container_format)
         out_stream = output.add_stream(pyav_codec, rate=fps)
         out_stream.width = w
         out_stream.height = h

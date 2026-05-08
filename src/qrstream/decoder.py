@@ -1450,6 +1450,8 @@ def _probe_sample_rate(video_path: str, workers: int,
     if reader_error:
         raise _ReaderFailure("probe frame reader failed") from reader_error[0]
     probe_count = len(probe_raw)
+    # The probe touches disjoint windows across the timeline; the main
+    # scan cannot skip a contiguous prefix based on that sparse sample.
     leading_frames_probed = 0
 
     if not probe_raw:
@@ -1458,9 +1460,11 @@ def _probe_sample_rate(video_path: str, workers: int,
     # Sort by frame index.
     probe_raw.sort(key=lambda x: x.frame_idx)
 
-    # Build probe_results merging Phase 1/2/3 decoded blocks.
-    # Phase 3 is authoritative for sample_rate; Phase 1/2 blocks
-    # supplement the LT decoder with early data.
+    # Build probe_results from all probe phases.
+    # Phase 3 remains authoritative for sample_rate because it uses the
+    # final crop/downscale settings, but Phase 1 contributes sparse early
+    # blocks so the main decode can start with every unique seed already
+    # seen during probing.
     phase3_results = [
         (t.frame_idx, t.block_bytes, t.seed) for t in probe_raw
     ]

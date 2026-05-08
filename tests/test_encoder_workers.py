@@ -83,7 +83,7 @@ def _patch_fast_encode(monkeypatch):
     monkeypatch.setattr(
         enc.av,
         "open",
-        lambda output_path, mode: _FakeOutput(output_path),
+        lambda output_path, mode, format=None: _FakeOutput(output_path),
     )
     monkeypatch.setattr(
         enc.av,
@@ -133,12 +133,11 @@ def test_encode_warns_when_manual_workers_exceeds_one(monkeypatch, tmp_path):
     assert out.exists() and out.stat().st_size > 0
 
 
-def test_encode_reports_rewritten_output_path(monkeypatch, tmp_path):
+def test_encode_keeps_user_provided_output_path(monkeypatch, tmp_path):
     _patch_fast_encode(monkeypatch)
     reporter = _CaptureReporter()
     src = tmp_path / "input.bin"
     requested = tmp_path / "out.mov"
-    expected = tmp_path / "out.mp4"
     src.write_bytes(b"hello encoder workers")
 
     encode_to_video(
@@ -148,9 +147,60 @@ def test_encode_reports_rewritten_output_path(monkeypatch, tmp_path):
         reporter=reporter,
     )
 
-    assert expected.exists() and expected.stat().st_size > 0
+    assert requested.exists() and requested.stat().st_size > 0
     assert reporter.done
-    assert reporter.done[-1]["output_path"] == str(expected)
+    assert reporter.done[-1]["output_path"] == str(requested)
+    assert reporter.warnings
+    assert "does not match codec" in reporter.warnings[-1]
+
+
+def test_encode_passes_explicit_container_format_to_av_open(monkeypatch, tmp_path):
+    import qrstream.encoder as enc
+
+    _patch_fast_encode(monkeypatch)
+    reporter = _CaptureReporter()
+    src = tmp_path / "input.bin"
+    out = tmp_path / "out.weird"
+    src.write_bytes(b"hello encoder workers")
+
+    called = {}
+
+    def _fake_open(output_path, mode, format=None):
+        called["output_path"] = output_path
+        called["mode"] = mode
+        called["format"] = format
+        return _FakeOutput(output_path)
+
+    monkeypatch.setattr(enc.av, "open", _fake_open)
+
+    encode_to_video(
+        str(src),
+        str(out),
+        codec="mjpeg",
+        reporter=reporter,
+    )
+
+    assert called == {
+        "output_path": str(out),
+        "mode": "w",
+        "format": "avi",
+    }
+    assert reporter.warnings
+    assert ".avi" in reporter.warnings[-1]
+
+
+def test_encode_rejects_output_that_resolves_to_input(monkeypatch, tmp_path):
+    _patch_fast_encode(monkeypatch)
+    src = tmp_path / "clip.mp4"
+    src.write_bytes(b"hello encoder workers")
+
+    with pytest.raises(ValueError, match="same as the input file"):
+        encode_to_video(
+            str(src),
+            str(src),
+            codec="h264",
+            reporter=_CaptureReporter(),
+        )
 
 
 def test_encode_surfaces_writer_thread_failures(monkeypatch, tmp_path):
@@ -165,7 +215,8 @@ def test_encode_surfaces_writer_thread_failures(monkeypatch, tmp_path):
         raise RuntimeError("mux failed")
 
     fake_output = _FakeOutput(str(out))
-    monkeypatch.setattr(enc.av, "open", lambda output_path, mode: fake_output)
+    monkeypatch.setattr(
+        enc.av, "open", lambda output_path, mode, format=None: fake_output)
     fake_output.mux = _boom
 
     with pytest.raises(RuntimeError, match="video writer thread failed"):

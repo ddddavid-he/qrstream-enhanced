@@ -158,6 +158,32 @@ class TestCmdEncodeGate:
         assert called, "encoder was not invoked on the happy path"
         assert called["kw"]["output_path"] == str(out)
 
+    def test_encode_still_rejects_exact_same_input_output_path(
+            self, tmp_path, capsys, monkeypatch):
+        src = tmp_path / "clip.mp4"
+        src.write_bytes(b"hello")
+
+        called: dict = {}
+        import qrstream.encoder as enc_mod
+        monkeypatch.setattr(
+            enc_mod, "encode_to_video",
+            lambda **kw: called.setdefault("hit", True),
+        )
+
+        parser = build_parser()
+        args = parser.parse_args([
+            "encode", str(src), "-o", str(src), "--codec", "h264",
+            "--overhead", "2.0",
+        ])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_encode(args)
+        assert exc_info.value.code == 1
+
+        captured = capsys.readouterr()
+        assert "same as the input file" in captured.out
+        assert not called
+
 
 class TestCmdDecodeGate:
     def test_decode_fails_fast_on_missing_parent(
