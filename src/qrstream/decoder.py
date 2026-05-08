@@ -1644,7 +1644,7 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
         sample_rate: Process every Nth frame. 0 = auto-detect (default).
         verbose: Emit verbose diagnostic details (routed through
             ``reporter.debug``).
-        workers: Number of parallel worker processes.
+        workers: Number of parallel worker threads.
         reporter: Optional :class:`qrstream.ui.ProgressReporter`.  When
             ``None`` a :class:`QuietReporter` is used (no progress
             output) so the function stays side-effect-free for
@@ -1666,7 +1666,7 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
         reporter.debug(
             f"Video: {total_frames} frames, {src_fps:.1f} FPS, {duration:.1f}s"
         )
-        reporter.debug(f"Using {workers} worker processes")
+        reporter.debug(f"Using {workers} worker threads")
 
     seen_seeds = set()
     unique_blocks = []
@@ -2189,8 +2189,8 @@ def _stream_scan(executor: Executor, frame_iter, seen_seeds, unique_blocks,
     invoked — the caller owns progress / hit-window rendering via a
     :class:`qrstream.ui.ProgressReporter`.
 
-    ``worker_fn`` defaults to :func:`_worker_detect_qr` (plain WeChat
-    detection on the already-downscaled frame).  Targeted recovery
+    ``worker_fn`` defaults to :func:`_worker_detect_qr` (plain QR
+    detection on the already-downscaled frame). Targeted recovery
     passes :func:`_worker_detect_qr_clahe` to rescue frames the main
     scan missed by the ε-margin introduced by cross-architecture
     ``cv2.resize(INTER_AREA)`` SIMD drift.
