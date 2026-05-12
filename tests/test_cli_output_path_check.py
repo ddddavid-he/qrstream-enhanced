@@ -185,6 +185,75 @@ class TestCmdEncodeGate:
         assert "same as the input file" in captured.out
         assert not called
 
+    def test_encode_display_only_skips_output_gate(
+            self, tmp_path, monkeypatch):
+        src = tmp_path / "src.bin"
+        src.write_bytes(b"hello")
+
+        called: dict = {}
+        import qrstream.encoder as enc_mod
+        monkeypatch.setattr(
+            enc_mod, "encode_to_display",
+            lambda **kw: called.setdefault("kw", kw),
+        )
+        monkeypatch.setattr(
+            enc_mod, "encode_to_video",
+            lambda **kw: called.setdefault("video", kw),
+        )
+
+        parser = build_parser()
+        args = parser.parse_args([
+            "encode", str(src), "--display", "--overhead", "2.0",
+        ])
+        cmd_encode(args)
+
+        assert "kw" in called
+        assert "video" not in called
+        assert called["kw"]["input_path"] == str(src)
+
+    def test_encode_rejects_display_with_output(
+            self, tmp_path, capsys, monkeypatch):
+        src = tmp_path / "src.bin"
+        src.write_bytes(b"hello")
+
+        called: dict = {}
+        import qrstream.encoder as enc_mod
+        monkeypatch.setattr(
+            enc_mod, "encode_to_display",
+            lambda **kw: called.setdefault("display", kw),
+        )
+        monkeypatch.setattr(
+            enc_mod, "encode_to_video",
+            lambda **kw: called.setdefault("video", kw),
+        )
+
+        parser = build_parser()
+        args = parser.parse_args([
+            "encode", str(src), "--display", "-o", str(tmp_path / "out.mp4"),
+        ])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_encode(args)
+        assert exc_info.value.code == 2
+
+        captured = capsys.readouterr()
+        assert "--display cannot be used together" in captured.err
+        assert not called
+
+    def test_encode_requires_output_or_display(self, tmp_path, capsys):
+        src = tmp_path / "src.bin"
+        src.write_bytes(b"hello")
+
+        parser = build_parser()
+        args = parser.parse_args(["encode", str(src)])
+
+        with pytest.raises(SystemExit) as exc_info:
+            cmd_encode(args)
+        assert exc_info.value.code == 2
+
+        captured = capsys.readouterr()
+        assert "specify -o/--output or --display" in captured.err
+
 
 class TestCmdDecodeGate:
     def test_decode_fails_fast_on_missing_parent(

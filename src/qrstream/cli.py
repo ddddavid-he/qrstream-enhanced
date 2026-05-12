@@ -3,8 +3,8 @@ Unified CLI for QRStream.
 
 Usage:
     qrstream -V | --version
-    qrstream encode <file> -o output.mp4 [--overhead 2.0] [--fps 10]
-                          [--output-mode MODE]
+    qrstream encode <file> (-o output.mp4 | --display) [--overhead 2.0]
+                          [--fps 10] [--output-mode MODE]
     qrstream decode <video> -o output_file [-s sample_rate]
                           [--output-mode MODE]
 
@@ -272,19 +272,34 @@ def _close_reporter(reporter) -> None:
 
 def cmd_encode(args):
     """Handle the 'encode' subcommand."""
-    from .encoder import encode_to_video
+    from .encoder import encode_to_display, encode_to_video
 
     if not os.path.exists(args.file):
         print(f"Error: File not found: {args.file}")
         sys.exit(1)
 
-    # Fail fast on unreachable output paths so the user doesn't
-    # wait through a minutes-long encode before learning the
-    # destination directory doesn't exist or isn't writable.
-    err = _check_output_path_writable(args.output)
-    if err is not None:
-        print(f"Error: {err}", file=sys.stderr)
-        sys.exit(1)
+    display = bool(getattr(args, 'display', False))
+    output = args.output
+    if display and output:
+        print(
+            "Error: --display cannot be used together with -o/--output yet.\n"
+            "TODO: future versions may support generating the final video "
+            "from display cache after encoding completes.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if not display and not output:
+        print("Error: specify -o/--output or --display.", file=sys.stderr)
+        sys.exit(2)
+
+    if output:
+        # Fail fast on unreachable output paths so the user doesn't
+        # wait through a minutes-long encode before learning the
+        # destination directory doesn't exist or isn't writable.
+        err = _check_output_path_writable(output)
+        if err is not None:
+            print(f"Error: {err}", file=sys.stderr)
+            sys.exit(1)
 
     if args.overhead < _MIN_OVERHEAD:
         print(
@@ -302,9 +317,7 @@ def cmd_encode(args):
             f"threshold."
         )
 
-    output = args.output
-
-    if os.path.abspath(args.file) == os.path.abspath(output):
+    if output and os.path.abspath(args.file) == os.path.abspath(output):
         print(
             f"Error: output path is the same as the input file '{args.file}'.\n"
             f"Specify a different path with -o."
@@ -317,9 +330,8 @@ def cmd_encode(args):
     verbose = mode is OutputMode.VERBOSE
 
     try:
-        encode_to_video(
+        common_kwargs = dict(
             input_path=args.file,
-            output_path=output,
             overhead=args.overhead,
             fps=args.fps,
             ec_level=args.ec_level,
@@ -330,16 +342,23 @@ def cmd_encode(args):
             verbose=verbose,
             workers=args.workers,
             use_legacy_qr=args.legacy_qr,
-            codec=args.codec,
             alphanumeric_qr=alphanumeric_qr,
             force_compress=args.force_compress,
             auto_mask=args.auto_mask,
             reporter=reporter,
         )
+        if display:
+            encode_to_display(**common_kwargs)
+        else:
+            encode_to_video(
+                output_path=output,
+                codec=args.codec,
+                **common_kwargs,
+            )
     except KeyboardInterrupt:
         # Remove partial/corrupt output file on interrupt.
         try:
-            if os.path.exists(output):
+            if output and os.path.exists(output):
                 os.unlink(output)
         except OSError:
             pass
@@ -428,8 +447,10 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
     enc = subparsers.add_parser(
         'encode', help='Encode a file into a QR code video')
     enc.add_argument('file', help='Path to the input file')
-    enc.add_argument('-o', '--output', required=True,
+    enc.add_argument('-o', '--output', required=False,
                      help='Output video path (e.g. output.mp4)')
+    enc.add_argument('--display', action='store_true',
+                     help='Display encoded QR frames without writing a video file')
     enc.add_argument('--overhead', type=float, default=2.0,
                      help=f'Ratio of encoded blocks to source blocks '
                           f'(default: 2.0, minimum: {_MIN_OVERHEAD}, '

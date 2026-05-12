@@ -277,6 +277,18 @@ qrs encode input.bin --display -o out.mp4
 
 这样可以保持 display 体验，同时避免边写边读视频文件带来的不稳定性。
 
+## 后续 TODO
+
+1. 优化 display UI/UX：
+   - 状态信息继续避免遮挡 QR 区域。
+   - 优化播放控制提示、进度条、当前帧/总帧展示。
+   - 评估更适合录屏场景的默认窗口尺寸、缩放策略和快捷键布局。
+2. 实现 `--display + -o/--output` 兼容：
+   - display 阶段继续使用 module cache。
+   - 编码/缓存完成后，从缓存统一生成最终视频文件。
+   - 不读取正在写入的 MP4。
+3. 对 `64 MiB` presentation cache、`128 MiB / 192 MiB` module cache 阈值做实际 benchmark，再决定默认值。
+
 ## 测试计划
 
 按用户规则，构建和测试使用 `podman` 执行。
