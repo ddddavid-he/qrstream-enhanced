@@ -29,7 +29,13 @@ from .protocol import (
     pack_v3,
 )
 from .display_cache import ModuleFrameCache, pack_module_image, plan_module_cache
-from .display_player import DisplayProducerState, play_display_cache
+from .display_player import DisplayProducerState
+from .display_player_qt import (
+    DisplayMetadata,
+    DisplayPlayerQtConfig,
+    play_display_qt,
+    require_pyside6,
+)
 from .qr_utils import generate_qr_image, generate_qr_module_image
 from .ui import ProgressReporter, QuietReporter
 
@@ -589,7 +595,8 @@ def encode_to_display(input_path: str,
                       force_compress: bool = False,
                       auto_mask: bool = False,
                       reporter: ProgressReporter | None = None,
-                      player=play_display_cache) -> ModuleFrameCache:
+                      player=None,
+                      _player=None) -> ModuleFrameCache:
     """Encode a file into a display-only module-frame cache and play it.
 
     No final video file is written. QR frames are rendered at one pixel per
@@ -598,6 +605,11 @@ def encode_to_display(input_path: str,
     """
     if reporter is None:
         reporter = QuietReporter()
+
+    if _player is None:
+        _player = player
+    if _player is None:
+        require_pyside6()
 
     high_density = _resolve_alphanumeric_flag(binary_qr, alphanumeric_qr)
     payload = None
@@ -784,13 +796,37 @@ def encode_to_display(input_path: str,
         producer_thread = Thread(target=_produce, daemon=True)
         producer_thread.start()
         try:
-            player(cache, state, fps)
+            if _player is not None:
+                _player(cache, state, fps)
+            else:
+                player_meta = DisplayMetadata(
+                    file_name=os.path.basename(input_path),
+                    file_size=raw_size,
+                    payload_size=payload_size,
+                    compressed=compress,
+                    data_blocks=int(K),
+                    total_blocks=num_blocks,
+                    block_size=blocksize,
+                    total_frames=total_frames,
+                    qr_version=qr_version,
+                    ec_level=ec_level,
+                    module_side=module_side,
+                    fps=fps,
+                    high_density=high_density,
+                )
+                player_config = DisplayPlayerQtConfig(
+                    title=f"QRStream — {os.path.basename(input_path)}",
+                    metadata=player_meta,
+                )
+                play_display_qt(cache, state, fps, config=player_config)
         finally:
             cancel_event.set()
             producer_thread.join()
         if producer_error:
             raise producer_error[0]
 
+        if not state.cancel_requested() and cache.valid_count >= total_frames:
+            reporter.encode_done(output_path="(display)", size_bytes=0)
         return cache
     finally:
         if producer_thread is not None and producer_thread.is_alive():

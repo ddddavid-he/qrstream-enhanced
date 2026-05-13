@@ -355,6 +355,9 @@ def cmd_encode(args):
                 codec=args.codec,
                 **common_kwargs,
             )
+    except ImportError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(3)
     except KeyboardInterrupt:
         # Remove partial/corrupt output file on interrupt.
         try:
@@ -450,7 +453,8 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
     enc.add_argument('-o', '--output', required=False,
                      help='Output video path (e.g. output.mp4)')
     enc.add_argument('--display', action='store_true',
-                     help='Display encoded QR frames without writing a video file')
+                     help='Display encoded QR frames in a GUI player '
+                          '(requires Qt GUI dependencies: pip install qrstream[gui])')
     enc.add_argument('--overhead', type=float, default=2.0,
                      help=f'Ratio of encoded blocks to source blocks '
                           f'(default: 2.0, minimum: {_MIN_OVERHEAD}, '
