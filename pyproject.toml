@@ -61,6 +61,11 @@ source = "vcs"
 [tool.hatch.build.hooks.vcs]
 version-file = "src/qrstream/_version.py"
 
+[project.optional-dependencies]
+gui = [
+    "PySide6-Essentials>=6.7.0",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",

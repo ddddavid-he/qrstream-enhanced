@@ -30,7 +30,7 @@ from math import ceil
 import numpy as np
 import pytest
 
-from qrstream.qr_utils import generate_qr_image, try_decode_qr
+from qrstream.qr_utils import generate_qr_image, generate_qr_module_image, try_decode_qr
 from qrstream.protocol import base45_encode, base45_decode, auto_blocksize
 from qrstream.encoder import LTEncoder
 
@@ -164,6 +164,15 @@ class TestImageProperties:
         assert isinstance(img, np.ndarray)
         assert img.ndim == 3
         assert img.shape[2] == 3  # BGR
+
+    def test_module_image_is_one_pixel_per_module(self):
+        block = self._block()
+        module_img = generate_qr_module_image(block, border=4, version=10)
+        bgr_img = generate_qr_image(block, box_size=1, border=4, version=10)
+        assert isinstance(module_img, np.ndarray)
+        assert module_img.ndim == 2
+        assert module_img.shape == bgr_img.shape[:2]
+        assert np.array_equal(module_img, bgr_img[:, :, 0])
 
     def test_box_size_scales_image(self):
         block = self._block()

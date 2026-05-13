@@ -9,7 +9,7 @@ import zlib
 from itertools import repeat
 from math import ceil
 from queue import Queue
-from threading import Thread
+from threading import Event, Thread
 from concurrent.futures import ThreadPoolExecutor
 
 from ._compat import suppress_native_stderr
@@ -28,7 +28,15 @@ from .protocol import (
     auto_blocksize,
     pack_v3,
 )
-from .qr_utils import generate_qr_image
+from .display_cache import ModuleFrameCache, pack_module_image, plan_module_cache
+from .display_player import DisplayProducerState
+from .display_player_qt import (
+    DisplayMetadata,
+    DisplayPlayerQtConfig,
+    play_display_qt,
+    require_pyside6,
+)
+from .qr_utils import generate_qr_image, generate_qr_module_image
 from .ui import ProgressReporter, QuietReporter
 
 
@@ -569,3 +577,262 @@ def encode_to_video(input_path: str, output_path: str,
             f"Output: {final_output_path} ({output_size} bytes, "
             f"{total_frames} frames)"
         )
+
+
+def encode_to_display(input_path: str,
+                      overhead: float = 2.0,
+                      fps: int = 10,
+                      ec_level: int = 1,
+                      qr_version: int = 25,
+                      border: float | None = None,
+                      lead_in_seconds: float = 0.0,
+                      compress: bool = True,
+                      verbose: bool = False,
+                      workers: int | None = None,
+                      use_legacy_qr: bool = False,
+                      binary_qr: bool = True,
+                      alphanumeric_qr: bool | None = None,
+                      force_compress: bool = False,
+                      auto_mask: bool = False,
+                      reporter: ProgressReporter | None = None,
+                      player=None,
+                      _player=None) -> ModuleFrameCache:
+    """Encode a file into a display-only module-frame cache and play it.
+
+    No final video file is written. QR frames are rendered at one pixel per
+    module, bit-packed into :class:`ModuleFrameCache`, then upscaled by the
+    display player at presentation time.
+    """
+    if reporter is None:
+        reporter = QuietReporter()
+
+    if _player is None:
+        _player = player
+    if _player is None:
+        require_pyside6()
+
+    high_density = _resolve_alphanumeric_flag(binary_qr, alphanumeric_qr)
+    payload = None
+    producer_thread: Thread | None = None
+    producer_error: list[BaseException] = []
+    cancel_event = Event()
+
+    try:
+        payload, compress, used_mmap, raw_size = _load_payload(
+            input_path,
+            compress=compress,
+            force_compress=force_compress,
+            verbose=verbose,
+            reporter=reporter,
+        )
+
+        payload_size = len(payload)
+        if verbose:
+            source_desc = "mmap" if used_mmap else "memory"
+            reporter.debug(
+                f"Input: {input_path} ({raw_size} bytes, source={source_desc})"
+            )
+            if compress:
+                ratio = payload_size / raw_size * 100 if raw_size else 0.0
+                reporter.debug(
+                    f"Compressed: {raw_size} → {payload_size} bytes "
+                    f"({ratio:.1f}%)"
+                )
+
+        blocksize = auto_blocksize(
+            payload_size,
+            ec_level,
+            qr_version,
+            alphanumeric_qr=high_density,
+        )
+        border_modules = _resolve_border_modules(qr_version, border)
+        K = ceil(payload_size / blocksize)
+        num_blocks = int(K * overhead)
+        lead_in_frames = max(0, round(lead_in_seconds * fps))
+        total_frames = num_blocks + lead_in_frames
+
+        if verbose:
+            mode_str = "alphanumeric/base45" if high_density else "base64"
+            reporter.debug(
+                f"Blocks: K={K}, blocksize={blocksize}, total={num_blocks} "
+                f"(overhead={overhead}x, {mode_str})"
+            )
+
+        encoder = LTEncoder(
+            payload,
+            blocksize,
+            compressed=compress,
+            alphanumeric_qr=high_density,
+        )
+        first_packed, _, _ = next(encoder.generate_blocks(1))
+        first_module = generate_qr_module_image(
+            first_packed,
+            ec_level=ec_level,
+            border=border_modules,
+            version=qr_version,
+            use_legacy=use_legacy_qr,
+            alphanumeric=high_density,
+            auto_mask=auto_mask,
+        )
+        module_side = int(first_module.shape[0])
+        plan = plan_module_cache(total_frames, module_side, fps)
+        cache = ModuleFrameCache.from_plan(total_frames, module_side, plan)
+        state = DisplayProducerState(total_frames)
+
+        if workers is None:
+            workers = 1
+        elif workers > 1:
+            reporter.warn(
+                "Display --workers > 1 is experimental: QR module "
+                "generation can parallelise, but playback still depends on "
+                "continuous cache availability."
+            )
+
+        duration_sec = total_frames / fps if fps else 0.0
+        mode_str = "base45" if high_density else "base64"
+        reporter.encode_start(
+            duration_sec=duration_sec,
+            fps=fps,
+            qr_version=qr_version,
+            mode=mode_str,
+            overhead=overhead,
+        )
+
+        def _report_progress(produced: int, start_ts: float,
+                             last_report_ts: list[float]) -> None:
+            now = time.monotonic()
+            if now - last_report_ts[0] < 0.1 and produced < total_frames:
+                return
+            elapsed = max(1e-6, now - start_ts)
+            speed = produced / elapsed
+            remaining = max(0, total_frames - produced)
+            eta = remaining / speed if speed > 1e-6 else 0.0
+            pct = (produced / total_frames * 100) if total_frames else 100.0
+            reporter.encode_update(
+                progress_pct=pct,
+                speed_fps=speed,
+                eta_sec=eta,
+            )
+            last_report_ts[0] = now
+
+        def _produce() -> None:
+            produced = 0
+            start_ts = time.monotonic()
+            last_report_ts = [start_ts]
+            try:
+                if lead_in_frames:
+                    blank = np.full((module_side, module_side), 255, dtype=np.uint8)
+                    packed_blank = pack_module_image(blank)
+                    for frame_index in range(lead_in_frames):
+                        if cancel_event.is_set() or state.cancel_requested():
+                            return
+                        cache.put_packed(frame_index, packed_blank)
+                        produced += 1
+                        state.mark_produced()
+                    _report_progress(produced, start_ts, last_report_ts)
+
+                encoder._seq = 0
+                if workers > 1:
+                    batch_size = max(workers * 4, 64)
+                    block_iter = encoder.generate_blocks(num_blocks)
+                    with ThreadPoolExecutor(max_workers=workers) as pool:
+                        frame_base = lead_in_frames
+                        while not cancel_event.is_set() and not state.cancel_requested():
+                            batch = []
+                            for _ in range(batch_size):
+                                try:
+                                    packed, _, _ = next(block_iter)
+                                except StopIteration:
+                                    break
+                                batch.append(packed)
+                            if not batch:
+                                break
+                            module_imgs = list(pool.map(
+                                generate_qr_module_image, batch,
+                                repeat(ec_level), repeat(border_modules),
+                                repeat(qr_version), repeat(use_legacy_qr),
+                                repeat(None), repeat(high_density),
+                                repeat(auto_mask),
+                            ))
+                            for module_img in module_imgs:
+                                if cancel_event.is_set() or state.cancel_requested():
+                                    return
+                                cache.put_module_image(frame_base, module_img)
+                                frame_base += 1
+                                produced += 1
+                                state.mark_produced()
+                            _report_progress(produced, start_ts, last_report_ts)
+                else:
+                    for offset, (packed, _, _) in enumerate(
+                            encoder.generate_blocks(num_blocks)):
+                        if cancel_event.is_set() or state.cancel_requested():
+                            return
+                        module_img = generate_qr_module_image(
+                            packed,
+                            ec_level=ec_level,
+                            border=border_modules,
+                            version=qr_version,
+                            use_legacy=use_legacy_qr,
+                            alphanumeric=high_density,
+                            auto_mask=auto_mask,
+                        )
+                        cache.put_module_image(lead_in_frames + offset, module_img)
+                        produced += 1
+                        state.mark_produced()
+                        _report_progress(produced, start_ts, last_report_ts)
+
+                if total_frames > 0:
+                    reporter.encode_update(
+                        progress_pct=100.0,
+                        speed_fps=produced / max(1e-6, time.monotonic() - start_ts),
+                        eta_sec=0.0,
+                    )
+            except BaseException as exc:
+                producer_error.append(exc)
+            finally:
+                cache.mark_done()
+                state.mark_done()
+
+        producer_thread = Thread(target=_produce, daemon=True)
+        producer_thread.start()
+        try:
+            if _player is not None:
+                _player(cache, state, fps)
+            else:
+                player_meta = DisplayMetadata(
+                    file_name=os.path.basename(input_path),
+                    file_size=raw_size,
+                    payload_size=payload_size,
+                    compressed=compress,
+                    data_blocks=int(K),
+                    total_blocks=num_blocks,
+                    block_size=blocksize,
+                    total_frames=total_frames,
+                    qr_version=qr_version,
+                    ec_level=ec_level,
+                    module_side=module_side,
+                    fps=fps,
+                    high_density=high_density,
+                )
+                player_config = DisplayPlayerQtConfig(
+                    title=f"QRStream — {os.path.basename(input_path)}",
+                    metadata=player_meta,
+                )
+                play_display_qt(cache, state, fps, config=player_config)
+        finally:
+            cancel_event.set()
+            producer_thread.join()
+        if producer_error:
+            raise producer_error[0]
+
+        if not state.cancel_requested() and cache.valid_count >= total_frames:
+            reporter.encode_done(output_path="(display)", size_bytes=0)
+        return cache
+    finally:
+        if producer_thread is not None and producer_thread.is_alive():
+            cancel_event.set()
+            producer_thread.join()
+        if payload is not None:
+            close = getattr(payload, 'close', None)
+            if callable(close):
+                close()
