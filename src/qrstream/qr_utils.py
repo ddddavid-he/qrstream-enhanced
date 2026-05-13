@@ -68,6 +68,27 @@ _EC_MAP: dict[int, str] = {0: 'L', 1: 'M', 2: 'Q', 3: 'H'}
 
 # ── QR Generation ────────────────────────────────────────────────
 
+def _encode_qr_payload(data: bytes,
+                       binary_mode: bool | None = None,
+                       alphanumeric: bool | None = None) -> tuple[str, bool]:
+    """Encode packed protocol bytes into the ASCII QR payload string."""
+    if alphanumeric is None:
+        if binary_mode is None:
+            use_alphanumeric = True
+        else:
+            use_alphanumeric = bool(binary_mode)
+    else:
+        use_alphanumeric = bool(alphanumeric)
+
+    if use_alphanumeric:
+        # Import lazily so tests that stub protocol still work.
+        from .protocol import base45_encode
+        payload = base45_encode(data).decode("ascii")
+    else:
+        payload = _b64lib.b64encode(data).decode("ascii")
+    return payload, use_alphanumeric
+
+
 def generate_qr_image(data: bytes, ec_level: int = 1,
                       box_size: int = 10, border: float = 4,
                       version: int | None = None,
@@ -101,32 +122,47 @@ def generate_qr_image(data: bytes, ec_level: int = 1,
         BGR numpy array suitable for OpenCV.
     """
     del use_legacy  # legacy parameter kept for API stability
-
-    # Resolve alphanumeric/binary_mode aliases. Default: alphanumeric.
-    if alphanumeric is None:
-        if binary_mode is None:
-            use_alphanumeric = True
-        else:
-            use_alphanumeric = bool(binary_mode)
-    else:
-        use_alphanumeric = bool(alphanumeric)
-
-    if use_alphanumeric:
-        # Import lazily so tests that stub protocol still work.
-        from .protocol import base45_encode
-        payload = base45_encode(data).decode("ascii")
-    else:
-        payload = _b64lib.b64encode(data).decode("ascii")
-
+    payload, use_alphanumeric = _encode_qr_payload(
+        data, binary_mode=binary_mode, alphanumeric=alphanumeric)
     return _render_qr(payload, ec_level, box_size, border, version,
                       use_alphanumeric, auto_mask)
+
+
+def generate_qr_module_image(data: bytes, ec_level: int = 1,
+                             border: float = 4,
+                             version: int | None = None,
+                             use_legacy: bool = False,
+                             binary_mode: bool | None = None,
+                             alphanumeric: bool | None = None,
+                             auto_mask: bool = False) -> np.ndarray:
+    """Generate a 1-pixel-per-module grayscale QR image.
+
+    The returned image includes the quiet zone and uses pure ``0``/``255``
+    values. It is intended for display-mode caching; callers can upscale it
+    with nearest-neighbour interpolation at playback time.
+    """
+    del use_legacy  # legacy parameter kept for API stability
+    payload, use_alphanumeric = _encode_qr_payload(
+        data, binary_mode=binary_mode, alphanumeric=alphanumeric)
+    return _render_qr_gray(payload, ec_level, 1, border, version,
+                           use_alphanumeric, auto_mask)
 
 
 def _render_qr(payload: str, ec_level: int, box_size: int,
                border: float, version: int | None,
                alphanumeric: bool,
                auto_mask: bool = False) -> np.ndarray:
-    """Render an ASCII payload string to a BGR numpy array via zxing-cpp.
+    """Render an ASCII payload string to a BGR numpy array via zxing-cpp."""
+    img = _render_qr_gray(payload, ec_level, box_size, border, version,
+                          alphanumeric, auto_mask)
+    return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+
+def _render_qr_gray(payload: str, ec_level: int, box_size: int,
+                    border: float, version: int | None,
+                    alphanumeric: bool,
+                    auto_mask: bool = False) -> np.ndarray:
+    """Render an ASCII payload string to a grayscale numpy array.
 
     ``payload`` is a plain ASCII string (base45 or base64 encoded).
     zxing-cpp auto-detects the optimal QR encoding mode from the content
@@ -165,7 +201,7 @@ def _render_qr(payload: str, ec_level: int, box_size: int,
     img = np.full((side, side), 255, dtype=np.uint8)
     img[bd_px:bd_px + n, bd_px:bd_px + n] = qr_arr
 
-    return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    return img
 
 
 # ── QR Detection ─────────────────────────────────────────────────
