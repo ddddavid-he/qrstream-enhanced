@@ -3,7 +3,7 @@ Unified CLI for QRStream.
 
 Usage:
     qrstream -V | --version
-    qrstream encode <file> (-o output.mp4 | --display) [--overhead 2.0]
+    qrstream encode <file> [-o output.mp4] [--display] [--overhead 2.0]
                           [--fps 10] [--output-mode MODE]
     qrstream decode <video> -o output_file [-s sample_rate]
                           [--output-mode MODE]
@@ -278,21 +278,11 @@ def cmd_encode(args):
         print(f"Error: File not found: {args.file}")
         sys.exit(1)
 
-    display = bool(getattr(args, 'display', False))
     output = args.output
-    if display and output:
-        print(
-            "Error: --display cannot be used together with -o/--output yet.\n"
-            "TODO: future versions may support generating the final video "
-            "from display cache after encoding completes.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    if not display and not output:
-        print("Error: specify -o/--output or --display.", file=sys.stderr)
-        sys.exit(2)
+    output_requested = output is not None
+    display = bool(getattr(args, 'display', False)) or not output_requested
 
-    if output:
+    if output_requested:
         # Fail fast on unreachable output paths so the user doesn't
         # wait through a minutes-long encode before learning the
         # destination directory doesn't exist or isn't writable.
@@ -317,7 +307,7 @@ def cmd_encode(args):
             f"threshold."
         )
 
-    if output and os.path.abspath(args.file) == os.path.abspath(output):
+    if output_requested and os.path.abspath(args.file) == os.path.abspath(output):
         print(
             f"Error: output path is the same as the input file '{args.file}'.\n"
             f"Specify a different path with -o."
@@ -348,7 +338,12 @@ def cmd_encode(args):
             reporter=reporter,
         )
         if display:
-            encode_to_display(**common_kwargs)
+            encode_to_display(
+                output_path=output if output_requested else None,
+                codec=args.codec,
+                report_display_done=not output_requested,
+                **common_kwargs,
+            )
         else:
             encode_to_video(
                 output_path=output,
@@ -358,6 +353,9 @@ def cmd_encode(args):
     except ImportError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(3)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     except KeyboardInterrupt:
         # Remove partial/corrupt output file on interrupt.
         try:
@@ -453,10 +451,13 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
         'encode', help='Encode a file into a QR code video')
     enc.add_argument('file', help='Path to the input file')
     enc.add_argument('-o', '--output', required=False,
-                     help='Output video path (e.g. output.mp4)')
+                     help='Output video path (e.g. output.mp4). If omitted, '
+                          'encode displays frames on screen.')
     enc.add_argument('--display', action='store_true',
-                     help='Display encoded QR frames in a GUI player '
-                          '(requires Qt GUI dependencies: pip install qrstream[gui])')
+                     help='Display encoded QR frames in a GUI player. When used '
+                          'with -o, the video is saved after display rendering '
+                          'completes (requires Qt GUI dependencies: '
+                          'pip install qrstream[gui])')
     enc.add_argument('--overhead', type=float, default=2.0,
                      help=f'Ratio of encoded blocks to source blocks '
                           f'(default: 2.0, minimum: {_MIN_OVERHEAD}, '

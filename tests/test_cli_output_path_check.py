@@ -210,10 +210,12 @@ class TestCmdEncodeGate:
         assert "kw" in called
         assert "video" not in called
         assert called["kw"]["input_path"] == str(src)
+        assert called["kw"]["output_path"] is None
 
-    def test_encode_rejects_display_with_output(
-            self, tmp_path, capsys, monkeypatch):
+    def test_encode_display_with_output_saves_after_display(
+            self, tmp_path, monkeypatch):
         src = tmp_path / "src.bin"
+        out = tmp_path / "out.mp4"
         src.write_bytes(b"hello")
 
         called: dict = {}
@@ -229,30 +231,39 @@ class TestCmdEncodeGate:
 
         parser = build_parser()
         args = parser.parse_args([
-            "encode", str(src), "--display", "-o", str(tmp_path / "out.mp4"),
+            "encode", str(src), "--display", "-o", str(out),
         ])
+        cmd_encode(args)
 
-        with pytest.raises(SystemExit) as exc_info:
-            cmd_encode(args)
-        assert exc_info.value.code == 2
+        assert "display" in called
+        assert "video" not in called
+        assert called["display"]["output_path"] == str(out)
+        assert called["display"]["codec"] == "h264"
+        assert called["display"]["report_display_done"] is False
 
-        captured = capsys.readouterr()
-        assert "--display cannot be used together" in captured.err
-        assert not called
-
-    def test_encode_requires_output_or_display(self, tmp_path, capsys):
+    def test_encode_without_output_defaults_to_display(
+            self, tmp_path, monkeypatch):
         src = tmp_path / "src.bin"
         src.write_bytes(b"hello")
 
+        called: dict = {}
+        import qrstream.encoder as enc_mod
+        monkeypatch.setattr(
+            enc_mod, "encode_to_display",
+            lambda **kw: called.setdefault("display", kw),
+        )
+        monkeypatch.setattr(
+            enc_mod, "encode_to_video",
+            lambda **kw: called.setdefault("video", kw),
+        )
+
         parser = build_parser()
         args = parser.parse_args(["encode", str(src)])
+        cmd_encode(args)
 
-        with pytest.raises(SystemExit) as exc_info:
-            cmd_encode(args)
-        assert exc_info.value.code == 2
-
-        captured = capsys.readouterr()
-        assert "specify -o/--output or --display" in captured.err
+        assert "display" in called
+        assert "video" not in called
+        assert called["display"]["output_path"] is None
 
 
 class TestCmdDecodeGate:

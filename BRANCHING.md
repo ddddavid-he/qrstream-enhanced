@@ -62,8 +62,9 @@ uv pip install -e .
 1. 从 `dev` 拉出 `feature/*` 或 `fix/*` 分支。
 2. 在工作分支上进行小步提交。
 3. 发起 PR 到 `dev`，通过集成验证后合并。
-4. 需要发布时，从 `dev` 合并到 `main`。
-5. 打 `v*` 标签触发 `release.yml` 与 `publish.yml`。
+4. 任务已合并到 `dev` 后，清理对应的 `feature/*`、`fix/*` 或 `hotfix/*` 工作分支。
+5. 需要发布时，从 `dev` 合并到 `main`。
+6. 打 `v*` 标签触发 `release.yml` 与 `publish.yml`。
 
 ## 发布前 Gate
 
