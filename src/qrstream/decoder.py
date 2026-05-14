@@ -301,6 +301,38 @@ class LTDecoder:
         return written
 
 
+def _attempt_ge_checkpoint(lt_decoder: LTDecoder,
+                           reporter: ProgressReporter,
+                           stage: str) -> bool:
+    """Try a phase-boundary Gauss-Jordan rescue pass.
+
+    Scan and targeted-recovery phases use cheap LT peeling for live
+    progress.  At phase boundaries, a stalled peeling graph may already
+    span all unknown source blocks; this checkpoint lets extraction stop
+    early instead of scanning the next recovery level unnecessarily.
+    """
+    if not lt_decoder.initialized or lt_decoder.done:
+        return lt_decoder.done
+
+    reporter.ge_start(
+        stage=stage,
+        recovered=lt_decoder.num_recovered,
+        k=lt_decoder.K,
+    )
+    try:
+        rescued = lt_decoder.try_gaussian_rescue()
+    finally:
+        reporter.ge_done(
+            success=lt_decoder.done,
+            recovered=lt_decoder.num_recovered,
+            k=lt_decoder.K,
+        )
+
+    # TODO: Reuse a completed extraction LTDecoder in decode_blocks_to_file()
+    # so a successful scan-phase GE pass is not repeated during final dump.
+    return rescued
+
+
 # ── Video QR extraction (thread pool) ────────────────────────────
 
 # Default fallback for the per-call max-dim (used when the adaptive
@@ -1870,6 +1902,11 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
     scan_tracker.emit_final()
     reporter.scan_done()
 
+    if (not early_done and lt_decoder.initialized
+            and not lt_decoder.done):
+        early_done = _attempt_ge_checkpoint(
+            lt_decoder, reporter, "scan")
+
     total_sampled = detect_count + no_detect_count
     if verbose:
         hit_rate_str = (
@@ -2089,6 +2126,8 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
                 current_range=rec_state["current_range"],
             )
 
+        level_decoded_before = decoded_count
+
         try:
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 decoded_count, no_detect_count, early_done, _ = _stream_scan(
@@ -2123,6 +2162,12 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
 
         if early_done:
             break
+
+        if (decoded_count > level_decoded_before
+                and lt_decoder.initialized
+                and not lt_decoder.done):
+            if _attempt_ge_checkpoint(lt_decoder, reporter, level_name):
+                break
 
     if verbose:
         status = " (complete)" if lt_decoder.done else ""
