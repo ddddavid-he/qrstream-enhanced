@@ -4,7 +4,7 @@
 
 ## 设计目标
 
-当前 benchmark（`benchmarks/benchmark.py`）只测总 wall time，无法定位真实瓶颈。
+当前 benchmark（`dev/benchmark.py`）只测总 wall time，无法定位真实瓶颈。
 本目录下的脚本用来回答以下问题：
 
 1. **CPU 时间花在哪里**：`cProfile` 细粒度函数级热点（单 worker 模式下才能看清）。
@@ -25,20 +25,20 @@
 
 ```bash
 # 本地直接跑：
-python dev/perf-profile/run_all.py
+uv run python dev/perf-profile/run_all.py
 
 # 单独跑某一项（例如只测编码）：
-python dev/perf-profile/profile_encode.py --sizes 10,100,1000
+uv run python dev/perf-profile/profile_encode.py --sizes 10,100,1000
 
 # 可视化 .prof 文件：
-pip install snakeviz
+uv tool install snakeviz
 snakeviz dev/perf-profile/results/encode_single_100kb.prof
 ```
 
 ## 目标场景
 
 - 文件大小：1KB、10KB、100KB、1MB、5MB、10MB
-- 参数：默认 overhead=2.0, fps=10, ec_level=1, qr_version=25, qr_mode=alphanumeric（base45），V3 协议
+- 参数：默认 overhead=2.0, fps=10, qr_version=25, qr_mode=alphanumeric（base45），V3 协议；QR 纠错级别参数已隐藏/废弃，主要可靠性由 LT overhead 与 GE rescue 提供
 - 超过 10MB 的文件不在本次 profile 范围
 
 ## 阅读 cProfile 输出的提示

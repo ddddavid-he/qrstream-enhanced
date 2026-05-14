@@ -107,3 +107,46 @@ def test_targeted_recovery_gate_no_longer_depends_on_sample_rate():
         "The `sample_rate > 1` gate on _targeted_recovery was "
         "reintroduced; v070 amd64 will fail again."
     )
+
+
+def test_ge_checkpoint_runs_rescue_with_reporter_events():
+    """Phase-boundary GE checkpoints should wrap the decoder rescue."""
+
+    class _FakeDecoder:
+        initialized = True
+        done = False
+        K = 10
+
+        def __init__(self):
+            self.called = False
+            self._num_recovered = 4
+
+        @property
+        def num_recovered(self):
+            return self._num_recovered
+
+        def try_gaussian_rescue(self):
+            self.called = True
+            self.done = True
+            self._num_recovered = self.K
+            return True
+
+    class _Reporter:
+        def __init__(self):
+            self.events = []
+
+        def ge_start(self, **kwargs):
+            self.events.append(("start", kwargs))
+
+        def ge_done(self, **kwargs):
+            self.events.append(("done", kwargs))
+
+    decoder = _FakeDecoder()
+    reporter = _Reporter()
+
+    assert dec_mod._attempt_ge_checkpoint(decoder, reporter, "scan") is True
+    assert decoder.called
+    assert reporter.events[0] == (
+        "start", {"stage": "scan", "recovered": 4, "k": 10})
+    assert reporter.events[1] == (
+        "done", {"success": True, "recovered": 10, "k": 10})

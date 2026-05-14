@@ -301,6 +301,44 @@ class LTDecoder:
         return written
 
 
+def _attempt_ge_checkpoint(lt_decoder: LTDecoder,
+                           reporter: ProgressReporter,
+                           stage: str) -> bool:
+    """Try a phase-boundary Gauss-Jordan rescue pass.
+
+    Scan and targeted-recovery phases use cheap LT peeling for live
+    progress.  At phase boundaries, a stalled peeling graph may already
+    span all unknown source blocks; this checkpoint lets extraction stop
+    early instead of scanning the next recovery level unnecessarily.
+    """
+    if not lt_decoder.initialized or lt_decoder.done:
+        return lt_decoder.done
+
+    reporter.ge_start(
+        stage=stage,
+        recovered=lt_decoder.num_recovered,
+        k=lt_decoder.K,
+    )
+    try:
+        rescued = lt_decoder.try_gaussian_rescue()
+    finally:
+        reporter.ge_done(
+            success=lt_decoder.done,
+            recovered=lt_decoder.num_recovered,
+            k=lt_decoder.K,
+        )
+
+    return rescued
+
+
+def _format_extraction_result(unique_blocks, lt_decoder: LTDecoder,
+                              return_decoder: bool):
+    if not return_decoder:
+        return unique_blocks
+    completed_decoder = lt_decoder if lt_decoder.is_done() else None
+    return unique_blocks, completed_decoder
+
+
 # ── Video QR extraction (thread pool) ────────────────────────────
 
 # Default fallback for the per-call max-dim (used when the adaptive
@@ -1702,7 +1740,8 @@ def _tracked_read_frames(video_path: str, sample_rate: int,
 def extract_qr_from_video(video_path: str, sample_rate: int = 0,
                            verbose: bool = False, workers: int | None = None,
                            *,
-                           reporter: ProgressReporter | None = None):
+                           reporter: ProgressReporter | None = None,
+                           return_decoder: bool = False):
     """Extract unique QR code payloads from a video file.
 
     Uses an LT decoder internally for early termination: stops scanning
@@ -1721,8 +1760,11 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
             ``None`` a :class:`QuietReporter` is used (no progress
             output) so the function stays side-effect-free for
             programmatic callers.
+        return_decoder: When true, return ``(blocks, decoder)`` where
+            ``decoder`` is the completed extraction decoder when scan-phase
+            peeling/GE already reconstructed the file; otherwise ``None``.
 
-    Returns a list of raw block byte strings.
+    Returns a list of raw block byte strings by default.
     """
     if reporter is None:
         reporter = QuietReporter()
@@ -1809,7 +1851,8 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
                                     f"{probe_count} sampled frames, "
                                     f"{decoded_count} unique blocks"
                                 )
-                            return unique_blocks
+                            return _format_extraction_result(
+                                unique_blocks, lt_decoder, return_decoder)
                     except (ValueError, struct.error):
                         pass
             else:
@@ -1870,6 +1913,11 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
     scan_tracker.emit_final()
     reporter.scan_done()
 
+    if (not early_done and lt_decoder.initialized
+            and not lt_decoder.done):
+        early_done = _attempt_ge_checkpoint(
+            lt_decoder, reporter, "scan")
+
     total_sampled = detect_count + no_detect_count
     if verbose:
         hit_rate_str = (
@@ -1904,7 +1952,8 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
             crop_box=crop_box,
             reporter=reporter)
 
-    return unique_blocks
+    return _format_extraction_result(
+        unique_blocks, lt_decoder, return_decoder)
 
 
 def _estimate_frame_for_seed(seed: int, seed_frame_map: dict[int, int],
@@ -2089,6 +2138,8 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
                 current_range=rec_state["current_range"],
             )
 
+        level_decoded_before = decoded_count
+
         try:
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 decoded_count, no_detect_count, early_done, _ = _stream_scan(
@@ -2123,6 +2174,12 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
 
         if early_done:
             break
+
+        if (decoded_count > level_decoded_before
+                and lt_decoder.initialized
+                and not lt_decoder.done):
+            if _attempt_ge_checkpoint(lt_decoder, reporter, level_name):
+                break
 
     if verbose:
         status = " (complete)" if lt_decoder.done else ""
@@ -2392,11 +2449,15 @@ def decode_blocks(blocks, verbose=False,
 
 
 def decode_blocks_to_file(blocks, output_path: str, verbose=False,
-                          reporter: ProgressReporter | None = None) -> "int | None":
+                          reporter: ProgressReporter | None = None,
+                          decoder: LTDecoder | None = None) -> "int | None":
     """Decode blocks and write the result directly to a file."""
     if reporter is None:
         reporter = QuietReporter()
-    decoder = _decode_into_decoder(blocks, verbose=verbose, reporter=reporter)
+    if decoder is not None and not decoder.is_done():
+        decoder = None
+    if decoder is None:
+        decoder = _decode_into_decoder(blocks, verbose=verbose, reporter=reporter)
     if decoder is None:
         return None
     try:

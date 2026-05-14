@@ -391,9 +391,10 @@ def cmd_decode(args):
 
     output_path = args.output
     try:
-        blocks = extract_qr_from_video(
+        blocks, completed_decoder = extract_qr_from_video(
             args.video, args.sample_rate, verbose, args.workers,
             reporter=reporter,
+            return_decoder=True,
         )
 
         if not blocks:
@@ -402,6 +403,7 @@ def cmd_decode(args):
 
         written = decode_blocks_to_file(
             blocks, output_path, verbose, reporter=reporter,
+            decoder=completed_decoder,
         )
 
         if written is None:

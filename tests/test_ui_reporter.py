@@ -124,6 +124,8 @@ class TestQuietReporter:
         r.probe_done(sample=2, detect=0.7, repeat=2.0, crop_reduction=None)
         r.scan_update(video_pct=50.0, hit_window=0.5,
                       file_pct=30.0, recovered=set(), k=10)
+        r.ge_start(stage="scan", recovered=3, k=10)
+        r.ge_done(success=False, recovered=3, k=10)
         assert buf.getvalue() == ""
 
         r.warn("minor")
@@ -191,6 +193,19 @@ class TestLogReporter:
                       recovered={0, 1, 2, 3, 4}, k=10)
         # At least one scan line should carry map=...
         assert any("map=" in ln for ln in buf.getvalue().splitlines())
+
+    def test_log_reports_ge_checkpoint(self):
+        buf = io.StringIO()
+        r = LogReporter(stream=buf)
+        r.ge_start(stage="scan", recovered=4, k=10)
+        r.ge_done(success=True, recovered=10, k=10)
+        lines = buf.getvalue().splitlines()
+        assert any("phase=ge status=start" in ln for ln in lines)
+        assert any("stage=scan" in ln for ln in lines)
+        done = next(ln for ln in lines if "phase=ge status=done" in ln)
+        assert "result=success" in done
+        assert "recovered=10" in done
+        assert "total=10" in done
 
 
 # ── Resolver ─────────────────────────────────────────────────────
@@ -396,6 +411,16 @@ class TestRichReporter:
             f"bar right edge shifts across detect rates "
             f"(indicates width-jitter regression): {bar_ends}"
         )
+
+    def test_ge_checkpoint_prints_simple_result(self):
+        buf = io.StringIO()
+        r = RichReporter(stream=buf)
+        r.ge_start(stage="scan", recovered=4, k=10)
+        r.ge_done(success=True, recovered=10, k=10)
+        r.close()
+        out = buf.getvalue()
+        assert "GE" in out
+        assert "recovered 10/10 blocks" in out
 
     def test_probe_done_emits_probe_and_plan_lines(self):
         """probe_done splits observations and plan into two lines."""
