@@ -26,6 +26,13 @@ from qrstream.cli import (
 )
 
 
+def _skip_if_mode_bits_are_not_enforced():
+    if os.name == "nt":
+        pytest.skip("Windows does not enforce POSIX chmod write bits")
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root bypasses file-mode permission checks")
+
+
 # ── _check_output_path_writable ────────────────────────────────
 
 
@@ -48,11 +55,10 @@ class TestOutputPathCheck:
         assert "does not exist" in msg
 
     def test_parent_directory_not_writable(self, tmp_path):
-        # Create a directory and drop its write bits.  Root
-        # bypasses permission checks entirely so we skip under
-        # root (CI containers sometimes run as root).
-        if os.geteuid() == 0:
-            pytest.skip("root bypasses file-mode permission checks")
+        # Create a directory and drop its write bits.  This uses
+        # POSIX mode semantics, so skip where those bits are not
+        # enforced for the current process.
+        _skip_if_mode_bits_are_not_enforced()
         ro = tmp_path / "ro"
         ro.mkdir()
         ro.chmod(stat.S_IRUSR | stat.S_IXUSR)  # r-x, no write
@@ -72,8 +78,7 @@ class TestOutputPathCheck:
         assert "existing directory" in msg
 
     def test_existing_readonly_file_is_rejected(self, tmp_path):
-        if os.geteuid() == 0:
-            pytest.skip("root bypasses file-mode permission checks")
+        _skip_if_mode_bits_are_not_enforced()
         out = tmp_path / "out.bin"
         out.write_bytes(b"old")
         out.chmod(stat.S_IRUSR)  # read-only for owner
@@ -302,8 +307,7 @@ class TestCmdDecodeGate:
 
     def test_decode_fails_fast_on_readonly_file(
             self, tmp_path, capsys, monkeypatch):
-        if os.geteuid() == 0:
-            pytest.skip("root bypasses file-mode permission checks")
+        _skip_if_mode_bits_are_not_enforced()
         video = tmp_path / "in.mp4"
         video.write_bytes(b"not really a video")
         out = tmp_path / "out.bin"

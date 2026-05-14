@@ -103,7 +103,7 @@ jobs:
         github.ref == 'refs/heads/main' &&
         startsWith(github.event.head_commit.message || '', 'skip-main-ci:')
       )
-    name: test (${{ matrix.os }}, py${{ matrix.python-version }}, ${{ matrix.python-architecture }})
+    name: test (${{ matrix.os }}, py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -113,12 +113,6 @@ jobs:
           - ubuntu-24.04-arm
           - macos-latest
         python-version: ${{ fromJSON(needs.check-dev-gate.outputs.python-versions) }}
-        python-architecture:
-          - x64
-        include:
-          - os: windows-latest
-            python-version: "3.13"
-            python-architecture: x64
 
     steps:
       - name: Check out code
@@ -128,7 +122,6 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-          architecture: ${{ matrix.python-architecture }}
 
       - name: Set up uv
         # setup-uv stopped publishing floating major/minor tags at v8
@@ -162,4 +155,39 @@ jobs:
         with:
           name: python-package-distributions
           path: dist/
+
+  test-windows-x64:
+    needs: check-dev-gate
+    if: |
+      !(
+        github.event_name == 'push' &&
+        startsWith(github.event.head_commit.message || '', 'skip-ci:')
+      ) &&
+      !(
+        github.event_name == 'push' &&
+        github.ref == 'refs/heads/main' &&
+        startsWith(github.event.head_commit.message || '', 'skip-main-ci:')
+      )
+    name: test (windows-latest, py3.13, x64)
+    runs-on: windows-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          architecture: x64
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run unit tests
+        run: uv run pytest tests/ -v
 
