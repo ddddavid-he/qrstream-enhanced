@@ -20,10 +20,11 @@ Encoder                                     Decoder
 **Key Features**:
 - **LT Fountain Codes**: Rateless erasure codes — naturally tolerant of frame loss, blur, and occlusion
 - **Base45 + QR Alphanumeric Mode**: RFC 9285 base45 packs data into QR alphanumeric mode (5.5 bits/char vs 8 for byte mode); smaller and faster than base64 at the same QR version
-- **zxing-cpp Detector**: Native C++ QR detector (replaces WeChatQRCode since v0.9) — releases the GIL for true parallel detection, reentrant and crash-free on noisy inputs, 4–10× faster with equivalent detection rate
+- **zxing-cpp Detector**: Native C++ QR detector — releases the GIL for true parallel detection, reentrant and crash-free on noisy inputs, faster than the historical OpenCV/WeChatQRCode path with equivalent detection rate
 - **Adaptive Sample Rate**: Automatically selects optimal sampling strategy based on detection rate and frame repetition
-- **Targeted Recovery**: After initial scan, precisely re-scans video segments where missing blocks are expected
+- **Targeted Recovery + GE Rescue**: After the main scan, the decoder can run a GF(2) Gaussian-elimination checkpoint to finish stalled LT graphs early; if needed, it re-scans only video segments where missing seeds are expected
 - **Low-Memory Paths**: mmap-backed encoding and streaming decode-to-file for large inputs
+- **Display Mode**: `qrstream encode` without `-o` streams generated QR frames directly to the built-in Qt player; `--display -o` prioritises smooth display while still completing the output video
 
 ## Installation
 
@@ -65,6 +66,13 @@ For one-off execution without a persistent install:
 uvx qrstream <command> [options]
 ```
 
+### GUI included by default
+
+`qrstream` installs the Qt display player by default.  Encoding without `-o`
+opens the player directly, and `--display -o` combines live display with a
+complete output video.  The legacy `qrstream[gui]` extra remains accepted for
+older install scripts, but it is no longer required.
+
 ### Development Install
 
 ```bash
@@ -75,7 +83,7 @@ uv sync --dev
 ### Requirements
 
 - Python >= 3.10 (3.10 – 3.14 tested)
-- Dependencies: `opencv-contrib-python`, `numpy`, `rich`, `zxing-cpp`
+- Dependencies: `opencv-python-headless`, `numpy`, `rich`, `zxing-cpp`, `av`, `PySide6-Essentials`
 
 ## Usage
 
@@ -90,16 +98,17 @@ qrstream --version
 ### Encode (File → QR Video)
 
 ```bash
-qrstream encode <file> -o output.mp4 [options]
+qrstream encode <file> [-o output.mp4] [--display] [options]
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `<file>` | - | Input file path |
-| `-o, --output` | **required** | Output video path |
+| `-o, --output` | optional | Output video path. If omitted, encode defaults to on-screen display. |
+| `--display` | - | Display generated QR frames in the built-in GUI player. When combined with `-o/--output`, display smoothness is prioritised and the output video is completed after the display window closes if needed. |
 | `--overhead` | `2.0` | Encoding redundancy ratio (multiple of source block count) |
 | `--fps` | `10` | Output video frame rate |
-| `--ec-level` | `1` | **Deprecated** (hidden since v0.9, will be removed in v0.10.0): QR error correction level. Redundant — LT `--overhead` already handles frame loss. Existing scripts continue to work but should stop using this option. |
+| `--ec-level` | `1` | **Deprecated and hidden**: QR error correction level. Redundant — LT `--overhead` already handles frame loss. Existing scripts continue to work during the deprecation window but should stop using this option. |
 | `--qr-version` | `25` | QR code version 1-40 (higher = denser) |
 | `--border` | standard 4-module quiet zone | Quiet-zone width as a percentage of QR content width (`--border 10` = 10%, `--border 0` disables it) |
 | `--lead-in-seconds` | `0.0` | Insert white lead-in frames before the first QR frame |
@@ -107,6 +116,7 @@ qrstream encode <file> -o output.mp4 [options]
 | `--force-compress` | - | Force compression for large V3 inputs (higher memory usage) |
 | `--qr-mode` | `alphanumeric` | QR payload encoding: `alphanumeric` (base45, default, denser) or `base64` (byte mode, fallback) |
 | `--legacy-qr` | - | Accepted but ignored (kept for CLI backward compatibility) |
+| `--auto-mask` | - | Accepted but ignored (zxing-cpp always evaluates all QR mask patterns in native code) |
 | `--codec` | `h264` | Video codec: `h264` (default, good compression), `mp4v`, or `mjpeg` (faster encode, larger files). qrstream writes the matching container explicitly and keeps your filename suffix unchanged; if the suffix looks inconsistent, it emits a warning. |
 | `-w, --workers` | `1` | Parallel worker threads for QR generation. The default stays at 1 because the full encode pipeline is typically video-writer-bound even though QR matrix generation (`zxingcpp.create_barcode()`) is native C++ (GIL-free). Pass a larger value explicitly only if profiling on your machine shows a win. |
 | `--output-mode` | `auto` | Progress/status rendering: `auto` (Rich interactive on TTY, `log` otherwise), `log` (append-only `key=value` lines for CI), `quiet` (errors and final path only), `verbose` (full diagnostic output) |
@@ -142,6 +152,12 @@ qrstream encode data.bin -o data.mp4 --qr-version 20
 # Add a larger quiet zone and white lead-in before recording
 qrstream encode slides.zip -o slides.mp4 --border 10 --lead-in-seconds 1.5
 
+# Display QR frames directly; omitting -o defaults to display mode
+qrstream encode data.zip
+
+# Display QR frames and still save a complete video after display closes if needed
+qrstream encode data.zip --display -o data.mp4
+
 # CI-friendly decode with log output
 qrstream decode recording.mov -o out.bin --output-mode log
 ```
@@ -165,6 +181,12 @@ result = decode_blocks(blocks, verbose=True)
 # Better for large files: stream directly to file with incremental decompression
 written = decode_blocks_to_file(blocks, "recovered.bin", verbose=True)
 print(f"wrote {written} bytes")
+
+# Advanced: reuse a decoder completed during extraction (e.g. by scan-phase GE)
+blocks, completed_decoder = extract_qr_from_video(
+    "output.mp4", verbose=True, return_decoder=True)
+written = decode_blocks_to_file(
+    blocks, "recovered.bin", decoder=completed_decoder)
 ```
 
 ## Project Structure
@@ -175,23 +197,27 @@ project-root/
 ├── src/qrstream/
 │   ├── cli.py                 # CLI entry (encode/decode subcommands)
 │   ├── encoder.py             # LT encode → QR frame generation → MP4 video
-│   ├── decoder.py             # Video frame extraction → QR detect → LT decode → file rebuild
-│   ├── lt_codec.py            # LT fountain code primitives (PRNG, RSD, BlockGraph)
+│   ├── decoder.py             # Video frame extraction → QR detect → LT decode/GE rescue → file rebuild
+│   ├── lt_codec.py            # LT fountain code primitives (PRNG, RSD, BlockGraph, GF(2) rescue)
 │   ├── protocol.py            # V3 protocol serialization + base45 codec (legacy base64/COBS decode supported)
-│   └── qr_utils.py            # QR generation + detection (zxing-cpp)
+│   ├── qr_utils.py            # QR generation + detection (zxing-cpp)
+│   ├── display_cache.py       # Bounded display-mode frame cache
+│   └── display_player*.py     # Optional Qt display-mode players
 ├── tests/
 │   ├── test_lt_codec.py       # LT codec unit tests
 │   ├── test_protocol.py       # V3 protocol + base45 tests
 │   ├── test_decoder.py        # Decoder validation + probe strategy tests
+│   ├── test_gaussian_rescue.py # GE rescue fallback tests
 │   ├── test_roundtrip.py      # Pure LT codec roundtrip tests (no video I/O)
-│   ├── test_qr_generate.py    # QR generation correctness + glog(0) regression
+│   ├── test_qr_generate*.py   # QR generation correctness + mask/glog regressions
 │   ├── test_e2e_encode_decode.py  # End-to-end encode→video→decode SHA256 tests
+│   ├── test_display_*.py      # Optional display-mode cache/player tests
 │   └── test_optimizations.py  # Perf optimizations + zxing-cpp + legacy-fallback tests
 └── dev/
     ├── benchmark.py           # Performance benchmarks
     ├── perf-profile/          # cProfile hotspot analysis scripts
     ├── test-container/        # Podman test container
-    └── wechatqrcode-mnn-poc/  # Historical WeChatQRCode MNN acceleration POC (archived)
+    └── DESIGN-*.md / DISCOVERY-*.md  # Design notes and investigation write-ups
 ```
 
 ## Technical Details
@@ -237,9 +263,10 @@ Base45 (RFC 9285) is the default because QR's alphanumeric mode is denser per ch
 
 1. **Probe phase**: Sample 3 spread-out windows in the video (120 frames each by default), measure detection rate and repetition per window, pick the most conservative `sample_rate`; completion prints a two-line `Probe` + `Plan` summary (observations vs. derived parameters)
 2. **Main scan**: Detect QR codes in parallel at the adaptive sample rate, feeding into the LT decoder in real time.  The interactive UI shows a `Scan` row (video progress / ETA / detection rate) and a `File` row (qBittorrent-style block map + `N/K blocks` counter), aligned in a shared table
-3. **Targeted recovery**: If the first pass didn't recover all blocks, use linear regression on observed (seed, frame) pairs to locate missing seeds and re-scan those segments precisely
-4. **LT decode**: Belief propagation (peeling) to recover all source blocks
-5. **Output writeback**: Write recovered blocks sequentially; incremental decompression in compressed mode
+3. **GE checkpoint**: If peeling stalls after the main scan, try a GF(2) Gauss-Jordan rescue over the accumulated LT equations.  When the equations already span the missing source blocks, decoding stops here and the completed decoder is reused for writeback
+4. **Targeted recovery**: If GE is rank-insufficient, use linear regression on observed (seed, frame) pairs to locate missing seeds and re-scan those segments precisely.  After each recovery level that adds new unique blocks, run another GE checkpoint before escalating
+5. **LT decode fallback**: Programmatic callers that pass only raw blocks still get the traditional final peeling + GE rescue in `decode_blocks()` / `decode_blocks_to_file()`
+6. **Output writeback**: Write recovered blocks sequentially; incremental decompression in compressed mode
 
 ### LT Fountain Code Parameters
 
@@ -248,19 +275,19 @@ Base45 (RFC 9285) is the default because QR's alphanumeric mode is denser per ch
 | Degree distribution | Robust Soliton Distribution | c=0.1, delta=0.5 |
 | PRNG | SplitMix64 mixer + LCG (a=16807, m=2^31-1) | Non-linear seed mixing eliminates sequential-seed correlation |
 | XOR | numpy vectorized + in-place | 10-50x faster than pure Python |
-| Decoding | Belief Propagation (Peeling) | Iterative elimination on bipartite graph |
+| Decoding | Belief Propagation (Peeling) + GF(2) GE rescue | Peeling is the fast path; Gauss-Jordan checkpoints recover stalled but full-rank LT graphs |
 
 ## Testing
 
 ```bash
-# Unit tests (default — fast, no video I/O)
-uv run pytest tests/ -v
+# Default test set (fast; excludes slow and e2e markers via pyproject.toml)
+uv run pytest
 
-# End-to-end encode→video→decode tests (10 KB, 100 KB, 500 KB + glog regression)
-uv run pytest -m e2e -v
+# End-to-end encode→video→decode tests
+uv run pytest -m e2e
 
 # Real-world phone-recording tests (requires fixture videos)
-uv run pytest -m slow -v
+uv run pytest -m slow
 ```
 
 ### Utility Commands

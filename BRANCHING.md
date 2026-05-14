@@ -6,14 +6,14 @@
   - 生产分支 / 发布分支。
   - 合并到 `main` 的变更应当已经在 `dev` 完成集成验证。
   - `push` 到 `main` 时会运行完整验证链：
-    - `test.yml`：Python `3.10` ~ `3.14`，`ubuntu-latest` + `ubuntu-24.04-arm`
+    - `test.yml`：Python `3.10` ~ `3.14`，`ubuntu-latest` + `ubuntu-24.04-arm` + `macos-latest`，并额外覆盖 Windows x86_64 / Python `3.13`
     - `e2e-encode-decode.yml`
     - `real-world-tests.yml`
 - `dev`
   - 集成分支。
   - 功能开发完成后，优先通过 PR 合入 `dev` 做集成验证。
   - `push` 到 `dev` 时会运行较轻量但完整的验证链：
-    - `test.yml`：Python `3.13`
+    - `test.yml`：Python `3.13`（含 Windows x86_64 覆盖）
     - `e2e-encode-decode.yml`
     - `real-world-tests.yml`
 
@@ -62,8 +62,9 @@ uv pip install -e .
 1. 从 `dev` 拉出 `feature/*` 或 `fix/*` 分支。
 2. 在工作分支上进行小步提交。
 3. 发起 PR 到 `dev`，通过集成验证后合并。
-4. 需要发布时，从 `dev` 合并到 `main`。
-5. 打 `v*` 标签触发 `release.yml` 与 `publish.yml`。
+4. 任务已合并到 `dev` 后，清理对应的 `feature/*`、`fix/*` 或 `hotfix/*` 工作分支。
+5. 需要发布时，从 `dev` 合并到 `main`。
+6. 打 `v*` 标签触发 `release.yml` 与 `publish.yml`。
 
 ## 发布前 Gate
 

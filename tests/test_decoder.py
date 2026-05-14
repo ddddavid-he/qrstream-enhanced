@@ -6,6 +6,7 @@ import zlib
 import numpy as np
 import pytest
 
+from qrstream import decoder as dec_mod
 from qrstream.decoder import (
     LTDecoder,
     _analyze_probe_window,
@@ -85,6 +86,30 @@ class TestDecoderOutputPaths:
 
         output_path = tmp_path / "decoded.bin"
         written = decode_blocks_to_file(blocks, str(output_path))
+
+        assert written == len(data)
+        assert output_path.read_bytes() == data
+
+    def test_decode_blocks_to_file_reuses_completed_decoder(self, tmp_path, monkeypatch):
+        data = b"already-decoded" * 20
+        blocksize = 64
+        encoder = LTEncoder(data, blocksize)
+        blocks = [packed for packed, _, _ in encoder.generate_blocks(36)]
+        decoder = LTDecoder()
+        for block in blocks:
+            done, _ = decoder.decode_bytes(block)
+            if done:
+                break
+        assert decoder.is_done()
+
+        def _unexpected_decode(*_args, **_kwargs):
+            raise AssertionError("decode_blocks_to_file should reuse decoder")
+
+        monkeypatch.setattr(dec_mod, "_decode_into_decoder", _unexpected_decode)
+        output_path = tmp_path / "decoded-reused.bin"
+
+        written = decode_blocks_to_file(
+            blocks, str(output_path), decoder=decoder)
 
         assert written == len(data)
         assert output_path.read_bytes() == data

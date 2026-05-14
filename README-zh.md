@@ -19,10 +19,11 @@
 **核心优势**：
 - **LT 喷泉码**：无码率纠删码，天然容忍帧丢失、模糊、遮挡
 - **Base45 + QR Alphanumeric 模式**：RFC 9285 base45 让数据落到 QR 的 alphanumeric 模式（每字符 5.5 bit，byte 模式 8 bit），在同一 QR version 下比 base64 更密、视频更小、编解码更快
-- **zxing-cpp 检测器**：原生 C++ QR 检测器（v0.9 起取代 WeChatQRCode）——释放 GIL 支持真正并行检测，对噪声帧可重入且无崩溃，速度提升 4–10×，检测率持平
+- **zxing-cpp 检测器**：原生 C++ QR 检测器，释放 GIL 支持真正并行检测；相比历史 OpenCV/WeChatQRCode 路径，对噪声帧可重入且无崩溃，速度更快且检测率持平
 - **自适应采样率**：根据检测率和帧重复数自动选择最优采样策略
-- **定向恢复**：首轮扫描后针对缺失块的时间位置精准补扫
+- **定向恢复 + GE 救援**：主扫描后可先运行 GF(2) 高斯消元 checkpoint，提前完成已经满秩但 peeling 卡住的 LT 图；必要时再只补扫缺失 seed 所在的视频片段
 - **低内存路径**：mmap 编码 + 流式写文件解码，支持大文件场景
+- **显示模式**：`qrstream encode` 省略 `-o` 时会将生成的 QR 帧直接传送至内置 Qt 播放器；`--display -o` 会优先保障显示流畅度，同时确保最终生成完整视频文件
 
 ## 安装
 
@@ -64,6 +65,12 @@ qrstream <command> [options]
 uvx qrstream <command> [options]
 ```
 
+### 默认包含 GUI
+
+`qrstream` 默认安装 Qt 显示播放器。省略 `-o` 的编码会直接打开播放器，
+`--display -o` 则会同时提供实时显示和完整视频输出。旧的 `qrstream[gui]`
+extra 仍会被接受，以兼容既有安装脚本，但已不再是必需项。
+
 ### 开发环境安装
 
 ```bash
@@ -74,7 +81,7 @@ uv sync --dev
 ### 系统要求
 
 - Python >= 3.10（已测试 3.10 – 3.14）
-- 依赖：`opencv-contrib-python`, `numpy`, `rich`, `zxing-cpp`
+- 依赖：`opencv-python-headless`, `numpy`, `rich`, `zxing-cpp`, `av`, `PySide6-Essentials`
 
 ## 使用方式
 
@@ -89,16 +96,17 @@ qrstream --version
 ### 编码（文件 → QR 码视频）
 
 ```bash
-qrstream encode <file> -o output.mp4 [options]
+qrstream encode <file> [-o output.mp4] [--display] [options]
 ```
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `<file>` | - | 输入文件路径 |
-| `-o, --output` | **必填** | 输出视频路径 |
+| `-o, --output` | 可选 | 输出视频路径；省略时编码默认进入屏幕显示模式。 |
+| `--display` | - | 直接在内置 GUI 播放器中显示生成的 QR 帧。与 `-o/--output` 同时使用时，优先保障显示流畅度；如后台写入未完成，关闭显示窗口后会继续完成剩余视频输出。 |
 | `--overhead` | `2.0` | 编码冗余倍率（源块数的倍数） |
 | `--fps` | `10` | 输出视频帧率 |
-| `--ec-level` | `1` | **已废弃**（v0.9 起隐藏，v0.10.0 将移除）：QR 纠错等级。在 qrstream 管线中实际多余——帧丢失已由 LT `--overhead` 处理。旧脚本可继续使用，但建议停止设置此参数。 |
+| `--ec-level` | `1` | **已废弃并隐藏**：QR 纠错等级。在 qrstream 管线中实际多余——帧丢失已由 LT `--overhead` 处理。旧脚本在废弃窗口内仍可继续使用，但建议停止设置此参数。 |
 | `--qr-version` | `25` | QR 码版本 1-40（越大密度越高） |
 | `--border` | 标准 4 模块静区 | 静区宽度，按 QR 内容宽度百分比计算（`--border 10` = 10%，`--border 0` 可关闭） |
 | `--lead-in-seconds` | `0.0` | 在首个 QR 帧前插入白色引导帧，便于开始录屏 |
@@ -106,6 +114,7 @@ qrstream encode <file> -o output.mp4 [options]
 | `--force-compress` | - | 对大文件的 V3 编码强制整体压缩（会占用更多内存） |
 | `--qr-mode` | `alphanumeric` | QR 载荷编码：`alphanumeric`（base45，默认，更密）或 `base64`（byte 模式，fallback） |
 | `--legacy-qr` | - | 仅作 CLI 向后兼容保留，不再影响行为 |
+| `--auto-mask` | - | 仅作 CLI 向后兼容保留，不再影响行为（zxing-cpp 会在原生代码中自动评估全部 QR mask） |
 | `--codec` | `h264` | 视频编码器：`h264`（默认，压缩率好）、`mp4v` 或 `mjpeg`（编码更快，文件更大）。qrstream 会显式写入匹配的容器格式，并保留你提供的文件后缀；若后缀看起来不匹配，会给出 warning。 |
 | `-w, --workers` | `1` | QR 生成的并行工作线程数。默认保持为 1，因为完整编码管线通常瓶颈在视频写出阶段，虽然 QR 矩阵生成（`zxingcpp.create_barcode()`）本身是原生 C++、不持 GIL。只有在你的机器上实测确认收益时，才建议手动调大。 |
 | `--output-mode` | `auto` | 进度/状态渲染方式：`auto`（TTY 时 Rich 交互，否则 `log`）、`log`（CI 友好的 `key=value` 追加行）、`quiet`（仅输出错误和最终路径）、`verbose`（完整诊断输出） |
@@ -141,6 +150,12 @@ qrstream encode data.bin -o data.mp4 --qr-version 20
 # 录屏场景：加大静区 + 预留白屏起录
 qrstream encode slides.zip -o slides.mp4 --border 10 --lead-in-seconds 1.5
 
+# 直接显示 QR 帧；省略 -o 时默认进入显示模式
+qrstream encode data.zip
+
+# 直接显示 QR 帧；如后台写入未完成，关闭窗口后继续完成视频输出
+qrstream encode data.zip --display -o data.mp4
+
 # CI 场景：log 模式解码
 qrstream decode recording.mov -o out.bin --output-mode log
 ```
@@ -164,6 +179,12 @@ result = decode_blocks(blocks, verbose=True)
 # 更适合大文件：直接写文件，降低额外内存占用
 written = decode_blocks_to_file(blocks, "recovered.bin", verbose=True)
 print(f"wrote {written} bytes")
+
+# 进阶：复用提取阶段已经完成的 decoder（例如 scan 阶段 GE 已成功）
+blocks, completed_decoder = extract_qr_from_video(
+    "output.mp4", verbose=True, return_decoder=True)
+written = decode_blocks_to_file(
+    blocks, "recovered.bin", decoder=completed_decoder)
 ```
 
 ## 项目结构
@@ -174,22 +195,26 @@ project-root/
 ├── src/qrstream/
 │   ├── cli.py                 # CLI 入口（encode/decode 子命令）
 │   ├── encoder.py             # LT 编码 → QR 帧生成 → MP4 视频写入
-│   ├── decoder.py             # 视频帧提取 → QR 检测 → LT 解码 → 文件重建
-│   ├── lt_codec.py            # LT 喷泉码原语（PRNG、RSD、BlockGraph）
+│   ├── decoder.py             # 视频帧提取 → QR 检测 → LT 解码/GE 救援 → 文件重建
+│   ├── lt_codec.py            # LT 喷泉码原语（PRNG、RSD、BlockGraph、GF(2) 救援）
 │   ├── protocol.py            # V3 协议序列化 + base45 编解码（解码端兼容旧版 base64/COBS）
-│   └── qr_utils.py            # QR 生成 + 检测（zxing-cpp）
+│   ├── qr_utils.py            # QR 生成 + 检测（zxing-cpp）
+│   ├── display_cache.py       # 有界显示模式帧缓存
+│   └── display_player*.py     # 可选 Qt 显示模式播放器
 ├── tests/
 │   ├── test_lt_codec.py       # LT 编解码器单元测试
 │   ├── test_protocol.py       # V3 协议 + base45 测试
-│   ├── test_roundtrip.py      # 端到端回环测试
-│   ├── test_qr_generate.py    # QR 生成正确性 + glog(0) 回归测试
+│   ├── test_gaussian_rescue.py # GE 救援 fallback 测试
+│   ├── test_roundtrip.py      # 纯 LT codec 回环测试（不含视频 I/O）
+│   ├── test_qr_generate*.py   # QR 生成正确性 + mask/glog 回归测试
 │   ├── test_e2e_encode_decode.py  # 完整编码→视频→解码 SHA256 验证
+│   ├── test_display_*.py      # 可选显示模式缓存/播放器测试
 │   └── test_optimizations.py  # 性能优化 + zxing-cpp + legacy fallback 测试
 └── dev/
     ├── benchmark.py           # 性能基准测试
     ├── perf-profile/          # cProfile 热点分析脚本
     ├── test-container/        # Podman 测试容器
-    └── wechatqrcode-mnn-poc/  # 历史 WeChatQRCode MNN 加速 POC（已归档）
+    └── DESIGN-*.md / DISCOVERY-*.md  # 设计记录与调研文档
 ```
 
 ## 技术细节
@@ -235,9 +260,10 @@ Base45（RFC 9285）成为默认是因为 QR 的 alphanumeric 模式每字符承
 
 1. **探测阶段**：在视频中段的 3 个分散窗口中采样（默认每窗 120 帧），分别测量检测率和重复度，并取最保守的 `sample_rate`；完成时以 `Probe` + `Plan` 两行分别展示观测指标与决策参数
 2. **主扫描**：按自适应采样率并行检测 QR 码，实时喂入 LT 解码器，`Scan` 行展示视频进度 / ETA / 检测率，`File` 行实时刷新块地图与 `N/K blocks` 计数
-3. **定向恢复**：若首轮未恢复完整，定位缺失 seed 对应的视频时间段精准补扫
-4. **LT 解码**：信念传播（peeling）算法恢复所有源块
-5. **输出写回**：按序写回恢复块；压缩模式下使用增量解压
+3. **GE checkpoint**：若主扫描后 peeling 卡住，先对已累积的 LT 方程运行 GF(2) Gauss-Jordan 救援；如果方程已经覆盖全部缺失源块，则直接完成解码，并复用该 decoder 写文件
+4. **定向恢复**：若 GE 秩不足，则基于已观测的 (seed, frame) 关系定位缺失 seed 对应的视频时间段精准补扫；每个 recovery level 新增 unique block 后，升级到下一层前会再尝试一次 GE checkpoint
+5. **LT 解码 fallback**：仅传入 raw blocks 的编程接口仍保留最终的 peeling + GE rescue 兜底
+6. **输出写回**：按序写回恢复块；压缩模式下使用增量解压
 
 ### LT 喷泉码参数
 
@@ -246,19 +272,19 @@ Base45（RFC 9285）成为默认是因为 QR 的 alphanumeric 模式每字符承
 | 度分布 | Robust Soliton Distribution | c=0.1, delta=0.5 |
 | PRNG | SplitMix64 混淆 + LCG (a=16807, m=2^31-1) | 非线性种子混淆消除序列种子相关性 |
 | XOR | numpy 向量化 + 原地操作 | 比纯 Python 快 10-50x |
-| 解码 | Belief Propagation (Peeling) | 基于二部图的迭代消元 |
+| 解码 | Belief Propagation (Peeling) + GF(2) GE rescue | Peeling 是快速路径；Gauss-Jordan checkpoint 可恢复卡住但满秩的 LT 图 |
 
 ## 测试
 
 ```bash
-# 单元测试（默认，不含视频 I/O，速度快）
-uv run pytest tests/ -v
+# 默认测试集（速度快；pyproject.toml 默认排除 slow 和 e2e marker）
+uv run pytest
 
-# 端到端编码→视频→解码测试（10 KB、100 KB、500 KB + glog 回归）
-uv run pytest -m e2e -v
+# 端到端编码→视频→解码测试
+uv run pytest -m e2e
 
 # 真实手机录像测试（需要 fixture 视频文件）
-uv run pytest -m slow -v
+uv run pytest -m slow
 ```
 
 ### 工具命令

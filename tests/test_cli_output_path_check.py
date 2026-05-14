@@ -26,6 +26,13 @@ from qrstream.cli import (
 )
 
 
+def _skip_if_mode_bits_are_not_enforced():
+    if os.name == "nt":
+        pytest.skip("Windows does not enforce POSIX chmod write bits")
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root bypasses file-mode permission checks")
+
+
 # ── _check_output_path_writable ────────────────────────────────
 
 
@@ -48,11 +55,10 @@ class TestOutputPathCheck:
         assert "does not exist" in msg
 
     def test_parent_directory_not_writable(self, tmp_path):
-        # Create a directory and drop its write bits.  Root
-        # bypasses permission checks entirely so we skip under
-        # root (CI containers sometimes run as root).
-        if os.geteuid() == 0:
-            pytest.skip("root bypasses file-mode permission checks")
+        # Create a directory and drop its write bits.  This uses
+        # POSIX mode semantics, so skip where those bits are not
+        # enforced for the current process.
+        _skip_if_mode_bits_are_not_enforced()
         ro = tmp_path / "ro"
         ro.mkdir()
         ro.chmod(stat.S_IRUSR | stat.S_IXUSR)  # r-x, no write
@@ -72,8 +78,7 @@ class TestOutputPathCheck:
         assert "existing directory" in msg
 
     def test_existing_readonly_file_is_rejected(self, tmp_path):
-        if os.geteuid() == 0:
-            pytest.skip("root bypasses file-mode permission checks")
+        _skip_if_mode_bits_are_not_enforced()
         out = tmp_path / "out.bin"
         out.write_bytes(b"old")
         out.chmod(stat.S_IRUSR)  # read-only for owner
@@ -210,10 +215,12 @@ class TestCmdEncodeGate:
         assert "kw" in called
         assert "video" not in called
         assert called["kw"]["input_path"] == str(src)
+        assert called["kw"]["output_path"] is None
 
-    def test_encode_rejects_display_with_output(
-            self, tmp_path, capsys, monkeypatch):
+    def test_encode_display_with_output_saves_after_display(
+            self, tmp_path, monkeypatch):
         src = tmp_path / "src.bin"
+        out = tmp_path / "out.mp4"
         src.write_bytes(b"hello")
 
         called: dict = {}
@@ -229,30 +236,39 @@ class TestCmdEncodeGate:
 
         parser = build_parser()
         args = parser.parse_args([
-            "encode", str(src), "--display", "-o", str(tmp_path / "out.mp4"),
+            "encode", str(src), "--display", "-o", str(out),
         ])
+        cmd_encode(args)
 
-        with pytest.raises(SystemExit) as exc_info:
-            cmd_encode(args)
-        assert exc_info.value.code == 2
+        assert "display" in called
+        assert "video" not in called
+        assert called["display"]["output_path"] == str(out)
+        assert called["display"]["codec"] == "h264"
+        assert called["display"]["report_display_done"] is False
 
-        captured = capsys.readouterr()
-        assert "--display cannot be used together" in captured.err
-        assert not called
-
-    def test_encode_requires_output_or_display(self, tmp_path, capsys):
+    def test_encode_without_output_defaults_to_display(
+            self, tmp_path, monkeypatch):
         src = tmp_path / "src.bin"
         src.write_bytes(b"hello")
 
+        called: dict = {}
+        import qrstream.encoder as enc_mod
+        monkeypatch.setattr(
+            enc_mod, "encode_to_display",
+            lambda **kw: called.setdefault("display", kw),
+        )
+        monkeypatch.setattr(
+            enc_mod, "encode_to_video",
+            lambda **kw: called.setdefault("video", kw),
+        )
+
         parser = build_parser()
         args = parser.parse_args(["encode", str(src)])
+        cmd_encode(args)
 
-        with pytest.raises(SystemExit) as exc_info:
-            cmd_encode(args)
-        assert exc_info.value.code == 2
-
-        captured = capsys.readouterr()
-        assert "specify -o/--output or --display" in captured.err
+        assert "display" in called
+        assert "video" not in called
+        assert called["display"]["output_path"] is None
 
 
 class TestCmdDecodeGate:
@@ -291,8 +307,7 @@ class TestCmdDecodeGate:
 
     def test_decode_fails_fast_on_readonly_file(
             self, tmp_path, capsys, monkeypatch):
-        if os.geteuid() == 0:
-            pytest.skip("root bypasses file-mode permission checks")
+        _skip_if_mode_bits_are_not_enforced()
         video = tmp_path / "in.mp4"
         video.write_bytes(b"not really a video")
         out = tmp_path / "out.bin"

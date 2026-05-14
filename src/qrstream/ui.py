@@ -521,6 +521,9 @@ class ProgressReporter(Protocol):
                        current_range: tuple[int, int] | None) -> None: ...
     def recover_done(self) -> None: ...
 
+    def ge_start(self, *, stage: str, recovered: int, k: int) -> None: ...
+    def ge_done(self, *, success: bool, recovered: int, k: int) -> None: ...
+
     def save_done(self, *, output_path: str, bytes_written: int) -> None: ...
 
     # Encode
@@ -635,6 +638,8 @@ class QuietReporter:
     def recover_start(self, **_kw) -> None: return
     def recover_update(self, **_kw) -> None: return
     def recover_done(self) -> None: return
+    def ge_start(self, **_kw) -> None: return
+    def ge_done(self, **_kw) -> None: return
 
     def save_done(self, *, output_path: str, bytes_written: int) -> None:
         self._write(f"Saved: {output_path} ({_fmt_size(bytes_written)})")
@@ -821,6 +826,15 @@ class LogReporter:
 
     def recover_done(self) -> None:
         self._write_line(phase="recover", status="done")
+
+    def ge_start(self, *, stage: str, recovered: int, k: int) -> None:
+        self._write_line(phase="ge", status="start", stage=stage,
+                         recovered=recovered, total=k)
+
+    def ge_done(self, *, success: bool, recovered: int, k: int) -> None:
+        self._write_line(phase="ge", status="done",
+                         result="success" if success else "incomplete",
+                         recovered=recovered, total=k)
 
     def save_done(self, *, output_path: str, bytes_written: int) -> None:
         self._write_line(phase="save", status="done",
@@ -1381,6 +1395,8 @@ class RichReporter:
         self._recover_scanned: list[tuple[int, int]] = []
         self._probe_spinner_progress: Progress | None = None
         self._probe_task_id: int | None = None
+        self._ge_spinner_progress: Progress | None = None
+        self._ge_task_id: int | None = None
         # Scan ETA/fps timing state.
         self._scan_started_at: float = 0.0
         self._scan_total_frames: int = 0
@@ -1806,6 +1822,46 @@ class RichReporter:
             except Exception:
                 pass
         self._stop_live()
+
+    # ── decode: GE rescue ─────────────────────────────────────
+    def ge_start(self, *, stage: str, recovered: int, k: int) -> None:
+        self._stop_live()
+        self._ge_spinner_progress = Progress(
+            SpinnerColumn(style="magenta"),
+            TextColumn(
+                f"[bold magenta]{_pad_status_label('GE')}[/bold magenta]"
+            ),
+            TextColumn("[magenta]{task.description}[/magenta]"),
+            console=self._console,
+            transient=True,
+        )
+        self._ge_task_id = self._ge_spinner_progress.add_task(
+            f"solving stalled LT graph ({recovered}/{k} blocks)",
+            total=None,
+        )
+        self._live = Live(
+            self._ge_spinner_progress,
+            console=self._console,
+            refresh_per_second=12,
+            transient=True,
+        )
+        self._live.start()
+
+    def ge_done(self, *, success: bool, recovered: int, k: int) -> None:
+        self._stop_live()
+        self._ge_spinner_progress = None
+        self._ge_task_id = None
+        if success:
+            self._console.print(
+                f"[bold magenta]{_pad_status_label('GE')}[/bold magenta] "
+                f"[green]✓[/green]  recovered {recovered}/{k} blocks"
+            )
+        else:
+            self._console.print(
+                f"[bold magenta]{_pad_status_label('GE')}[/bold magenta] "
+                f"[dim]· rank insufficient, continue recovery "
+                f"({recovered}/{k} blocks)[/dim]"
+            )
 
     # ── save ──────────────────────────────────────────────────
     def save_done(self, *, output_path: str, bytes_written: int) -> None:
