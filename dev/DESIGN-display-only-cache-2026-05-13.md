@@ -1,40 +1,36 @@
 # `qrs encode --display` 第一版设计方案
 
-状态：待审阅；本文档仅整理方案，审阅通过后再开始实现。
+状态：已实现；第一版 display-only 设计已落地，后续已扩展支持 `--display -o` 的显示优先输出模式。
 
 当前工作分支：`feature/display-mode`，按 `BRANCHING.md` 从 `dev` 拉出。
 
 ## 目标
 
-1. 让 `qrs encode --display` 成为真正的 display-only 编码播放模式。
-2. 第一版禁止 `--display` 与 `-o/--output` 同时使用。
-3. `--display` 模式不写最终视频文件，不读正在写入或已写完的 MP4。
+1. 让 `qrs encode --display` 成为真正的 display 编码播放模式。
+2. 支持 `--display` 与 `-o/--output` 同时使用：优先保障屏幕显示流畅度，同时最终完成输出视频。
+3. 纯 `--display` 模式不写最终视频文件，不读正在写入或已写完的 MP4。
 4. 将编码、QR module 渲染、缓存、播放统一在同一流程中完成。
 5. 当 module 生成/渲染速度不足以支撑目标播放帧率且缓存不足时，不允许播放，避免录屏卡顿。
 6. 使用紧凑 module-level 缓存，避免缓存完整 BGR 像素帧。
 
 ## 非目标
 
-1. 第一版不支持 `--display + -o/--output`。
-2. 第一版不做视频文件边写边读。
-3. 第一版不做普通视频 GOP/keyframe 缓存；QR 帧天然独立，不需要视频关键帧模型。
-4. 第一版不优先支持复杂编辑/拖拽时间轴；以稳定播放和录屏友好为主。
+1. 不做视频文件边写边读；display 播放直接消费 module-frame cache。
+2. 不做普通视频 GOP/keyframe 缓存；QR 帧天然独立，不需要视频关键帧模型。
+3. 不优先支持复杂编辑/拖拽时间轴；以稳定播放和录屏友好为主。
 
 ## CLI 行为
 
-| 命令 | 第一版行为 |
+| 命令 | 当前行为 |
 |---|---|
-| `qrs encode input.bin -o out.mp4` | 保持现有行为，生成视频文件 |
+| `qrs encode input.bin -o out.mp4` | 生成视频文件，不打开显示窗口 |
 | `qrs encode input.bin --display` | display-only：编码、缓存、播放，不生成最终文件 |
-| `qrs encode input.bin -o out.mp4 --display` | 报错，禁止共用 |
-| `qrs encode input.bin` | 报错，必须指定 `-o` 或 `--display` |
+| `qrs encode input.bin -o out.mp4 --display` | 显示优先：生成和播放 QR 帧时尽量进行后台视频写入；如果写入进度低于生成进度，或用户提前关闭窗口，关闭后继续完成 `out.mp4` 的剩余输出 |
+| `qrs encode input.bin` | 省略 `-o` 时默认进入 display-only 模式 |
 
-建议错误信息：
-
-```text
---display cannot be used together with -o/--output yet.
-TODO: future versions may support generating the final video from display cache after encoding completes.
-```
+`--display -o` 不强制保留完整 display cache；大文件仍按 `ModuleFrameCache`
+的 full/window 规划控制内存。输出文件写入使用临时文件，完整成功后再替换到
+目标路径。
 
 ## 总体流水线
 
@@ -239,7 +235,7 @@ unpack_module_frame(packed, module_side) -> np.ndarray
 
 ### `src/qrstream/encoder.py`
 
-新增 display-only 编码入口或复用现有 LT block 生成逻辑：
+新增 display 编码入口或复用现有 LT block 生成逻辑：
 
 ```text
 encode_to_display(...)
@@ -251,31 +247,34 @@ encode_to_display(...)
 - 调用 module 渲染。
 - 写入 `ModuleFrameCache`。
 - 与 player 协调 producer 状态。
+- 当提供 `output_path` 时，使用显示优先的后台 sink 尽量实时写入视频；写入进度低于生成进度或窗口提前关闭后，继续重新生成缺失帧并完成剩余输出。
 
 ### `src/qrstream/cli.py`
 
-调整 `encode` 参数校验：
+调整 `encode` 参数语义：
 
-- `-o/--output` 从 argparse required 改为运行期条件校验。
-- `--display` 与 `-o/--output` 同时出现时报错。
-- 两者都不存在时报错。
+- `-o/--output` 保持可选。
+- 仅 `-o/--output`：普通视频输出路径。
+- 仅 `--display` 或未指定 `-o/--output`：进入 display-only 路径。
+- `--display + -o/--output`：进入显示优先输出路径，最终必须生成完整视频。
 
-## 未来 TODO：兼容 `--display + -o`
+## `--display + -o` 兼容方案
 
-未来版本可以支持：
+支持：
 
 ```text
 qrs encode input.bin --display -o out.mp4
 ```
 
-但实现方式应为：
+实现方式：
 
-1. display 阶段继续使用 module cache。
-2. 编码/缓存完成后，从 module cache 统一生成最终视频文件。
-3. 不读取正在写入的 MP4。
-4. 不在 display 过程中维护大规模或持久化的完整 BGR frame cache；播放层可保留受 `64 MiB` 限制的临时 presentation cache。
+1. display 阶段继续使用 module cache，并允许大文件走 window cache。
+2. 每生成一帧 module image 后，非阻塞地投递给有界后台视频写入队列。
+3. 如果写入线程吞吐低于帧生成速率，停止实时投递后续帧，避免反压 display。
+4. 窗口关闭后，从已写前缀之后继续重新生成缺失帧并完成临时视频文件的剩余写入。
+5. 不读取正在写入的 MP4；成功完整 flush 后再用 `os.replace()` 替换目标路径。
 
-这样可以保持 display 体验，同时避免边写边读视频文件带来的不稳定性。
+这样可以保持 display 体验，同时避免完整 cache 导致内存占用不可控，或边写边读视频文件带来的不稳定性。
 
 ## 后续 TODO
 
@@ -283,11 +282,7 @@ qrs encode input.bin --display -o out.mp4
    - 状态信息继续避免遮挡 QR 区域。
    - 优化播放控制提示、进度条、当前帧/总帧展示。
    - 评估更适合录屏场景的默认窗口尺寸、缩放策略和快捷键布局。
-2. 实现 `--display + -o/--output` 兼容：
-   - display 阶段继续使用 module cache。
-   - 编码/缓存完成后，从缓存统一生成最终视频文件。
-   - 不读取正在写入的 MP4。
-3. 对 `64 MiB` presentation cache、`128 MiB / 192 MiB` module cache 阈值做实际 benchmark，再决定默认值。
+2. 对 `64 MiB` presentation cache、`128 MiB / 192 MiB` module cache 阈值做实际 benchmark，再决定默认值。
 
 ## 测试计划
 
@@ -295,10 +290,10 @@ qrs encode input.bin --display -o out.mp4
 
 建议覆盖：
 
-1. CLI 参数校验：
-   - `--display + -o` 报错。
-   - 无 `--display` 且无 `-o` 报错。
-   - 仅 `-o` 保持现有行为。
+1. CLI 参数语义：
+   - `--display + -o` 进入显示优先输出路径，最终生成完整视频。
+   - 无 `--display` 且无 `-o` 时默认进入 display-only 路径。
+   - 仅 `-o` 保持普通视频输出行为。
    - 仅 `--display` 进入 display-only 路径。
 2. module 渲染：
    - module side 正确。
@@ -318,19 +313,20 @@ qrs encode input.bin --display -o out.mp4
 
 ## 实现顺序建议
 
-1. CLI 参数语义调整，先保护第一版边界。
+1. CLI 参数语义调整。
 2. 增加 module 渲染与 bit-pack/unpack 单元测试。
 3. 实现 `ModuleFrameCache`。
-4. 实现 display-only producer。
-5. 实现 OpenCV player 与播放 gating。
-6. 用 podman 跑单元测试与现有关键回归。
+4. 实现 display producer。
+5. 实现 Qt player 与播放 gating。
+6. 实现 `--display -o` 的显示优先后台写入与剩余输出完成逻辑。
+7. 跑单元测试与现有关键回归。
 
 ## 审阅关注点
 
 请重点确认：
 
-1. 第一版是否只实现 display-only，不兼容 `-o`。
+1. `--display -o` 的视频写入是否应始终不能反压 display producer。
 2. module cache 的 `128 MiB / 192 MiB / 1h` 阈值，以及 presentation cache 暂定 `64 MiB` 上限是否合适；这些数值均需实际测试后再定。
-3. window cache 是否需要第一版完整实现，还是先在超阈值时提示用户降低参数或等待全量缓存。
+3. window cache 是否需要进一步优化 seek/回放体验。
 4. 播放按键和 UI overlay 是否需要更明确的交互规格。
-5. 是否接受新增 `display_cache.py` 与 `display_player.py` 两个模块。
+5. `display_cache.py`、`display_player.py` 与 Qt 播放器模块边界是否清晰。

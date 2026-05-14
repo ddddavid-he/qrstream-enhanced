@@ -4,12 +4,13 @@ LT Fountain Code Encoder: file → LT encoded blocks → QR frames → video.
 
 import mmap
 import os
+import tempfile
 import time
 import zlib
 from itertools import repeat
 from math import ceil
-from queue import Queue
-from threading import Event, Thread
+from queue import Full, Queue
+from threading import Event, Lock, Thread
 from concurrent.futures import ThreadPoolExecutor
 
 from ._compat import suppress_native_stderr
@@ -28,7 +29,12 @@ from .protocol import (
     auto_blocksize,
     pack_v3,
 )
-from .display_cache import ModuleFrameCache, pack_module_image, plan_module_cache
+from .display_cache import (
+    ModuleFrameCache,
+    pack_module_image,
+    plan_module_cache,
+    unpack_module_frame,
+)
 from .display_player import DisplayProducerState
 from .display_player_qt import (
     DisplayMetadata,
@@ -242,6 +248,169 @@ def _resolve_border_modules(qr_version: int, border: float | None) -> float:
     if border is None:
         return 4.0
     return round((qr_version - 1) * 4 + 21) * border / 100.0
+
+
+class _DisplayVideoSink:
+    """Best-effort realtime writer for ``--display -o``.
+
+    ``offer`` never blocks display production.  If the bounded queue fills,
+    realtime writing is deferred; ``finalize`` then regenerates all missing
+    frames and still produces a complete output file.
+    """
+
+    def __init__(self, output_path: str, fps: int, codec: str,
+                 module_side: int, reporter: ProgressReporter,
+                 box_size: int = 10, queue_frames: int | None = None):
+        codec_info = _PYAV_CODEC_MAP.get(codec)
+        if codec_info is None:
+            raise ValueError(
+                f"Unsupported codec: {codec!r}. Choose from: {list(_PYAV_CODEC_MAP)}"
+            )
+        pyav_codec, pix_fmt, _default_ext, stream_opts = codec_info
+        container_format = _PYAV_CONTAINER_FORMAT[codec]
+        _warn_if_output_extension_mismatches_codec(output_path, codec, reporter)
+
+        parent = os.path.dirname(os.path.abspath(output_path)) or "."
+        prefix = f".{os.path.basename(output_path)}."
+        tmp = tempfile.NamedTemporaryFile(
+            prefix=prefix, suffix=".tmp", dir=parent, delete=False)
+        tmp.close()
+
+        self.output_path = output_path
+        self.tmp_path = tmp.name
+        self.reporter = reporter
+        self.module_side = module_side
+        self.side = module_side * max(1, int(box_size))
+        self.total_written = 0
+        self.deferred_from: int | None = None
+        self._next_offer = 0
+        self._error: list[BaseException] = []
+        self._lock = Lock()
+        self._queue: Queue = Queue(
+            maxsize=max(1, queue_frames or max(128, fps * 4)))
+        self._output = av.open(self.tmp_path, "w", format=container_format)
+        self._stream = self._output.add_stream(pyav_codec, rate=fps)
+        self._stream.width = self.side
+        self._stream.height = self.side
+        self._stream.pix_fmt = pix_fmt
+        if stream_opts:
+            self._stream.options = stream_opts
+        self._thread = Thread(target=self._writer_loop, daemon=True)
+        self._thread.start()
+        self._finalized = False
+
+    def offer(self, frame_index: int, packed_frame) -> bool:
+        with self._lock:
+            if self.deferred_from is not None or self._error:
+                return False
+            if frame_index != self._next_offer:
+                self.deferred_from = min(frame_index, self._next_offer)
+                return False
+        try:
+            self._queue.put_nowait((frame_index, packed_frame.copy()))
+        except Full:
+            with self._lock:
+                if self.deferred_from is None:
+                    self.deferred_from = frame_index
+            return False
+        with self._lock:
+            self._next_offer = frame_index + 1
+        return True
+
+    def _writer_loop(self) -> None:
+        try:
+            while True:
+                item = self._queue.get()
+                if item is None:
+                    return
+                frame_index, packed_frame = item
+                if frame_index != self.total_written:
+                    raise RuntimeError(
+                        f"video writer expected frame {self.total_written}, "
+                        f"got {frame_index}"
+                    )
+                self._write_packed_frame(packed_frame)
+                self.total_written += 1
+        except BaseException as exc:
+            with self._lock:
+                self._error.append(exc)
+
+    def _write_packed_frame(self, packed_frame) -> None:
+        self._write_module_image(
+            unpack_module_frame(packed_frame, self.module_side))
+
+    def _write_module_image(self, module_img) -> None:
+        scaled = cv2.resize(
+            module_img,
+            (self.side, self.side),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        frame = cv2.cvtColor(scaled, cv2.COLOR_GRAY2BGR)
+        frame_av = av.VideoFrame.from_ndarray(frame, format="bgr24")
+        for packet in self._stream.encode(frame_av):
+            self._output.mux(packet)
+
+    def _finish_realtime(self) -> None:
+        while self._thread.is_alive():
+            try:
+                self._queue.put(None, timeout=0.1)
+                break
+            except Full:
+                if self._error:
+                    break
+        self._thread.join()
+        if self._error:
+            raise _WriterFailure("video writer thread failed") from self._error[0]
+
+    def finalize(self, total_frames: int, module_frame_at) -> None:
+        try:
+            self._finish_realtime()
+            start_ts = time.monotonic()
+            last_report_ts = start_ts
+            for frame_index in range(self.total_written, total_frames):
+                module_img = module_frame_at(frame_index)
+                self._write_module_image(module_img)
+                self.total_written = frame_index + 1
+                now = time.monotonic()
+                if now - last_report_ts >= 0.1 or self.total_written == total_frames:
+                    elapsed = max(1e-6, now - start_ts)
+                    self.reporter.encode_update(
+                        progress_pct=(self.total_written / total_frames * 100)
+                        if total_frames else 100.0,
+                        speed_fps=(self.total_written / elapsed),
+                        eta_sec=0.0,
+                    )
+                    last_report_ts = now
+
+            for packet in self._stream.encode():
+                self._output.mux(packet)
+            self._output.close()
+            self._output = None
+            os.replace(self.tmp_path, self.output_path)
+            self._finalized = True
+            output_size = os.path.getsize(self.output_path)
+            self.reporter.encode_done(
+                output_path=self.output_path, size_bytes=output_size)
+        except BaseException:
+            self.discard()
+            raise
+
+    def discard(self) -> None:
+        try:
+            self._finish_realtime()
+        except Exception:
+            pass
+        if self._output is not None:
+            try:
+                self._output.close()
+            except Exception:
+                pass
+            self._output = None
+        if not self._finalized:
+            try:
+                os.unlink(self.tmp_path)
+            except OSError:
+                pass
 
 
 def encode_to_video(input_path: str, output_path: str,
@@ -596,12 +765,18 @@ def encode_to_display(input_path: str,
                       auto_mask: bool = False,
                       reporter: ProgressReporter | None = None,
                       player=None,
-                      _player=None) -> ModuleFrameCache:
-    """Encode a file into a display-only module-frame cache and play it.
+                      _player=None,
+                      output_path: str | None = None,
+                      codec: str = 'h264',
+                      video_queue_frames: int | None = None,
+                      report_display_done: bool = True) -> ModuleFrameCache:
+    """Encode a file into a display module-frame cache and play it.
 
-    No final video file is written. QR frames are rendered at one pixel per
-    module, bit-packed into :class:`ModuleFrameCache`, then upscaled by the
-    display player at presentation time.
+    QR frames are rendered at one pixel per module, bit-packed into
+    :class:`ModuleFrameCache`, then upscaled by the display player at
+    presentation time.  When ``output_path`` is provided, a best-effort
+    realtime writer records frames without blocking display; any missing
+    suffix is regenerated after the display window closes.
     """
     if reporter is None:
         reporter = QuietReporter()
@@ -615,6 +790,7 @@ def encode_to_display(input_path: str,
     payload = None
     producer_thread: Thread | None = None
     producer_error: list[BaseException] = []
+    video_sink = None
     cancel_event = Event()
 
     try:
@@ -678,6 +854,20 @@ def encode_to_display(input_path: str,
         plan = plan_module_cache(total_frames, module_side, fps)
         cache = ModuleFrameCache.from_plan(total_frames, module_side, plan)
         state = DisplayProducerState(total_frames)
+        if output_path is not None:
+            if os.path.abspath(input_path) == os.path.abspath(output_path):
+                raise ValueError(
+                    f"Output path is the same as the input file: {output_path}. "
+                    "Choose a different output path."
+                )
+            video_sink = _DisplayVideoSink(
+                output_path=output_path,
+                fps=fps,
+                codec=codec,
+                module_side=module_side,
+                reporter=reporter,
+                queue_frames=video_queue_frames,
+            )
 
         if workers is None:
             workers = 1
@@ -715,18 +905,49 @@ def encode_to_display(input_path: str,
             )
             last_report_ts[0] = now
 
+        blank_module = np.full((module_side, module_side), 255, dtype=np.uint8)
+
+        def _module_frame_at(frame_index: int):
+            if frame_index < lead_in_frames:
+                return blank_module.copy()
+            block_index = frame_index - lead_in_frames
+            seed = block_index + 1
+            encoder._seq = block_index
+            block_data, seq = encoder.generate_block(seed)
+            packed = pack_v3(
+                filesize=payload_size,
+                blocksize=blocksize,
+                block_count=K,
+                seed=seed,
+                block_seq=seq,
+                data=block_data,
+                compressed=compress,
+                alphanumeric_qr=high_density,
+                prng_version=encoder.prng_version,
+            )
+            return generate_qr_module_image(
+                packed,
+                ec_level=ec_level,
+                border=border_modules,
+                version=qr_version,
+                use_legacy=use_legacy_qr,
+                alphanumeric=high_density,
+                auto_mask=auto_mask,
+            )
+
         def _produce() -> None:
             produced = 0
             start_ts = time.monotonic()
             last_report_ts = [start_ts]
             try:
                 if lead_in_frames:
-                    blank = np.full((module_side, module_side), 255, dtype=np.uint8)
-                    packed_blank = pack_module_image(blank)
+                    packed_blank = pack_module_image(blank_module)
                     for frame_index in range(lead_in_frames):
                         if cancel_event.is_set() or state.cancel_requested():
                             return
                         cache.put_packed(frame_index, packed_blank)
+                        if video_sink is not None:
+                            video_sink.offer(frame_index, packed_blank)
                         produced += 1
                         state.mark_produced()
                     _report_progress(produced, start_ts, last_report_ts)
@@ -757,7 +978,10 @@ def encode_to_display(input_path: str,
                             for module_img in module_imgs:
                                 if cancel_event.is_set() or state.cancel_requested():
                                     return
-                                cache.put_module_image(frame_base, module_img)
+                                packed_frame = pack_module_image(module_img)
+                                cache.put_packed(frame_base, packed_frame)
+                                if video_sink is not None:
+                                    video_sink.offer(frame_base, packed_frame)
                                 frame_base += 1
                                 produced += 1
                                 state.mark_produced()
@@ -776,7 +1000,11 @@ def encode_to_display(input_path: str,
                             alphanumeric=high_density,
                             auto_mask=auto_mask,
                         )
-                        cache.put_module_image(lead_in_frames + offset, module_img)
+                        frame_index = lead_in_frames + offset
+                        packed_frame = pack_module_image(module_img)
+                        cache.put_packed(frame_index, packed_frame)
+                        if video_sink is not None:
+                            video_sink.offer(frame_index, packed_frame)
                         produced += 1
                         state.mark_produced()
                         _report_progress(produced, start_ts, last_report_ts)
@@ -825,13 +1053,19 @@ def encode_to_display(input_path: str,
         if producer_error:
             raise producer_error[0]
 
-        if not state.cancel_requested() and cache.valid_count >= total_frames:
+        if video_sink is not None:
+            video_sink.finalize(total_frames, _module_frame_at)
+            video_sink = None
+        elif (report_display_done and not state.cancel_requested()
+                and cache.valid_count >= total_frames):
             reporter.encode_done(output_path="(display)", size_bytes=0)
         return cache
     finally:
         if producer_thread is not None and producer_thread.is_alive():
             cancel_event.set()
             producer_thread.join()
+        if video_sink is not None:
+            video_sink.discard()
         if payload is not None:
             close = getattr(payload, 'close', None)
             if callable(close):
