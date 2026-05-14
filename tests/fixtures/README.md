@@ -116,9 +116,10 @@ See `tests/test_real_recordings.py`.  The tests are marked
 
 These slow tests run in a **dedicated** GitHub Actions workflow
 (`.github/workflows/real-world-tests.yml`) rather than the per-
-Python-version unit matrix — they exercise OpenCV / WeChatQRCode
-rather than any Python-version-specific logic, so one run per
-architecture on Python 3.13 is sufficient coverage.
+Python-version unit matrix — they exercise native video/QR detection
+(OpenCV frame handling plus zxing-cpp) rather than any Python-version-
+specific logic, so one run per architecture on Python 3.13 is
+sufficient coverage.
 
 Run locally with either::
 
