@@ -23,7 +23,7 @@
 - **自适应采样率**：根据检测率和帧重复数自动选择最优采样策略
 - **定向恢复 + GE 救援**：主扫描后可先运行 GF(2) 高斯消元 checkpoint，提前完成已经满秩但 peeling 卡住的 LT 图；必要时再只补扫缺失 seed 所在的视频片段
 - **低内存路径**：mmap 编码 + 流式写文件解码，支持大文件场景
-- **可选显示模式**：`qrstream encode` 省略 `-o` 时会将生成的 QR 帧直接传送至 Qt 播放器；`--display -o` 会优先保障显示流畅度，同时确保最终生成完整视频文件
+- **显示模式**：`qrstream encode` 省略 `-o` 时会将生成的 QR 帧直接传送至内置 Qt 播放器；`--display -o` 会优先保障显示流畅度，同时确保最终生成完整视频文件
 
 ## 安装
 
@@ -65,15 +65,11 @@ qrstream <command> [options]
 uvx qrstream <command> [options]
 ```
 
-### 可选 GUI 依赖
+### 默认包含 GUI
 
-`encode --display` 和省略 `-o` 的编码会打开 Qt 显示播放器，需要安装可选 GUI extra：
-
-```bash
-pip install "qrstream[gui]"
-# 或
-uv tool install "qrstream[gui]"
-```
+`qrstream` 默认安装 Qt 显示播放器。省略 `-o` 的编码会直接打开播放器，
+`--display -o` 则会同时提供实时显示和完整视频输出。旧的 `qrstream[gui]`
+extra 仍会被接受，以兼容既有安装脚本，但已不再是必需项。
 
 ### 开发环境安装
 
@@ -85,8 +81,7 @@ uv sync --dev
 ### 系统要求
 
 - Python >= 3.10（已测试 3.10 – 3.14）
-- 核心依赖：`opencv-python-headless`, `numpy`, `rich`, `zxing-cpp`, `av`
-- `encode --display` 的可选 GUI 依赖：通过 `qrstream[gui]` 安装 `PySide6-Essentials`
+- 依赖：`opencv-python-headless`, `numpy`, `rich`, `zxing-cpp`, `av`, `PySide6-Essentials`
 
 ## 使用方式
 
@@ -108,7 +103,7 @@ qrstream encode <file> [-o output.mp4] [--display] [options]
 |------|--------|------|
 | `<file>` | - | 输入文件路径 |
 | `-o, --output` | 可选 | 输出视频路径；省略时编码默认进入屏幕显示模式。 |
-| `--display` | - | 直接在 GUI 播放器中显示生成的 QR 帧（需要 `qrstream[gui]`）。与 `-o/--output` 同时使用时，优先保障显示流畅度；如后台写入未完成，关闭显示窗口后会继续完成剩余视频输出。 |
+| `--display` | - | 直接在内置 GUI 播放器中显示生成的 QR 帧。与 `-o/--output` 同时使用时，优先保障显示流畅度；如后台写入未完成，关闭显示窗口后会继续完成剩余视频输出。 |
 | `--overhead` | `2.0` | 编码冗余倍率（源块数的倍数） |
 | `--fps` | `10` | 输出视频帧率 |
 | `--ec-level` | `1` | **已废弃并隐藏**：QR 纠错等级。在 qrstream 管线中实际多余——帧丢失已由 LT `--overhead` 处理。旧脚本在废弃窗口内仍可继续使用，但建议停止设置此参数。 |
@@ -155,7 +150,7 @@ qrstream encode data.bin -o data.mp4 --qr-version 20
 # 录屏场景：加大静区 + 预留白屏起录
 qrstream encode slides.zip -o slides.mp4 --border 10 --lead-in-seconds 1.5
 
-# 直接显示 QR 帧；省略 -o 时默认进入显示模式（需要 qrstream[gui]）
+# 直接显示 QR 帧；省略 -o 时默认进入显示模式
 qrstream encode data.zip
 
 # 直接显示 QR 帧；如后台写入未完成，关闭窗口后继续完成视频输出

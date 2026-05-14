@@ -24,7 +24,7 @@ Encoder                                     Decoder
 - **Adaptive Sample Rate**: Automatically selects optimal sampling strategy based on detection rate and frame repetition
 - **Targeted Recovery + GE Rescue**: After the main scan, the decoder can run a GF(2) Gaussian-elimination checkpoint to finish stalled LT graphs early; if needed, it re-scans only video segments where missing seeds are expected
 - **Low-Memory Paths**: mmap-backed encoding and streaming decode-to-file for large inputs
-- **Optional Display Mode**: `qrstream encode` without `-o` streams generated QR frames directly to a Qt player; `--display -o` prioritises smooth display while still completing the output video
+- **Display Mode**: `qrstream encode` without `-o` streams generated QR frames directly to the built-in Qt player; `--display -o` prioritises smooth display while still completing the output video
 
 ## Installation
 
@@ -66,15 +66,12 @@ For one-off execution without a persistent install:
 uvx qrstream <command> [options]
 ```
 
-### Optional GUI dependencies
+### GUI included by default
 
-`encode --display` and encode without `-o` open a Qt display player and require the optional GUI extra:
-
-```bash
-pip install "qrstream[gui]"
-# or
-uv tool install "qrstream[gui]"
-```
+`qrstream` installs the Qt display player by default.  Encoding without `-o`
+opens the player directly, and `--display -o` combines live display with a
+complete output video.  The legacy `qrstream[gui]` extra remains accepted for
+older install scripts, but it is no longer required.
 
 ### Development Install
 
@@ -86,8 +83,7 @@ uv sync --dev
 ### Requirements
 
 - Python >= 3.10 (3.10 – 3.14 tested)
-- Core dependencies: `opencv-python-headless`, `numpy`, `rich`, `zxing-cpp`, `av`
-- Optional GUI dependency for `encode --display`: `PySide6-Essentials` via `qrstream[gui]`
+- Dependencies: `opencv-python-headless`, `numpy`, `rich`, `zxing-cpp`, `av`, `PySide6-Essentials`
 
 ## Usage
 
@@ -109,7 +105,7 @@ qrstream encode <file> [-o output.mp4] [--display] [options]
 |--------|---------|-------------|
 | `<file>` | - | Input file path |
 | `-o, --output` | optional | Output video path. If omitted, encode defaults to on-screen display. |
-| `--display` | - | Display generated QR frames in a GUI player (requires `qrstream[gui]`). When combined with `-o/--output`, display smoothness is prioritised and the output video is completed after the display window closes if needed. |
+| `--display` | - | Display generated QR frames in the built-in GUI player. When combined with `-o/--output`, display smoothness is prioritised and the output video is completed after the display window closes if needed. |
 | `--overhead` | `2.0` | Encoding redundancy ratio (multiple of source block count) |
 | `--fps` | `10` | Output video frame rate |
 | `--ec-level` | `1` | **Deprecated and hidden**: QR error correction level. Redundant — LT `--overhead` already handles frame loss. Existing scripts continue to work during the deprecation window but should stop using this option. |
@@ -156,7 +152,7 @@ qrstream encode data.bin -o data.mp4 --qr-version 20
 # Add a larger quiet zone and white lead-in before recording
 qrstream encode slides.zip -o slides.mp4 --border 10 --lead-in-seconds 1.5
 
-# Display QR frames directly; omitting -o defaults to display mode (requires qrstream[gui])
+# Display QR frames directly; omitting -o defaults to display mode
 qrstream encode data.zip
 
 # Display QR frames and still save a complete video after display closes if needed

@@ -1,10 +1,8 @@
 """PySide6 playback loop for display-only encoding.
 
 Provides a modern dark-themed player with native timeline scrubber,
-system font rendering, and full keyboard/mouse control.  This module
-is only importable when the ``[gui]`` extras are installed::
-
-    pip install qrstream[gui]
+system font rendering, and full keyboard/mouse control. PySide6 is a
+runtime dependency of the default qrstream package.
 """
 
 from __future__ import annotations
@@ -56,9 +54,11 @@ def require_pyside6() -> None:
     if _PYSIDE6_AVAILABLE:
         return
     raise ImportError(
-        "PySide6 is required for the Qt display player.  "
-        "Install it with:\n\n"
-        "    pip install qrstream[gui]\n\n"
+        "PySide6 is required for the Qt display player and is included "
+        "in the default qrstream package. Reinstall qrstream or install "
+        "PySide6-Essentials directly.\n\n"
+        "    pip install --upgrade qrstream\n"
+        "    pip install PySide6-Essentials\n\n"
         f"Details: {_PYSIDE6_IMPORT_ERROR}"
     )
 
@@ -806,7 +806,7 @@ else:
         """Play cached module frames in a PySide6 window.
 
         Blocks until the user closes the window or the producer finishes.
-        Requires ``qrstream[gui]`` to be installed.
+        Requires PySide6, which is included in the default qrstream package.
         """
         require_pyside6()
 

@@ -454,10 +454,9 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                      help='Output video path (e.g. output.mp4). If omitted, '
                           'encode displays frames on screen.')
     enc.add_argument('--display', action='store_true',
-                     help='Display encoded QR frames in a GUI player. When used '
-                          'with -o, the video is saved after display rendering '
-                          'completes (requires Qt GUI dependencies: '
-                          'pip install qrstream[gui])')
+                     help='Display encoded QR frames in the built-in GUI player. '
+                          'When used with -o, the video is saved after display '
+                          'rendering completes if needed.')
     enc.add_argument('--overhead', type=float, default=2.0,
                      help=f'Ratio of encoded blocks to source blocks '
                           f'(default: 2.0, minimum: {_MIN_OVERHEAD}, '

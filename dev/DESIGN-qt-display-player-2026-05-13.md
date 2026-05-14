@@ -26,7 +26,7 @@
 
 ## 非目标
 
-1. 不做 cv2 播放器的 fallback。PySide6 缺失时直接报错，引导用户安装 `qrstream[gui]`。
+1. 不做 cv2 播放器的 fallback。PySide6 缺失时直接报错，引导用户修复默认安装环境或单独安装 `PySide6-Essentials`。
 2. 第一版不做鼠标滚轮缩放（Qt 支持但优先级低）。
 3. 不做速度控制、循环播放等高级功能 — 留待后续 TODO。
 4. 不替换 `encode_to_video` 路径 — 仅影响 `--display` 模式。
@@ -34,15 +34,15 @@
 ## 依赖策略
 
 ```toml
-[project.optional-dependencies]
-gui = [
+[project]
+dependencies = [
     "PySide6-Essentials>=6.7.0",
 ]
 ```
 
-- `pip install qrstream` → 纯 CLI，`--display` 报错提示安装 `qrstream[gui]`。
-- `pip install qrstream[gui]` → 完整 GUI：PySide6 播放器。
-- 核心依赖 `opencv-python-headless` 不变 — Qt 不需要 OpenCV 的 highgui。
+- `pip install qrstream` → 完整 GUI：PySide6 播放器随默认包安装。
+- `pip install qrstream[gui]` → 兼容旧安装脚本；`gui` extra 现在是 no-op。
+- 核心依赖仍使用 `opencv-python-headless` — Qt 不需要 OpenCV 的 highgui。
 - 不引入 Pillow；module image 直接走 numpy → QImage → QPixmap。
 
 ### 许可证
@@ -242,19 +242,21 @@ except ImportError as exc:
 
 - 错误信息由 `require_pyside6()` 生成，格式清晰：
   ```
-  PySide6 is required for the Qt display player.  Install it with:
+  PySide6 is required for the Qt display player and is included in the default qrstream package.
+  Reinstall qrstream or install PySide6-Essentials directly.
 
-      pip install qrstream[gui]
+      pip install --upgrade qrstream
+      pip install PySide6-Essentials
 
   Details: No module named 'PySide6'
   ```
-- CLI help 已更新：`--display` 说明包含 `(requires Qt GUI dependencies: pip install qrstream[gui])`。
+- CLI help 已更新：`--display` 说明使用内置 GUI 播放器，不再提示安装 extra。
 
 ## 改动清单
 
 | 文件 | 改动 |
 |------|------|
-| `pyproject.toml` | 新增 `[project.optional-dependencies]` — `gui` extra |
+| `pyproject.toml` | 将 `PySide6-Essentials` 加入默认依赖；保留 no-op `gui` extra 兼容旧脚本 |
 | `src/qrstream/display_player_qt.py` | **新建** — PySide6 播放器 (~830 行) |
 | `src/qrstream/encoder.py` | `play_display_cache` → `play_display_qt`；`player` 测试钩子 |
 | `src/qrstream/cli.py` | `--display` help 更新；`ImportError` 捕获 |

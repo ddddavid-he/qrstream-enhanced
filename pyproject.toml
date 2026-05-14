@@ -37,6 +37,7 @@ dependencies = [
     "rich>=13.7.0",
     "zxing-cpp>=3.0.0",
     "av>=17.0.0",
+    "PySide6-Essentials>=6.7.0",
 ]
 
 [project.urls]
@@ -62,9 +63,9 @@ source = "vcs"
 version-file = "src/qrstream/_version.py"
 
 [project.optional-dependencies]
-gui = [
-    "PySide6-Essentials>=6.7.0",
-]
+# Kept as a no-op compatibility extra for users/scripts that still install
+# `qrstream[gui]`; GUI support is now part of the default package.
+gui = []
 
 [dependency-groups]
 dev = [
