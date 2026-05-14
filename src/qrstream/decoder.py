@@ -328,9 +328,15 @@ def _attempt_ge_checkpoint(lt_decoder: LTDecoder,
             k=lt_decoder.K,
         )
 
-    # TODO: Reuse a completed extraction LTDecoder in decode_blocks_to_file()
-    # so a successful scan-phase GE pass is not repeated during final dump.
     return rescued
+
+
+def _format_extraction_result(unique_blocks, lt_decoder: LTDecoder,
+                              return_decoder: bool):
+    if not return_decoder:
+        return unique_blocks
+    completed_decoder = lt_decoder if lt_decoder.is_done() else None
+    return unique_blocks, completed_decoder
 
 
 # ── Video QR extraction (thread pool) ────────────────────────────
@@ -1734,7 +1740,8 @@ def _tracked_read_frames(video_path: str, sample_rate: int,
 def extract_qr_from_video(video_path: str, sample_rate: int = 0,
                            verbose: bool = False, workers: int | None = None,
                            *,
-                           reporter: ProgressReporter | None = None):
+                           reporter: ProgressReporter | None = None,
+                           return_decoder: bool = False):
     """Extract unique QR code payloads from a video file.
 
     Uses an LT decoder internally for early termination: stops scanning
@@ -1753,8 +1760,11 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
             ``None`` a :class:`QuietReporter` is used (no progress
             output) so the function stays side-effect-free for
             programmatic callers.
+        return_decoder: When true, return ``(blocks, decoder)`` where
+            ``decoder`` is the completed extraction decoder when scan-phase
+            peeling/GE already reconstructed the file; otherwise ``None``.
 
-    Returns a list of raw block byte strings.
+    Returns a list of raw block byte strings by default.
     """
     if reporter is None:
         reporter = QuietReporter()
@@ -1841,7 +1851,8 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
                                     f"{probe_count} sampled frames, "
                                     f"{decoded_count} unique blocks"
                                 )
-                            return unique_blocks
+                            return _format_extraction_result(
+                                unique_blocks, lt_decoder, return_decoder)
                     except (ValueError, struct.error):
                         pass
             else:
@@ -1941,7 +1952,8 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
             crop_box=crop_box,
             reporter=reporter)
 
-    return unique_blocks
+    return _format_extraction_result(
+        unique_blocks, lt_decoder, return_decoder)
 
 
 def _estimate_frame_for_seed(seed: int, seed_frame_map: dict[int, int],
@@ -2437,11 +2449,15 @@ def decode_blocks(blocks, verbose=False,
 
 
 def decode_blocks_to_file(blocks, output_path: str, verbose=False,
-                          reporter: ProgressReporter | None = None) -> "int | None":
+                          reporter: ProgressReporter | None = None,
+                          decoder: LTDecoder | None = None) -> "int | None":
     """Decode blocks and write the result directly to a file."""
     if reporter is None:
         reporter = QuietReporter()
-    decoder = _decode_into_decoder(blocks, verbose=verbose, reporter=reporter)
+    if decoder is not None and not decoder.is_done():
+        decoder = None
+    if decoder is None:
+        decoder = _decode_into_decoder(blocks, verbose=verbose, reporter=reporter)
     if decoder is None:
         return None
     try:
