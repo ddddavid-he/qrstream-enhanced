@@ -118,7 +118,7 @@ jobs:
         include:
           - os: windows-latest
             python-version: "3.13"
-            python-architecture: x86
+            python-architecture: x64
 
     steps:
       - name: Check out code

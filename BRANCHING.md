@@ -6,14 +6,14 @@
   - 生产分支 / 发布分支。
   - 合并到 `main` 的变更应当已经在 `dev` 完成集成验证。
   - `push` 到 `main` 时会运行完整验证链：
-    - `test.yml`：Python `3.10` ~ `3.14`，`ubuntu-latest` + `ubuntu-24.04-arm` + `macos-latest`，并额外覆盖 Windows x86 / Python `3.13`
+    - `test.yml`：Python `3.10` ~ `3.14`，`ubuntu-latest` + `ubuntu-24.04-arm` + `macos-latest`，并额外覆盖 Windows x86_64 / Python `3.13`
     - `e2e-encode-decode.yml`
     - `real-world-tests.yml`
 - `dev`
   - 集成分支。
   - 功能开发完成后，优先通过 PR 合入 `dev` 做集成验证。
   - `push` 到 `dev` 时会运行较轻量但完整的验证链：
-    - `test.yml`：Python `3.13`（含 Windows x86 覆盖）
+    - `test.yml`：Python `3.13`（含 Windows x86_64 覆盖）
     - `e2e-encode-decode.yml`
     - `real-world-tests.yml`
 
