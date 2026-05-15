@@ -86,26 +86,26 @@ _VERSION_LADDER_FPS = 10
 
 # ── Preset ladder configurations ────────────────────────────────────
 
-# Version ladders: list of QR version numbers to test.
+# Version ladders: list of QR version numbers to test.  Public presets start
+# at the encode defaults (V25 / 10fps) and explore upward; use ``low`` when the
+# default settings are not detectable on the target channel.
 _VERSION_LADDER_LOW = [5, 8, 10, 12, 15, 17, 20, 22, 25, 28]
-_VERSION_LADDER_FAST = [15, 20, 25, 28, 30, 33, 35, 40]
+_VERSION_LADDER_FAST = [25, 28, 30, 33, 35, 40]
 _VERSION_LADDER_QUICK = _VERSION_LADDER_FAST
-_VERSION_LADDER_STANDARD = [15, 20, 22, 25, 27, 28, 30, 32, 33, 35, 38, 40]
-_VERSION_LADDER_FULL = [
-    15, 17, 20, 22, 23, 25, 26, 27, 28, 29, 30, 32, 33, 35, 38, 40,
-]
+_VERSION_LADDER_STANDARD = [25, 27, 28, 30, 32, 33, 35, 38, 40]
+_VERSION_LADDER_FULL = [25, 26, 27, 28, 29, 30, 32, 33, 35, 38, 40]
 _VERSION_LADDER_THOROUGH = _VERSION_LADDER_FULL
 _VERSION_LADDER_HIGH = [25, 28, 30, 32, 33, 35, 36, 38, 39, 40]
 
 # FPS ladders: list of target frame rates to test.
 _FPS_LADDER_LOW = [5, 6, 8, 10, 12, 15, 18, 20]
-_FPS_LADDER_FAST = [8, 10, 15, 20, 25, 30]
+_FPS_LADDER_FAST = [10, 15, 20, 25, 30, 45, 60]
 _FPS_LADDER_QUICK = _FPS_LADDER_FAST
-_FPS_LADDER_STANDARD = [8, 10, 12, 15, 18, 20, 25, 30]
-_FPS_LADDER_FULL = [5, 8, 9, 10, 12, 14, 15, 18, 22, 30]
+_FPS_LADDER_STANDARD = [10, 12, 15, 18, 20, 25, 30, 45, 60]
+_FPS_LADDER_FULL = [10, 12, 14, 15, 18, 22, 30, 45, 60]
 _FPS_LADDER_THOROUGH = _FPS_LADDER_FULL
 # ``high`` uses a candidate pool filtered by display refresh rate.
-_FPS_CANDIDATES_HIGH = [15, 18, 20, 25, 30, 35, 40, 45, 50, 60, 75, 90, 100, 120]
+_FPS_CANDIDATES_HIGH = [10, 15, 18, 20, 25, 30, 35, 40, 45, 50, 60, 75, 90, 100, 120]
 
 # FPS anchor versions (used to encode QR frames in the FPS segment).
 _FPS_ANCHOR_LOW = 15
@@ -186,6 +186,20 @@ def _canonical_preset_name(preset_name: str) -> str:
     return _PRESET_ALIASES.get(preset_name, preset_name)
 
 
+def _cap_fps_ladder(fps_ladder: list[int], display_hz: int | None,
+                    *, max_fps: int | None = 60) -> list[int]:
+    cap = display_hz or 60
+    if max_fps is not None:
+        cap = min(cap, max_fps)
+    cap = min(cap, 255)
+    capped = [fps for fps in fps_ladder if fps <= cap]
+    if cap >= 10 and cap not in capped:
+        capped.append(cap)
+    if not capped:
+        capped = [min(fps_ladder[0], cap)]
+    return sorted(set(capped))
+
+
 def _frames_for_target_duration(version_ladder: list[int],
                                 fps_ladder: list[int],
                                 target_seconds: float) -> tuple[int, int]:
@@ -245,8 +259,9 @@ def resolve_preset(preset_name: str,
         One of ``"fast"``, ``"standard"``, ``"full"``.  Legacy aliases
         ``"quick"`` and ``"thorough"`` are accepted.
     display_hz:
-        Display refresh rate in Hz (used only by the ``"high"`` preset to
-        cap the FPS ladder).  ``None`` means auto-detect.
+        Display refresh rate in Hz.  ``fast``/``standard``/``full`` cap the
+        FPS ladder at ``min(display_hz, 60)``; ``high`` uses ``display_hz``.
+        ``None`` uses 60.
     """
     canonical_name = _canonical_preset_name(preset_name)
     if canonical_name not in PRESET_IDS:
@@ -259,23 +274,19 @@ def resolve_preset(preset_name: str,
         anchor = _FPS_ANCHOR_LOW
     elif canonical_name == "fast":
         ver = list(_VERSION_LADDER_FAST)
-        fps = list(_FPS_LADDER_FAST)
+        fps = _cap_fps_ladder(_FPS_LADDER_FAST, display_hz)
         anchor = _FPS_ANCHOR_FAST
     elif canonical_name == "standard":
         ver = list(_VERSION_LADDER_STANDARD)
-        fps = list(_FPS_LADDER_STANDARD)
+        fps = _cap_fps_ladder(_FPS_LADDER_STANDARD, display_hz)
         anchor = _FPS_ANCHOR_STANDARD
     elif canonical_name == "full":
         ver = list(_VERSION_LADDER_FULL)
-        fps = list(_FPS_LADDER_FULL)
+        fps = _cap_fps_ladder(_FPS_LADDER_FULL, display_hz)
         anchor = _FPS_ANCHOR_FULL
     elif canonical_name == "high":
         ver = list(_VERSION_LADDER_HIGH)
-        if display_hz is None:
-            display_hz = _get_display_refresh_rate()
-        fps = [f for f in _FPS_CANDIDATES_HIGH if f <= display_hz]
-        if not fps:
-            fps = [_FPS_CANDIDATES_HIGH[0]]  # at least one entry
+        fps = _cap_fps_ladder(_FPS_CANDIDATES_HIGH, display_hz, max_fps=None)
         anchor = _FPS_ANCHOR_HIGH
     else:
         raise ValueError(f"Unknown preset: {preset_name!r}")
@@ -370,11 +381,12 @@ class CalibrationFrame:
 
 # ── Recommendation dataclasses ──────────────────────────────────────
 
-# Recommendation tier definitions.
+# Recommendation tier definitions.  Tiers use cumulative thresholds based on
+# the weakest link of a (QR version, FPS) candidate pair.
 _TIERS = {
-    "safe": {"threshold": 0.98, "safety_margin": 1.30},
-    "balanced": {"threshold": 0.85, "safety_margin": 1.15},
-    "aggressive": {"threshold": 0.70, "safety_margin": 1.05},
+    "safe": {"min_rate": 0.90, "safety_margin": 1.30},
+    "balanced": {"min_rate": 0.80, "safety_margin": 1.15},
+    "aggressive": {"min_rate": 0.70, "safety_margin": 1.05},
 }
 
 #: Detect rate at or above which the boundary is considered excellent.
@@ -399,6 +411,17 @@ class TierRecommendation:
     throughput_bps: float | None = None  # bytes/sec estimate
 
 
+@dataclass(frozen=True)
+class VideoMetadata:
+    """Useful metadata from the captured calibration video."""
+
+    width: int | None = None
+    height: int | None = None
+    fps: float | None = None
+    frame_count: int | None = None
+    duration_seconds: float | None = None
+
+
 @dataclass
 class CalibrationResult:
     """Full calibration analysis output."""
@@ -410,6 +433,7 @@ class CalibrationResult:
     fps_data_reliable: bool
     recommendations: list[TierRecommendation] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
+    video_metadata: VideoMetadata | None = None
 
 
 def _estimate_throughput(qr_version: int, fps: int,
@@ -424,11 +448,41 @@ def _estimate_throughput(qr_version: int, fps: int,
     return capacity * fps / overhead
 
 
+def _rate_in_tier(rate: float, tier_cfg: dict[str, float]) -> bool:
+    return rate >= tier_cfg["min_rate"]
+
+
+def _capture_fps_ceiling(video_metadata: VideoMetadata | None) -> int | None:
+    if video_metadata is None or video_metadata.fps is None:
+        return None
+    if video_metadata.fps <= 0:
+        return None
+    # Phone videos often report 29.97/59.94; treat them as 30/60 ceilings.
+    return max(1, int(video_metadata.fps + 0.5))
+
+
+def _format_video_metadata(video_metadata: VideoMetadata | None) -> str | None:
+    if video_metadata is None:
+        return None
+    parts: list[str] = []
+    if video_metadata.width and video_metadata.height:
+        parts.append(f"{video_metadata.width}x{video_metadata.height}")
+    if video_metadata.fps:
+        parts.append(f"{video_metadata.fps:.2f}fps")
+    if video_metadata.frame_count:
+        parts.append(f"{video_metadata.frame_count} frames")
+    if not parts:
+        return None
+    return " @ ".join(parts[:2]) + (
+        f", {parts[2]}" if len(parts) > 2 else "")
+
+
 def compute_recommendations(
     version_detect_rates: dict[int, float],
     fps_detect_rates: dict[int, float],
     fps_data_reliable: bool,
     preset_name: str,
+    video_metadata: VideoMetadata | None = None,
 ) -> CalibrationResult:
     """Compute three-tier recommendations from raw detect rates.
 
@@ -448,6 +502,10 @@ def compute_recommendations(
 
     # ── Boundary messages ───────────────────────────────────────────
 
+    metadata_text = _format_video_metadata(video_metadata)
+    if metadata_text:
+        messages.append(f"ℹ Capture video: {metadata_text}.")
+
     if version_detect_rates:
         sorted_versions = sorted(version_detect_rates.keys())
         lowest_ver = sorted_versions[0]
@@ -457,14 +515,19 @@ def compute_recommendations(
 
         if lowest_ver_dr < _POOR_THRESHOLD:
             messages.append(
-                f"⚠ Channel quality very poor: V{lowest_ver} detect "
-                f"rate only {lowest_ver_dr:.0%}. Consider reducing distance, "
-                f"improving lighting, or using higher camera resolution."
+                f"⚠ Channel too weak for this preset: V{lowest_ver} "
+                f"detect rate {lowest_ver_dr:.0%}. Retry with "
+                "--precision low or improve capture conditions."
             )
         if highest_ver_dr >= _EXCELLENT_THRESHOLD:
             messages.append(
-                "ℹ Channel quality excellent: all tested versions "
-                "usable. Recommend using max version for best throughput."
+                f"ℹ Channel headroom: V{highest_ver} is usable."
+            )
+        elif (video_metadata and video_metadata.width and video_metadata.height
+              and max(video_metadata.width, video_metadata.height) < 1080
+              and highest_ver >= 35):
+            messages.append(
+                "ℹ Capture resolution may limit high-version QR detection."
             )
 
     if fps_detect_rates and fps_data_reliable:
@@ -481,7 +544,7 @@ def compute_recommendations(
             )
         if highest_fps_dr >= _EXCELLENT_THRESHOLD:
             messages.append(
-                "ℹ Frame capture rate excellent at all tested levels."
+                f"ℹ Capture headroom: {highest_fps}fps is usable."
             )
 
     if not fps_data_reliable:
@@ -507,45 +570,52 @@ def compute_recommendations(
 
     # ── Per-tier selection ──────────────────────────────────────────
 
+    effective_fps_detect_rates = dict(fps_detect_rates)
+    fps_ceiling = _capture_fps_ceiling(video_metadata)
+    if fps_data_reliable and fps_ceiling is not None:
+        filtered = {
+            fps: rate for fps, rate in effective_fps_detect_rates.items()
+            if fps <= fps_ceiling
+        }
+        ignored = sorted(
+            fps for fps in effective_fps_detect_rates if fps > fps_ceiling)
+        if ignored and filtered:
+            messages.append(
+                f"ℹ Capture video is ~{fps_ceiling}fps; ignoring "
+                f"calibration FPS above {fps_ceiling}fps."
+            )
+            effective_fps_detect_rates = filtered
+    if not fps_data_reliable:
+        effective_fps_detect_rates = {10: 0.90}
+
+    best_pair_rate = 0.0
     for tier_name, cfg in _TIERS.items():
-        threshold = cfg["threshold"]
         safety = cfg["safety_margin"]
+        best: tuple[float, float, int, int, float, float, float] | None = None
 
-        # Select max version meeting threshold
-        max_ver = None
-        for v in sorted(version_detect_rates.keys(), reverse=True):
-            if version_detect_rates[v] >= threshold:
-                max_ver = v
-                break
+        for ver, ver_dr in version_detect_rates.items():
+            for fps, fps_dr in effective_fps_detect_rates.items():
+                pair_rate = min(ver_dr, fps_dr)
+                best_pair_rate = max(best_pair_rate, pair_rate)
+                if not _rate_in_tier(pair_rate, cfg):
+                    continue
 
-        # Select max fps meeting threshold
-        max_fps = None
-        if fps_data_reliable:
-            for f in sorted(fps_detect_rates.keys(), reverse=True):
-                if fps_detect_rates[f] >= threshold:
-                    max_fps = f
-                    break
-        else:
-            max_fps = 10  # conservative fallback
+                combined_dr = ver_dr * fps_dr
+                raw_overhead = 1.0 / combined_dr if combined_dr > 0 else 10.0
+                overhead = round(max(raw_overhead * safety, _MIN_OVERHEAD_RQ), 2)
+                throughput = _estimate_throughput(ver, fps, overhead)
+                candidate = (throughput, pair_rate, ver, fps, overhead,
+                             ver_dr, fps_dr)
+                if best is None or candidate > best:
+                    best = candidate
 
-        if max_ver is None or max_fps is None:
+        if best is None:
             recommendations.append(TierRecommendation(
                 tier=tier_name, available=False,
             ))
             continue
 
-        # Compute overhead
-        ver_dr = version_detect_rates[max_ver]
-        fps_dr = (fps_detect_rates.get(max_fps, 0.90)
-                  if fps_data_reliable else 0.90)
-        combined_dr = ver_dr * fps_dr
-        raw_overhead = 1.0 / combined_dr if combined_dr > 0 else 10.0
-        overhead = max(raw_overhead * safety, _MIN_OVERHEAD_RQ)
-        # Round to 2 decimal places for display
-        overhead = round(overhead, 2)
-
-        throughput = _estimate_throughput(max_ver, max_fps, overhead)
-
+        throughput, _pair_rate, max_ver, max_fps, overhead, _ver_dr, _fps_dr = best
         recommendations.append(TierRecommendation(
             tier=tier_name,
             available=True,
@@ -555,11 +625,15 @@ def compute_recommendations(
             throughput_bps=throughput,
         ))
 
-    # Check if safe tier is unavailable
-    if recommendations and not recommendations[0].available:
+    if recommendations and all(not r.available for r in recommendations):
         messages.append(
-            "⚠ Cannot produce reliable recommendation. "
-            "Improve capture conditions and retry."
+            "⚠ Cannot produce reliable recommendation. Retry with "
+            "--precision low or improve capture conditions."
+        )
+    elif recommendations and not recommendations[0].available:
+        messages.append(
+            f"⚠ Safe tier unavailable: best capture stability is "
+            f"{best_pair_rate:.0%}; using lower-confidence recommendations."
         )
 
     return CalibrationResult(
@@ -570,6 +644,7 @@ def compute_recommendations(
         fps_data_reliable=fps_data_reliable,
         recommendations=recommendations,
         messages=messages,
+        video_metadata=video_metadata,
     )
 
 
@@ -689,10 +764,11 @@ def generate_calibration(
         reporter = QuietReporter()
 
     if display:
-        # In display mode, auto-detect Hz for high preset
-        config = resolve_preset(preset_name, display_hz=None)
+        config = resolve_preset(
+            preset_name, display_hz=_get_display_refresh_rate())
     else:
-        config = resolve_preset(preset_name, display_hz=display_hz)
+        config = resolve_preset(
+            preset_name, display_hz=display_hz or 60)
 
     frame_seq = _build_frame_sequence(config)
     total_logical = len(frame_seq)
@@ -971,6 +1047,30 @@ def _generate_display(
 
 # ── Calibration video analysis (decoder side) ───────────────────────
 
+def _extract_video_metadata(video_stream) -> VideoMetadata:
+    fps = None
+    try:
+        if video_stream.average_rate is not None:
+            fps = float(video_stream.average_rate)
+    except (TypeError, ValueError, ZeroDivisionError):
+        fps = None
+
+    duration_seconds = None
+    try:
+        if video_stream.duration is not None and video_stream.time_base is not None:
+            duration_seconds = float(video_stream.duration * video_stream.time_base)
+    except (TypeError, ValueError):
+        duration_seconds = None
+
+    return VideoMetadata(
+        width=getattr(video_stream, "width", None) or None,
+        height=getattr(video_stream, "height", None) or None,
+        fps=fps,
+        frame_count=getattr(video_stream, "frames", None) or None,
+        duration_seconds=duration_seconds,
+    )
+
+
 def analyze_calibration(
     video_path: str,
     workers: int | None = None,
@@ -994,7 +1094,8 @@ def analyze_calibration(
 
     container = av.open(video_path)
     video_stream = container.streams.video[0]
-    total_frames = video_stream.frames or 0
+    video_metadata = _extract_video_metadata(video_stream)
+    total_frames = video_metadata.frame_count or 0
     # If total_frames is 0 (some containers don't report it), progress
     # remains indeterminate until the final completion event.
     reporter.calibrate_analyze_start(total_frames=total_frames)
@@ -1047,6 +1148,14 @@ def analyze_calibration(
         segment=f"{frame_count} frames, {len(decoded_frames)} decoded",
     )
     reporter.calibrate_analyze_done()
+    if video_metadata.frame_count is None:
+        video_metadata = VideoMetadata(
+            width=video_metadata.width,
+            height=video_metadata.height,
+            fps=video_metadata.fps,
+            frame_count=frame_count,
+            duration_seconds=video_metadata.duration_seconds,
+        )
 
     if not decoded_frames:
         return CalibrationResult(
@@ -1056,9 +1165,10 @@ def analyze_calibration(
             fps_detect_rates={},
             fps_data_reliable=False,
             messages=[
-                "⚠ No calibration frames detected. Ensure the video "
-                "contains a valid QRStream calibration sequence."
+                "⚠ No calibration frames detected. Retry with "
+                "--precision low or check the recording."
             ],
+            video_metadata=video_metadata,
         )
 
     # ── Phase 2: Group by segment and step, compute detect rates ────
@@ -1133,6 +1243,7 @@ def analyze_calibration(
         fps_detect_rates=fps_detect_rates,
         fps_data_reliable=fps_data_reliable,
         preset_name=preset_name,
+        video_metadata=video_metadata,
     )
 
     return result
@@ -1151,6 +1262,9 @@ def format_results(result: CalibrationResult) -> str:
     lines.append("=" * 50)
     lines.append(f"  Channel quality : {result.channel_quality.capitalize()}")
     lines.append(f"  Precision       : {result.preset}")
+    video_text = _format_video_metadata(result.video_metadata)
+    if video_text:
+        lines.append(f"  Video           : {video_text}")
     lines.append("")
 
     # Messages / warnings
@@ -1243,6 +1357,9 @@ def render_results(result: CalibrationResult):
         Text(result.channel_quality.capitalize(), style=quality_style),
     )
     summary.add_row("Precision", Text(result.preset, style="bold"))
+    video_text = _format_video_metadata(result.video_metadata)
+    if video_text:
+        summary.add_row("Video", Text(video_text, style="bold"))
 
     parts: list[object] = [summary]
 

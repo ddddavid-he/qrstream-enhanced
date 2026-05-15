@@ -446,8 +446,9 @@ def cmd_calibrate(args):
     mode, reporter = _build_reporter(args)
 
     try:
-        if getattr(args, 'display', False):
-            # Encoder side: display mode
+        if (getattr(args, 'display', False)
+                or (not args.output and not args.input)):
+            # Encoder side: display mode (default when no mode is specified)
             generate_calibration(
                 preset_name=args.precision,
                 display=True,
@@ -614,10 +615,10 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
     cal = subparsers.add_parser(
         'calibrate',
         help='Auto-calibrate channel parameters for optimal encode settings')
-    cal_mode = cal.add_mutually_exclusive_group(required=True)
+    cal_mode = cal.add_mutually_exclusive_group()
     cal_mode.add_argument(
         '--display', action='store_true',
-        help='Play calibration sequence on screen via Qt player')
+        help='Play calibration sequence on screen via Qt player (default)')
     cal_mode.add_argument(
         '-o', '--output', metavar='PATH',
         help='Write calibration video to file (encoder side)')
@@ -626,10 +627,11 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
         help='Analyze a captured calibration video (decoder side)')
     cal.add_argument(
         '--precision',
-        metavar='{fast,standard,full}',
+        metavar='{low,fast,standard,full,high}',
         default='standard',
-        help='Calibration preset: fast (~15s), standard (~30s), '
-             'or full (~60s). Default: standard')
+        help='Calibration preset: low for weak channels; fast (~15s), '
+             'standard (~30s), full (~60s), or high (~60s). '
+             'Default: standard')
     cal.add_argument(
         '--display-hz', type=int, default=None,
         help='Override display refresh rate in Hz for video output mode '

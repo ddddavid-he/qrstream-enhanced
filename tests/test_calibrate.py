@@ -18,6 +18,7 @@ from qrstream.calibrate import (
     SEG_META,
     SEG_VERSION,
     TierRecommendation,
+    VideoMetadata,
     _EXCELLENT_THRESHOLD,
     _FPS_ANCHOR_RELIABILITY_THRESHOLD,
     _MIN_OVERHEAD_RQ,
@@ -159,12 +160,18 @@ class TestPresetConfig:
         for v in cfg.version_ladder:
             assert 1 <= v <= 40, f"{name}: version {v} out of QR range"
 
-    def test_high_preset_fps_capped_by_display_hz(self):
+    def test_non_low_preset_fps_caps_at_min_display_hz_60(self):
+        cfg_50 = resolve_preset("standard", display_hz=50)
+        cfg_120 = resolve_preset("standard", display_hz=120)
+        assert max(cfg_50.fps_ladder) == 50
+        assert max(cfg_120.fps_ladder) == 60
+
+    def test_high_preset_fps_extends_to_display_hz(self):
         cfg_60 = resolve_preset("high", display_hz=60)
-        cfg_120 = resolve_preset("high", display_hz=120)
-        assert max(cfg_60.fps_ladder) <= 60
-        assert max(cfg_120.fps_ladder) <= 120
-        assert len(cfg_120.fps_ladder) >= len(cfg_60.fps_ladder)
+        cfg_144 = resolve_preset("high", display_hz=144)
+        assert max(cfg_60.fps_ladder) == 60
+        assert max(cfg_144.fps_ladder) == 144
+        assert len(cfg_144.fps_ladder) >= len(cfg_60.fps_ladder)
 
     def test_high_preset_fps_at_least_one_entry(self):
         # Even with a very low Hz, should have at least one entry.
@@ -253,25 +260,7 @@ class TestRecommendations:
         return {v: rate for v in versions}
 
     def test_perfect_channel_all_tiers_available(self):
-        """100% detect rate everywhere -> all tiers use max params."""
-        ver_rates = self._make_rates([15, 20, 25, 30, 35, 40], 1.0)
-        fps_rates = self._make_rates([8, 10, 15, 20, 25, 30], 1.0)
-
-        result = compute_recommendations(
-            ver_rates, fps_rates,
-            fps_data_reliable=True,
-            preset_name="standard",
-        )
-        assert result.channel_quality == "excellent"
-        assert len(result.recommendations) == 3
-        for rec in result.recommendations:
-            assert rec.available
-            assert rec.qr_version == 40
-            assert rec.fps == 30
-            assert rec.overhead >= _MIN_OVERHEAD_RQ
-
-    def test_tier_overhead_matches_risk_names(self):
-        """Safe uses more overhead; aggressive uses higher throughput."""
+        """100% detect rate can be recommended for every risk tier."""
         ver_rates = self._make_rates([15, 20, 25, 30, 35, 40], 1.0)
         fps_rates = self._make_rates([8, 10, 15, 20, 25, 30], 1.0)
 
@@ -281,13 +270,50 @@ class TestRecommendations:
             preset_name="standard",
         )
         by_tier = {r.tier: r for r in result.recommendations}
+        assert result.channel_quality == "excellent"
+        assert by_tier["safe"].available
+        assert by_tier["safe"].qr_version == 40
+        assert by_tier["safe"].fps == 30
+        assert by_tier["safe"].overhead >= _MIN_OVERHEAD_RQ
+        assert by_tier["balanced"].available
+        assert by_tier["balanced"].qr_version == 40
+        assert by_tier["balanced"].fps == 30
+        assert by_tier["aggressive"].available
+        assert by_tier["aggressive"].qr_version == 40
+        assert by_tier["aggressive"].fps == 30
 
-        assert (by_tier["safe"].overhead
-                > by_tier["balanced"].overhead
-                > by_tier["aggressive"].overhead)
-        assert (by_tier["safe"].throughput_bps
-                < by_tier["balanced"].throughput_bps
-                < by_tier["aggressive"].throughput_bps)
+    def test_tier_thresholds_are_cumulative(self):
+        """Safe >=90%, balanced >=80%, aggressive >=70%."""
+        ver_rates = {40: 1.0}
+        fps_rates = {10: 0.95, 15: 0.85, 20: 0.75, 25: 0.65}
+
+        result = compute_recommendations(
+            ver_rates, fps_rates,
+            fps_data_reliable=True,
+            preset_name="standard",
+        )
+        by_tier = {r.tier: r for r in result.recommendations}
+
+        assert by_tier["safe"].available
+        assert by_tier["safe"].fps == 10
+        assert by_tier["balanced"].available
+        assert by_tier["balanced"].fps == 15
+        assert by_tier["aggressive"].available
+        assert by_tier["aggressive"].fps == 20
+
+    def test_high_quality_channel_has_all_tiers(self):
+        ver_rates = {40: 1.0}
+        fps_rates = {12: 0.96, 30: 0.83}
+
+        result = compute_recommendations(
+            ver_rates, fps_rates,
+            fps_data_reliable=True,
+            preset_name="standard",
+        )
+        by_tier = {r.tier: r for r in result.recommendations}
+        assert by_tier["safe"].available
+        assert by_tier["balanced"].available
+        assert by_tier["aggressive"].available
 
     def test_poor_channel_safe_unavailable(self):
         """Low detect rates -> safe tier unavailable."""
@@ -304,8 +330,24 @@ class TestRecommendations:
         assert not safe.available
         assert any("Cannot produce reliable" in m for m in result.messages)
 
+    def test_safe_unavailable_but_balanced_available_is_not_fatal(self):
+        ver_rates = {40: 1.0}
+        fps_rates = {15: 0.85}
+
+        result = compute_recommendations(
+            ver_rates, fps_rates,
+            fps_data_reliable=True,
+            preset_name="standard",
+        )
+        by_tier = {r.tier: r for r in result.recommendations}
+        assert not by_tier["safe"].available
+        assert by_tier["balanced"].available
+        assert not any(
+            "Cannot produce reliable" in m for m in result.messages)
+        assert any("Safe tier unavailable" in m for m in result.messages)
+
     def test_excellent_boundary_message(self):
-        """All versions >= 90% -> 'excellent' message."""
+        """All versions >= 90% -> concise headroom message."""
         ver_rates = self._make_rates([15, 20, 25, 30, 35, 40], 0.95)
         fps_rates = self._make_rates([8, 10, 15, 20, 25, 30], 0.95)
 
@@ -314,10 +356,10 @@ class TestRecommendations:
             fps_data_reliable=True,
             preset_name="standard",
         )
-        assert any("excellent" in m.lower() for m in result.messages)
+        assert any("headroom" in m.lower() for m in result.messages)
 
     def test_poor_boundary_message(self):
-        """Lowest version < 70% -> 'very poor' warning."""
+        """Lowest version < 70% -> suggests low precision preset."""
         ver_rates = {15: 0.50, 20: 0.90, 25: 0.95}
         fps_rates = {8: 0.95, 10: 0.90}
 
@@ -326,7 +368,7 @@ class TestRecommendations:
             fps_data_reliable=True,
             preset_name="standard",
         )
-        assert any("very poor" in m.lower() for m in result.messages)
+        assert any("--precision low" in m for m in result.messages)
 
     def test_fps_unreliable_fallback(self):
         """When FPS data unreliable, all tiers use fps=10."""
@@ -384,11 +426,44 @@ class TestRecommendations:
         balanced = next(r for r in result.recommendations if r.tier == "balanced")
         aggressive = next(r for r in result.recommendations if r.tier == "aggressive")
 
-        # Safe uses lower (more reliable) version
         assert safe.available
         assert balanced.available
         assert aggressive.available
         assert safe.qr_version <= balanced.qr_version <= aggressive.qr_version
+
+    def test_video_fps_caps_recommended_fps(self):
+        """Captured video FPS limits recommendable calibration FPS."""
+        ver_rates = {40: 1.0}
+        fps_rates = {30: 0.95, 45: 0.95, 60: 0.95}
+
+        result = compute_recommendations(
+            ver_rates, fps_rates,
+            fps_data_reliable=True,
+            preset_name="standard",
+            video_metadata=VideoMetadata(width=1920, height=1080, fps=29.97),
+        )
+        safe = next(r for r in result.recommendations if r.tier == "safe")
+        assert safe.available
+        assert safe.fps == 30
+        assert any("ignoring calibration FPS above 30fps" in m
+                   for m in result.messages)
+
+    def test_format_includes_video_metadata(self):
+        result = CalibrationResult(
+            preset="standard",
+            channel_quality="excellent",
+            version_detect_rates={40: 1.0},
+            fps_detect_rates={30: 0.95},
+            fps_data_reliable=True,
+            recommendations=[
+                TierRecommendation("safe", True, 40, 30, 1.30, 4000.0),
+            ],
+            video_metadata=VideoMetadata(width=1920, height=1080, fps=29.97),
+        )
+        text = format_results(result)
+        assert "Video" in text
+        assert "1920x1080" in text
+        assert "29.97fps" in text
 
 
 # ── Throughput estimate ─────────────────────────────────────────────
