@@ -1,7 +1,7 @@
 [project]
 name = "qrstream"
 dynamic = ["version"]
-description = "Encode and decode files via QR code video streams using LT fountain codes"
+description = "Encode and decode files via QR code video streams using LT fountain codes and RaptorQ"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -13,6 +13,7 @@ keywords = [
     "fountain-code",
     "lt-code",
     "luby-transform",
+    "raptorq",
     "video-transfer",
     "erasure-code",
     "opencv",
@@ -38,6 +39,7 @@ dependencies = [
     "zxing-cpp>=3.0.0",
     "av>=17.0.0",
     "PySide6-Essentials>=6.7.0",
+    "raptorq>=2.0.0",
 ]
 
 [project.urls]
