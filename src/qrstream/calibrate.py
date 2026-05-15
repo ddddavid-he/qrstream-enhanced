@@ -865,6 +865,53 @@ def _generate_video(
     )
 
 
+class _CalibrationDisplayCache:
+    """Display cache that preserves each QR version's native module grid."""
+
+    def __init__(self, total_frames: int, module_side: int):
+        self.total_frames = total_frames
+        self.module_side = module_side
+        self._frames: list[np.ndarray | None] = [None] * total_frames
+        self._valid_count = 0
+        self._done = False
+
+    @property
+    def valid_count(self) -> int:
+        return self._valid_count
+
+    def put_module_image(self, index: int, module_img: np.ndarray) -> None:
+        if index < 0 or index >= self.total_frames:
+            raise IndexError("frame index out of range")
+        if self._frames[index] is None:
+            self._valid_count += 1
+        self._frames[index] = module_img.copy()
+
+    def has_frame(self, index: int) -> bool:
+        return 0 <= index < self.total_frames and self._frames[index] is not None
+
+    def get_module_image(self, index: int) -> np.ndarray | None:
+        if not self.has_frame(index):
+            return None
+        frame = self._frames[index]
+        return None if frame is None else frame.copy()
+
+    def contiguous_from(self, start_index: int) -> int:
+        if start_index < 0 or start_index >= self.total_frames:
+            return 0
+        count = 0
+        for index in range(start_index, self.total_frames):
+            if self._frames[index] is None:
+                break
+            count += 1
+        return count
+
+    def mark_done(self) -> None:
+        self._done = True
+
+    def is_done(self) -> bool:
+        return self._done
+
+
 def _generate_display(
     config: PresetConfig,
     frame_seq: list[tuple[CalibrationFrame, int, int]],
@@ -881,11 +928,6 @@ def _generate_display(
         play_display_qt,
         require_pyside6,
     )
-    from .display_cache import (
-        ModuleFrameCache,
-        plan_module_cache,
-        pack_module_image,
-    )
     require_pyside6()
 
     # Determine module-frame cache sizing from the largest version.
@@ -895,12 +937,11 @@ def _generate_display(
 
     display_fps = _get_display_refresh_rate()
     total_frames = _presentation_frame_count(frame_seq, display_fps)
-    budget = plan_module_cache(total_frames, modules_side, display_fps)
-    cache = ModuleFrameCache.from_plan(total_frames, modules_side, budget)
+    cache = _CalibrationDisplayCache(total_frames, modules_side)
     state = DisplayProducerState(total_frames)
 
-    # Pre-generate all presentation frames into the cache.  Smaller QR
-    # versions are resized, not padded, so every version fills the window.
+    # Pre-generate all presentation frames while preserving each QR
+    # version's native module grid.  Qt scales to the current display area.
     out_idx = 0
     for cf, qr_ver, target_fps in frame_seq:
         payload_bytes = _calibration_payload(cf, qr_ver)
@@ -911,12 +952,10 @@ def _generate_display(
             version=qr_ver,
             alphanumeric=True,
         )
-        mod_img = _scale_to_fit_square(mod_img, modules_side)
-        packed = pack_module_image(mod_img)
         repeats = _presentation_repeat_count(
             cf.frame_seq, target_fps, display_fps)
         for _ in range(repeats):
-            cache.put_packed(out_idx, packed)
+            cache.put_module_image(out_idx, mod_img)
             state.mark_produced()
             out_idx += 1
     cache.mark_done()
@@ -924,7 +963,9 @@ def _generate_display(
 
     player_config = DisplayPlayerQtConfig(
         title="QRStream Calibration",
-        lock_window_size=True,
+        integer_scale=False,
+        initial_screen_fraction=0.95,
+        ignore_saved_geometry=True,
     )
     play_display_qt(cache, state, display_fps, config=player_config)
     reporter.info("Calibration display complete.")
