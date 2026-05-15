@@ -1984,37 +1984,116 @@ class RichReporter:
         )
 
     # Calibrate ────────────────────────────────────────────────────
-    # Calibrate events reuse the generic info/warn for now; full
-    # Rich progress integration can be added later.
     def calibrate_generate_start(self, *, preset: str,
                                  total_frames: int) -> None:
+        self._stop_live()
         self._console.print(
-            f"[bold]Calibration[/bold]  preset={preset}  "
-            f"frames={total_frames}"
+            f"[bold cyan]Calibrate[/bold cyan]  "
+            f"preset=[bold]{preset}[/bold]  frames=[bold]{total_frames}[/bold]"
         )
+        self._progress = Progress(
+            TextColumn(
+                f"[bold cyan]{_pad_status_label('Calib')}[/bold cyan]"
+            ),
+            BarColumn(bar_width=None, complete_style="cyan",
+                      finished_style="bright_cyan", pulse_style="cyan"),
+            TextColumn("{task.percentage:>3.0f}%"),
+            console=self._console,
+            transient=False,
+        )
+        self._task_id = self._progress.add_task("calibrate", total=1000)
+        self._live = Live(
+            self._progress,
+            console=self._console,
+            refresh_per_second=12,
+            transient=False,
+        )
+        self._live.start()
 
     def calibrate_generate_update(self, *,
                                   progress_pct: float) -> None:
-        pass  # TODO: Rich progress bar for calibration
+        if self._progress is None or self._task_id is None:
+            return
+        try:
+            self._progress.update(
+                self._task_id,
+                completed=max(0.0, min(1000.0, progress_pct * 10.0)),
+            )
+        except Exception:
+            pass
 
     def calibrate_generate_done(self, *,
                                 output_path: str | None) -> None:
+        if self._progress is not None and self._task_id is not None:
+            try:
+                self._progress.update(self._task_id, completed=1000)
+            except Exception:
+                pass
+        self._stop_live()
         target = output_path or "(display)"
         self._console.print(
             f"[bold green]Done[/bold green]   Calibration video: {target}"
         )
 
     def calibrate_analyze_start(self, *, total_frames: int) -> None:
+        self._stop_live()
+        frame_count = total_frames if total_frames > 0 else "?"
         self._console.print(
-            f"[bold]Analyzing[/bold]  calibration video  "
-            f"frames={total_frames}"
+            f"[bold cyan]Analyze[/bold cyan]  calibration video  "
+            f"frames=[bold]{frame_count}[/bold]"
         )
+        pct_column = (TextColumn("{task.percentage:>3.0f}%")
+                      if total_frames > 0 else TextColumn("[cyan]scan[/cyan]"))
+        self._progress = Progress(
+            TextColumn(
+                f"[bold cyan]{_pad_status_label('Analyze')}[/bold cyan]"
+            ),
+            BarColumn(bar_width=None, complete_style="cyan",
+                      finished_style="bright_cyan", pulse_style="cyan"),
+            pct_column,
+            TextColumn("[dim]{task.fields[segment]}[/dim]"),
+            console=self._console,
+            transient=False,
+        )
+        total = 1000 if total_frames > 0 else None
+        self._task_id = self._progress.add_task(
+            "analyze", total=total,
+            segment=f"0/{frame_count} frames, 0 decoded",
+        )
+        self._live = Live(
+            self._progress,
+            console=self._console,
+            refresh_per_second=12,
+            transient=False,
+        )
+        self._live.start()
 
     def calibrate_analyze_update(self, *, progress_pct: float,
                                  segment: str) -> None:
-        pass  # TODO: Rich progress bar for analysis
+        if self._progress is None or self._task_id is None:
+            return
+        try:
+            task = self._progress.tasks[self._task_id]
+            if task.total is None:
+                self._progress.update(self._task_id, segment=segment)
+            else:
+                self._progress.update(
+                    self._task_id,
+                    completed=max(0.0, min(1000.0, progress_pct * 10.0)),
+                    segment=segment,
+                )
+        except Exception:
+            pass
 
     def calibrate_analyze_done(self) -> None:
+        if self._progress is not None and self._task_id is not None:
+            try:
+                task = self._progress.tasks[self._task_id]
+                if task.total is not None:
+                    self._progress.update(self._task_id, completed=1000)
+            except Exception:
+                pass
+        self._stop_live()
         self._console.print(
             "[bold green]Done[/bold green]   Calibration analysis complete"
         )

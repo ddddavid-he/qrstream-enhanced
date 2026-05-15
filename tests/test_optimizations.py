@@ -111,13 +111,13 @@ class TestCli:
     def test_version_flag_prints_package_version(self, capsys):
         parser = build_parser()
         with pytest.raises(SystemExit) as exc_info:
-            parser.parse_args(['-V'])
+            parser.parse_args(['-v'])
         assert exc_info.value.code == 0
         assert capsys.readouterr().out.strip() == f'qrstream {__version__}'
 
     def test_verbose_flag_stays_on_subcommands(self):
         parser = build_parser()
-        args = parser.parse_args(['encode', 'input.bin', '-o', 'out.mp4', '-v'])
+        args = parser.parse_args(['encode', 'input.bin', '-o', 'out.mp4', '-V'])
         assert args.verbose is True
 
     def test_output_mode_defaults_to_auto(self):

@@ -33,6 +33,7 @@ from qrstream.calibrate import (
     format_results,
     resolve_preset,
 )
+from qrstream.overhead_policy import MIN_OVERHEAD_RQ
 from qrstream.protocol import _alphanumeric_byte_capacity
 
 
@@ -269,6 +270,25 @@ class TestRecommendations:
             assert rec.fps == 30
             assert rec.overhead >= _MIN_OVERHEAD_RQ
 
+    def test_tier_overhead_matches_risk_names(self):
+        """Safe uses more overhead; aggressive uses higher throughput."""
+        ver_rates = self._make_rates([15, 20, 25, 30, 35, 40], 1.0)
+        fps_rates = self._make_rates([8, 10, 15, 20, 25, 30], 1.0)
+
+        result = compute_recommendations(
+            ver_rates, fps_rates,
+            fps_data_reliable=True,
+            preset_name="standard",
+        )
+        by_tier = {r.tier: r for r in result.recommendations}
+
+        assert (by_tier["safe"].overhead
+                > by_tier["balanced"].overhead
+                > by_tier["aggressive"].overhead)
+        assert (by_tier["safe"].throughput_bps
+                < by_tier["balanced"].throughput_bps
+                < by_tier["aggressive"].throughput_bps)
+
     def test_poor_channel_safe_unavailable(self):
         """Low detect rates -> safe tier unavailable."""
         ver_rates = {15: 0.60, 20: 0.40, 25: 0.20}
@@ -336,7 +356,8 @@ class TestRecommendations:
         assert tier_names == ["safe", "balanced", "aggressive"]
 
     def test_overhead_never_below_minimum(self):
-        """Even with 100% detect rate, overhead >= _MIN_OVERHEAD_RQ."""
+        """Even with 100% detect rate, overhead >= shared RaptorQ floor."""
+        assert _MIN_OVERHEAD_RQ == MIN_OVERHEAD_RQ == 1.05
         ver_rates = self._make_rates([25], 1.0)
         fps_rates = self._make_rates([10], 1.0)
 
@@ -347,7 +368,7 @@ class TestRecommendations:
         )
         for rec in result.recommendations:
             if rec.available:
-                assert rec.overhead >= _MIN_OVERHEAD_RQ
+                assert rec.overhead >= MIN_OVERHEAD_RQ
 
     def test_graduated_channel_selects_different_versions(self):
         """Graduated detect rates -> tiers pick different versions."""
@@ -417,9 +438,9 @@ class TestFormatResults:
             fps_detect_rates={10: 0.95},
             fps_data_reliable=True,
             recommendations=[
-                TierRecommendation("safe", True, 25, 10, 1.15, 5000.0),
-                TierRecommendation("balanced", True, 25, 10, 1.25, 4500.0),
-                TierRecommendation("aggressive", True, 25, 10, 1.40, 4000.0),
+                TierRecommendation("safe", True, 25, 10, 1.30, 4000.0),
+                TierRecommendation("balanced", True, 25, 10, 1.15, 4500.0),
+                TierRecommendation("aggressive", True, 25, 10, 1.05, 5000.0),
             ],
         )
         text = format_results(result)

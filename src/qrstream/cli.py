@@ -2,7 +2,7 @@
 Unified CLI for QRStream.
 
 Usage:
-    qrstream -V | --version
+    qrstream -v | --version
     qrstream encode <file> [-o output.mp4] [--display] [--overhead RATIO]
                           [--fps 10] [--output-mode MODE]
     qrstream decode <video> -o output_file [-s sample_rate]
@@ -17,8 +17,8 @@ Usage:
 * ``verbose``     — Verbose diagnostic output (Rich on TTY, log-verbose
                     otherwise).
 
-The legacy ``-v / --verbose`` flag is accepted as a hidden alias for
-``--output-mode verbose`` to keep existing scripts working.
+The hidden ``-V / --verbose`` flag is accepted on subcommands as an alias
+for ``--output-mode verbose``.
 """
 
 import sys
@@ -26,6 +26,14 @@ import os
 import argparse
 
 from .__init__ import __version__
+from .overhead_policy import (
+    DEFAULT_OVERHEAD_LT as _DEFAULT_OVERHEAD_LT,
+    DEFAULT_OVERHEAD_RQ as _DEFAULT_OVERHEAD_RQ,
+    MIN_OVERHEAD_LT as _MIN_OVERHEAD_LT,
+    MIN_OVERHEAD_RQ as _MIN_OVERHEAD_RQ,
+    RECOMMENDED_OVERHEAD_LT as _RECOMMENDED_OVERHEAD_LT,
+    RECOMMENDED_OVERHEAD_RQ as _RECOMMENDED_OVERHEAD_RQ,
+)
 from .ui import OutputMode, resolve_output_mode
 
 
@@ -164,34 +172,15 @@ def cmd_colors():
     console.print()
 
 
-# Minimum overhead the default LT codec (SplitMix64 PRNG mixer,
-# qrstream >= 0.8) needs to converge on sequential seeds across all
-# K we've benchmarked (328..4096).  The empirical worst case is
-# K=328 at 1.19x; we round up to 1.20x as the hard floor and
-# recommend >=1.50x for real captures where frame loss / detector
-# misses eat into the margin.
-#
-# RaptorQ (RFC 6330) is near-optimal: any K packets suffice, so the
-# overhead floor is effectively 1.0x.  We use 1.02x as the hard safety
-# floor and recommend >=1.10x; the CLI default is 1.20x to leave a
-# practical margin for camera frame loss and QR detector misses without
-# carrying LT's old 2.0x default cost.
-_MIN_OVERHEAD_LT = 1.20
-_RECOMMENDED_OVERHEAD_LT = 1.50
-_DEFAULT_OVERHEAD_LT = 2.00
-_MIN_OVERHEAD_RQ = 1.02
-_RECOMMENDED_OVERHEAD_RQ = 1.10
-_DEFAULT_OVERHEAD_RQ = 1.20
-
 # Legacy aliases (used by some tests).
 _MIN_OVERHEAD = _MIN_OVERHEAD_LT
 _RECOMMENDED_OVERHEAD = _RECOMMENDED_OVERHEAD_LT
 
 
 def _resolve_mode(args) -> OutputMode:
-    """Reconcile legacy ``-v`` with the new ``--output-mode`` flag.
+    """Reconcile ``--verbose`` with the new ``--output-mode`` flag.
 
-    ``-v`` is kept as a hidden alias that upgrades ``auto`` to
+    ``-V / --verbose`` is a hidden alias that upgrades ``auto`` to
     ``verbose``; users who explicitly pass ``--output-mode`` get
     their choice honoured verbatim.
     """
@@ -451,6 +440,7 @@ def cmd_calibrate(args):
         generate_calibration,
         analyze_calibration,
         format_results,
+        render_results,
     )
 
     mode, reporter = _build_reporter(args)
@@ -488,7 +478,11 @@ def cmd_calibrate(args):
                 workers=args.workers,
                 reporter=reporter,
             )
-            print(format_results(result))
+            console = getattr(reporter, '_console', None)
+            if console is not None:
+                console.print(render_results(result))
+            else:
+                print(format_results(result))
         else:
             print("Error: Specify --display, -o, or -i.",
                   file=sys.stderr)
@@ -506,7 +500,7 @@ def cmd_calibrate(args):
 
 
 def _add_output_mode_group(sub: argparse.ArgumentParser) -> None:
-    """Attach the shared ``--output-mode`` option plus hidden ``-v``."""
+    """Attach the shared ``--output-mode`` option plus hidden ``-V``."""
     sub.add_argument(
         '--output-mode',
         dest='output_mode',
@@ -518,8 +512,8 @@ def _add_output_mode_group(sub: argparse.ArgumentParser) -> None:
              '"quiet" prints only errors and the final path. '
              '"verbose" enables full diagnostic output.',
     )
-    # Legacy alias kept hidden: ``-v`` → upgrade ``auto`` to ``verbose``.
-    sub.add_argument('-v', '--verbose', action='store_true',
+    # Hidden alias: ``-V`` → upgrade ``auto`` to ``verbose``.
+    sub.add_argument('-V', '--verbose', action='store_true',
                      help=argparse.SUPPRESS)
 
 
@@ -528,7 +522,7 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=prog,
         description='QRStream: Encode and decode files via QR code video streams')
-    parser.add_argument('-V', '--version', action='version',
+    parser.add_argument('-v', '--version', action='version',
                         version=f'%(prog)s {__version__}')
 
     subparsers = parser.add_subparsers(dest='command', help='Available commands')

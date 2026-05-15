@@ -26,6 +26,7 @@ with suppress_native_stderr():
     import numpy as np
     import av
 
+from .overhead_policy import MIN_OVERHEAD_RQ as _MIN_OVERHEAD_RQ
 from .protocol import (
     _alphanumeric_byte_capacity,
     base45_decode,
@@ -369,14 +370,11 @@ class CalibrationFrame:
 
 # ── Recommendation dataclasses ──────────────────────────────────────
 
-#: Minimum overhead for RaptorQ — never recommend less than this.
-_MIN_OVERHEAD_RQ = 1.02
-
 # Recommendation tier definitions.
 _TIERS = {
-    "safe": {"threshold": 0.98, "safety_margin": 1.05},
+    "safe": {"threshold": 0.98, "safety_margin": 1.30},
     "balanced": {"threshold": 0.85, "safety_margin": 1.15},
-    "aggressive": {"threshold": 0.70, "safety_margin": 1.30},
+    "aggressive": {"threshold": 0.70, "safety_margin": 1.05},
 }
 
 #: Detect rate at or above which the boundary is considered excellent.
@@ -992,14 +990,14 @@ def analyze_calibration(
     if reporter is None:
         reporter = QuietReporter()
 
-    reporter.info(f"Analyzing calibration video: {video_path}")
-
     # ── Phase 1: Read all frames and attempt QR decode ──────────────
 
     container = av.open(video_path)
     video_stream = container.streams.video[0]
     total_frames = video_stream.frames or 0
-    # If total_frames is 0 (some containers don't report it), count later.
+    # If total_frames is 0 (some containers don't report it), progress
+    # remains indeterminate until the final completion event.
+    reporter.calibrate_analyze_start(total_frames=total_frames)
 
     decoded_frames: list[CalibrationFrame] = []
     frame_count = 0
@@ -1009,39 +1007,46 @@ def analyze_calibration(
         frame_count += 1
         img = av_frame.to_ndarray(format="bgr24")
         text = try_decode_qr(img)
-        if text is None:
-            continue
 
-        # Decode the QR payload
-        try:
-            # CalibrationFrame is encoded via base45 into QR alphanumeric
-            # mode; the detected text is the base45-encoded payload.
-            raw = base45_decode(text)
-            cf = CalibrationFrame.unpack(raw)
-            decoded_frames.append(cf)
+        if text is not None:
+            # Decode the QR payload
+            try:
+                # CalibrationFrame is encoded via base45 into QR alphanumeric
+                # mode; the detected text is the base45-encoded payload.
+                raw = base45_decode(text)
+                cf = CalibrationFrame.unpack(raw)
+                decoded_frames.append(cf)
 
-            # Extract preset from meta segment
-            if cf.segment_id == SEG_META:
-                pid = cf.param
-                if pid in PRESET_NAMES:
-                    preset_name = PRESET_NAMES[pid]
+                # Extract preset from meta segment
+                if cf.segment_id == SEG_META:
+                    pid = cf.param
+                    if pid in PRESET_NAMES:
+                        preset_name = PRESET_NAMES[pid]
 
-        except (ValueError, struct.error):
-            # Not a calibration frame — skip.
-            continue
+            except (ValueError, struct.error):
+                # Not a calibration frame — skip.
+                pass
 
-        if frame_count % 200 == 0:
-            reporter.info(
-                f"Analyzing: {frame_count} video frames scanned, "
-                f"{len(decoded_frames)} calibration frames decoded"
+        if frame_count % 50 == 0:
+            progress_pct = (
+                min(frame_count / total_frames * 100.0, 100.0)
+                if total_frames > 0 else 0.0
+            )
+            reporter.calibrate_analyze_update(
+                progress_pct=progress_pct,
+                segment=(
+                    f"{frame_count}/{total_frames or '?'} frames, "
+                    f"{len(decoded_frames)} decoded"
+                ),
             )
 
     container.close()
 
-    reporter.info(
-        f"Scan complete: {frame_count} video frames, "
-        f"{len(decoded_frames)} calibration frames decoded"
+    reporter.calibrate_analyze_update(
+        progress_pct=100.0,
+        segment=f"{frame_count} frames, {len(decoded_frames)} decoded",
     )
+    reporter.calibrate_analyze_done()
 
     if not decoded_frames:
         return CalibrationResult(
@@ -1192,7 +1197,7 @@ def format_results(result: CalibrationResult) -> str:
             lines.append("  Recommended encode command:")
             lines.append(
                 f"  qrstream encode FILE "
-                f"-v {balanced.qr_version} "
+                f"--qr-version {balanced.qr_version} "
                 f"--fps {balanced.fps} "
                 f"--overhead {balanced.overhead}"
             )
@@ -1201,6 +1206,120 @@ def format_results(result: CalibrationResult) -> str:
 
     lines.append("")
     return "\n".join(lines)
+
+
+def render_results(result: CalibrationResult):
+    """Return a Rich renderable for calibration results.
+
+    Falls back to the plain-text formatter if Rich is unavailable.
+    """
+    try:
+        from rich import box
+        from rich.console import Group
+        from rich.panel import Panel
+        from rich.table import Table
+        from rich.text import Text
+    except Exception:  # pragma: no cover — Rich is normally installed
+        return format_results(result)
+
+    quality_styles = {
+        "excellent": "bold green",
+        "good": "green",
+        "fair": "yellow",
+        "poor": "bold red",
+    }
+    tier_styles = {
+        "safe": "cyan",
+        "balanced": "green",
+        "aggressive": "magenta",
+    }
+    quality_style = quality_styles.get(result.channel_quality, "white")
+
+    summary = Table.grid(padding=(0, 2))
+    summary.add_column(style="dim")
+    summary.add_column()
+    summary.add_row(
+        "Channel quality",
+        Text(result.channel_quality.capitalize(), style=quality_style),
+    )
+    summary.add_row("Precision", Text(result.preset, style="bold"))
+
+    parts: list[object] = [summary]
+
+    if result.messages:
+        messages = Table.grid()
+        for msg in result.messages:
+            if msg.startswith("⚠"):
+                style = "yellow"
+            elif msg.startswith("ℹ"):
+                style = "cyan"
+            else:
+                style = "white"
+            messages.add_row(Text(msg, style=style))
+        parts.extend([Text(""), messages])
+
+    if any(r.available for r in result.recommendations):
+        table = Table(
+            box=box.SIMPLE_HEAVY,
+            header_style="bold cyan",
+            show_edge=False,
+        )
+        table.add_column("Tier", style="bold")
+        table.add_column("Version", justify="right")
+        table.add_column("FPS", justify="right")
+        table.add_column("Overhead", justify="right")
+        table.add_column("Throughput", justify="right")
+
+        for rec in result.recommendations:
+            row_style = tier_styles.get(rec.tier, "white")
+            if rec.available:
+                table.add_row(
+                    rec.tier.capitalize(),
+                    f"V{rec.qr_version}",
+                    str(rec.fps),
+                    f"{rec.overhead:.2f}",
+                    _format_throughput(rec.throughput_bps or 0),
+                    style=row_style,
+                )
+            else:
+                table.add_row(
+                    rec.tier.capitalize(),
+                    "--", "--", "--", "-- unavailable --",
+                    style="dim",
+                )
+        parts.extend([Text(""), table])
+
+        recommended = next(
+            (r for r in result.recommendations
+             if r.tier == "balanced" and r.available),
+            None,
+        )
+        if recommended is None:
+            recommended = next(
+                (r for r in result.recommendations if r.available), None)
+        if recommended:
+            command = (
+                "qrstream encode FILE "
+                f"--qr-version {recommended.qr_version} "
+                f"--fps {recommended.fps} "
+                f"--overhead {recommended.overhead}"
+            )
+            parts.extend([
+                Text(""),
+                Text("Recommended encode command", style="bold"),
+                Text(command, style="bold green"),
+            ])
+    else:
+        parts.extend([
+            Text(""),
+            Text("No recommendations available.", style="yellow"),
+        ])
+
+    return Panel(
+        Group(*parts),
+        title="QRStream Calibration Results",
+        border_style=quality_style,
+    )
 
 
 def _format_throughput(bps: float) -> str:

@@ -1,9 +1,9 @@
 """Tests for the CLI's ``--overhead`` floor/warning behaviour.
 
 The LT codec cannot converge below ~1.2x overhead regardless of
-capture quality. RaptorQ needs ~1.02x minimum.  The CLI must reject
-values below the active codec's floor (exit 2) so users don't waste
-a long encode on an un-decodable output.
+capture quality. RaptorQ uses 1.05x as its tested minimum. The CLI
+must reject values below the active codec's floor (exit 2) so users
+don't waste a long encode on an un-decodable output.
 """
 
 from __future__ import annotations
@@ -65,7 +65,8 @@ def test_cli_rejects_overhead_below_raptorq_floor(tmp_path, capsys):
     src.write_bytes(b"hello")
     out = tmp_path / "out.mp4"
 
-    args = _args(0.9, str(src), str(out), fountain_codec='raptorq')
+    args = _args(_MIN_OVERHEAD_RQ - 0.01, str(src), str(out),
+                 fountain_codec='raptorq')
     with pytest.raises(SystemExit) as exc_info:
         cmd_encode(args)
     assert exc_info.value.code == 2
@@ -164,3 +165,8 @@ def test_cli_floor_matches_prng_v1_convergence_floor():
     silently regress below a safe number."""
     assert 1.20 <= _MIN_OVERHEAD < _RECOMMENDED_OVERHEAD
     assert _RECOMMENDED_OVERHEAD <= 2.0
+
+
+def test_raptorq_floor_matches_validated_minimum():
+    assert _MIN_OVERHEAD_RQ == 1.05
+    assert _MIN_OVERHEAD_RQ < _RECOMMENDED_OVERHEAD_RQ
