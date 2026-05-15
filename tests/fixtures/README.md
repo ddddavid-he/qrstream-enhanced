@@ -52,7 +52,7 @@ real-world workflow.
 | File | Output SHA-256 (first 8) | Decoded size | Encoded with | Recorded | Compressed |
 |---|---|---|---|---|---|
 | `lt-pi-1MB.mp4` | `7806ee47…` | 1 000 000 B | current LT, π decimal digits, `--no-compress --qr-version 40 --fps 25 --overhead 1.2` | iPhone 15 Pro | HEVC, 640×616, CRF 28 |
-| `raptorq-pi-1MB.mp4` | `7806ee47…` | 1 000 000 B | current RaptorQ, π decimal digits, `--no-compress --qr-version 40 --fps 25 --overhead 1.1` | iPhone 15 Pro | HEVC, 700×754, CRF 30 |
+| `raptorq-pi-1MB.mp4` | `7806ee47…` | 1 000 000 B | current RaptorQ, π decimal digits, `--no-compress --qr-version 40 --fps 25 --overhead 1.1` | iPhone 15 Pro | HEVC, 840×1002, CRF 28 (crop=1040:1240:15:270 from 1080×1920 portrait) |
 
 The π source is deterministic and not committed.  The tests verify
 its decoded byte stream by size plus SHA-256.
@@ -132,9 +132,13 @@ its decoded byte stream by size plus SHA-256.
 3. Record the screen with a phone camera, then re-encode / resize
    empirically to the smallest files that still decode reliably:
 
-       # RaptorQ
-       ffmpeg -i phone.mov -vf "scale=700:-2:flags=lanczos" \
-           -c:v libx265 -crf 30 -preset medium -tag:v hvc1 -an \
+       # RaptorQ — crop QR region from portrait recording, then scale to 840px wide.
+       # The original CRF 30 / 700px encoding only yielded ~444/451 decodable blocks
+       # on x86_64 (raptorq 2.0.0 has a convergence bug at near-minimum overhead);
+       # 840px wide at CRF 28 consistently yields ≥452 blocks on all platforms.
+       ffmpeg -i phone.mov \
+           -vf "crop=1040:1240:15:270,scale=840:-2:flags=lanczos" \
+           -c:v libx265 -crf 28 -preset medium -tag:v hvc1 -an \
            raptorq-pi-1MB.mp4
 
        # LT
