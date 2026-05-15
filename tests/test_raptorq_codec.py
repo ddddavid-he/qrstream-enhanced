@@ -3,8 +3,38 @@
 import struct
 from math import ceil
 
-from qrstream.raptorq_codec import RaptorQEncoder, RaptorQDecoder
+from qrstream.raptorq_codec import (
+    RaptorQEncoder,
+    RaptorQDecoder,
+    _rq_payload_id,
+    _rq_payload_id_parts,
+    _rq_source_block_layout,
+    _rq_source_index,
+)
 from qrstream.protocol import V4_VERSION, unpack
+
+
+class TestRaptorQPayloadIdMapping:
+    def test_payload_id_roundtrip(self):
+        payload_id = _rq_payload_id(7, 0x123456)
+        assert _rq_payload_id_parts(payload_id) == (7, 0x123456)
+
+    def test_single_source_block_identity_mapping(self):
+        assert _rq_source_block_layout(4) == [(0, 4)]
+        assert _rq_source_index(_rq_payload_id(0, 2), 4) == 2
+        assert _rq_source_index(_rq_payload_id(0, 4), 4) is None
+
+    def test_multi_source_block_global_mapping(self):
+        # K > 56_403 forces two RaptorQ source blocks.  The second
+        # block's local ESI 0 must map to a non-zero global source index;
+        # treating PayloadId as a flat ESI would miss this in the block map.
+        k = 56_405
+        assert _rq_source_block_layout(k) == [(0, 28_203), (28_203, 28_202)]
+        assert _rq_source_index(_rq_payload_id(0, 28_202), k) == 28_202
+        assert _rq_source_index(_rq_payload_id(1, 0), k) == 28_203
+        assert _rq_source_index(_rq_payload_id(1, 28_201), k) == 56_404
+        assert _rq_source_index(_rq_payload_id(0, 28_203), k) is None
+        assert _rq_source_index(_rq_payload_id(1, 28_202), k) is None
 
 
 class TestRaptorQEncoder:
@@ -116,6 +146,16 @@ class TestRaptorQDecoder:
                 assert decoder.progress == 1.0
                 assert decoder.num_recovered == decoder.K
                 break
+
+    def test_progress_uses_confirmed_source_symbols(self):
+        decoder = RaptorQDecoder()
+        decoder.initialized = True
+        decoder.K = 10
+        decoder._fed_count = 8
+        decoder.eliminated = {0: True, 5: True}
+
+        assert decoder.num_recovered == 2
+        assert decoder.progress == 0.2
 
     def test_is_done(self):
         data = b'\xAB' * 128

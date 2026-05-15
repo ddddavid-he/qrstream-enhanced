@@ -13,6 +13,8 @@ import sys
 import pytest
 
 from qrstream.cli import (
+    _DEFAULT_OVERHEAD_LT,
+    _DEFAULT_OVERHEAD_RQ,
     _MIN_OVERHEAD,
     _MIN_OVERHEAD_LT,
     _MIN_OVERHEAD_RQ,
@@ -30,6 +32,15 @@ def _args(overhead: float, input_path: str, output_path: str,
     return parser.parse_args(
         ['encode', input_path, '-o', output_path,
          '--overhead', str(overhead),
+         '--fountain-codec', fountain_codec]
+    )
+
+
+def _args_without_overhead(input_path: str, output_path: str,
+                           fountain_codec: str = 'raptorq'):
+    parser = build_parser()
+    return parser.parse_args(
+        ['encode', input_path, '-o', output_path,
          '--fountain-codec', fountain_codec]
     )
 
@@ -106,6 +117,44 @@ def test_cli_silent_at_or_above_recommended(tmp_path, capsys, monkeypatch):
     captured = capsys.readouterr()
     assert "Warning" not in captured.out
     assert "below the LT codec" not in captured.out
+
+
+def test_cli_uses_raptorq_default_overhead(tmp_path, capsys, monkeypatch):
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"x" * 256)
+    out = tmp_path / "out.mp4"
+    called = {}
+
+    def fake_encode(**kwargs):
+        called.update(kwargs)
+
+    import qrstream.encoder as enc_mod
+    monkeypatch.setattr(enc_mod, "encode_to_video", fake_encode)
+
+    args = _args_without_overhead(str(src), str(out), fountain_codec='raptorq')
+    cmd_encode(args)
+    captured = capsys.readouterr()
+    assert "Warning" not in captured.out
+    assert called.get("overhead") == _DEFAULT_OVERHEAD_RQ
+
+
+def test_cli_preserves_lt_default_overhead(tmp_path, capsys, monkeypatch):
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"x" * 256)
+    out = tmp_path / "out.mp4"
+    called = {}
+
+    def fake_encode(**kwargs):
+        called.update(kwargs)
+
+    import qrstream.encoder as enc_mod
+    monkeypatch.setattr(enc_mod, "encode_to_video", fake_encode)
+
+    args = _args_without_overhead(str(src), str(out), fountain_codec='lt')
+    cmd_encode(args)
+    captured = capsys.readouterr()
+    assert "Warning" not in captured.out
+    assert called.get("overhead") == _DEFAULT_OVERHEAD_LT
 
 
 def test_cli_floor_matches_prng_v1_convergence_floor():

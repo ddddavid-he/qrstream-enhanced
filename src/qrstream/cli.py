@@ -3,7 +3,7 @@ Unified CLI for QRStream.
 
 Usage:
     qrstream -V | --version
-    qrstream encode <file> [-o output.mp4] [--display] [--overhead 2.0]
+    qrstream encode <file> [-o output.mp4] [--display] [--overhead RATIO]
                           [--fps 10] [--output-mode MODE]
     qrstream decode <video> -o output_file [-s sample_rate]
                           [--output-mode MODE]
@@ -172,12 +172,16 @@ def cmd_colors():
 # misses eat into the margin.
 #
 # RaptorQ (RFC 6330) is near-optimal: any K packets suffice, so the
-# overhead floor is effectively 1.0x.  We use 1.02x as the safety
-# margin and recommend >=1.10x for real captures.
+# overhead floor is effectively 1.0x.  We use 1.02x as the hard safety
+# floor and recommend >=1.10x; the CLI default is 1.20x to leave a
+# practical margin for camera frame loss and QR detector misses without
+# carrying LT's old 2.0x default cost.
 _MIN_OVERHEAD_LT = 1.20
 _RECOMMENDED_OVERHEAD_LT = 1.50
+_DEFAULT_OVERHEAD_LT = 2.00
 _MIN_OVERHEAD_RQ = 1.02
 _RECOMMENDED_OVERHEAD_RQ = 1.10
+_DEFAULT_OVERHEAD_RQ = 1.20
 
 # Legacy aliases (used by some tests).
 _MIN_OVERHEAD = _MIN_OVERHEAD_LT
@@ -301,11 +305,16 @@ def cmd_encode(args):
     if fountain_codec == 'raptorq':
         min_oh = _MIN_OVERHEAD_RQ
         rec_oh = _RECOMMENDED_OVERHEAD_RQ
+        default_oh = _DEFAULT_OVERHEAD_RQ
         codec_name = 'RaptorQ'
     else:
         min_oh = _MIN_OVERHEAD_LT
         rec_oh = _RECOMMENDED_OVERHEAD_LT
+        default_oh = _DEFAULT_OVERHEAD_LT
         codec_name = 'LT'
+
+    if args.overhead is None:
+        args.overhead = default_oh
 
     if args.overhead < min_oh:
         print(
@@ -474,10 +483,12 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                      help='Display encoded QR frames in the built-in GUI player. '
                           'When used with -o, the video is saved after display '
                           'rendering completes if needed.')
-    enc.add_argument('--overhead', type=float, default=2.0,
-                     help=f'Ratio of encoded blocks to source blocks '
-                          f'(default: 2.0, minimum: {_MIN_OVERHEAD}, '
-                          f'recommended: ≥{_RECOMMENDED_OVERHEAD})')
+    enc.add_argument('--overhead', type=float, default=None,
+                     help='Ratio of encoded blocks to source blocks '
+                          f'(default: {_DEFAULT_OVERHEAD_RQ} for raptorq, '
+                          f'{_DEFAULT_OVERHEAD_LT} for lt; minimum: '
+                          f'{_MIN_OVERHEAD_RQ} for raptorq, '
+                          f'{_MIN_OVERHEAD_LT} for lt)')
     enc.add_argument('--fps', type=int, default=10,
                      help='Frames per second in output video (default: 10)')
     # TODO(v0.10.0): remove ``--ec-level`` entirely.  QR-level error
