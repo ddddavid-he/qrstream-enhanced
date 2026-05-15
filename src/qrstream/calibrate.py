@@ -15,11 +15,9 @@ Decoder side:
 
 from __future__ import annotations
 
+import hashlib
 import struct
 from dataclasses import dataclass, field
-from math import ceil
-from queue import Queue
-from threading import Thread
 
 from ._compat import suppress_native_stderr
 
@@ -28,8 +26,11 @@ with suppress_native_stderr():
     import numpy as np
     import av
 
-from .protocol import _QR_CAPACITY, base45_encode, base45_decode
-from .qr_utils import generate_qr_image, try_decode_qr
+from .protocol import (
+    _alphanumeric_byte_capacity,
+    base45_decode,
+)
+from .qr_utils import generate_qr_image, generate_qr_module_image, try_decode_qr
 from .ui import ProgressReporter, QuietReporter
 
 # ── Calibration protocol constants ──────────────────────────────────
@@ -49,21 +50,30 @@ SEG_VERSION = 2
 SEG_FPS = 3
 SEG_END = 4
 
-# Precision preset IDs (written into meta segment ``param`` field)
+# Precision preset IDs (written into meta segment ``param`` field).
+# ``quick``/``thorough`` remain accepted aliases for older callers.
 PRESET_LOW = 0
-PRESET_QUICK = 1
+PRESET_FAST = 1
+PRESET_QUICK = PRESET_FAST
 PRESET_STANDARD = 2
-PRESET_THOROUGH = 3
+PRESET_FULL = 3
+PRESET_THOROUGH = PRESET_FULL
 PRESET_HIGH = 4
 
 PRESET_NAMES = {
     PRESET_LOW: "low",
-    PRESET_QUICK: "quick",
+    PRESET_FAST: "fast",
     PRESET_STANDARD: "standard",
-    PRESET_THOROUGH: "thorough",
+    PRESET_FULL: "full",
     PRESET_HIGH: "high",
 }
+_PRESET_ALIASES = {
+    "quick": "fast",
+    "thorough": "full",
+}
 PRESET_IDS = {v: k for k, v in PRESET_NAMES.items()}
+PRESET_IDS.update({alias: PRESET_IDS[name]
+                   for alias, name in _PRESET_ALIASES.items()})
 
 # ── Calibration frame rates used for fixed-fps segments ─────────────
 
@@ -77,36 +87,58 @@ _VERSION_LADDER_FPS = 10
 
 # Version ladders: list of QR version numbers to test.
 _VERSION_LADDER_LOW = [5, 8, 10, 12, 15, 17, 20, 22, 25, 28]
-_VERSION_LADDER_QUICK = [15, 20, 25, 28, 30, 33, 35, 40]
+_VERSION_LADDER_FAST = [15, 20, 25, 28, 30, 33, 35, 40]
+_VERSION_LADDER_QUICK = _VERSION_LADDER_FAST
 _VERSION_LADDER_STANDARD = [15, 20, 22, 25, 27, 28, 30, 32, 33, 35, 38, 40]
-_VERSION_LADDER_THOROUGH = [
+_VERSION_LADDER_FULL = [
     15, 17, 20, 22, 23, 25, 26, 27, 28, 29, 30, 32, 33, 35, 38, 40,
 ]
+_VERSION_LADDER_THOROUGH = _VERSION_LADDER_FULL
 _VERSION_LADDER_HIGH = [25, 28, 30, 32, 33, 35, 36, 38, 39, 40]
 
 # FPS ladders: list of target frame rates to test.
 _FPS_LADDER_LOW = [5, 6, 8, 10, 12, 15, 18, 20]
-_FPS_LADDER_QUICK = [8, 10, 15, 20, 25, 30]
+_FPS_LADDER_FAST = [8, 10, 15, 20, 25, 30]
+_FPS_LADDER_QUICK = _FPS_LADDER_FAST
 _FPS_LADDER_STANDARD = [8, 10, 12, 15, 18, 20, 25, 30]
-_FPS_LADDER_THOROUGH = [5, 8, 9, 10, 12, 14, 15, 18, 22, 30]
+_FPS_LADDER_FULL = [5, 8, 9, 10, 12, 14, 15, 18, 22, 30]
+_FPS_LADDER_THOROUGH = _FPS_LADDER_FULL
 # ``high`` uses a candidate pool filtered by display refresh rate.
 _FPS_CANDIDATES_HIGH = [15, 18, 20, 25, 30, 35, 40, 45, 50, 60, 75, 90, 100, 120]
 
 # FPS anchor versions (used to encode QR frames in the FPS segment).
 _FPS_ANCHOR_LOW = 15
-_FPS_ANCHOR_QUICK = 25
+_FPS_ANCHOR_FAST = 25
+_FPS_ANCHOR_QUICK = _FPS_ANCHOR_FAST
 _FPS_ANCHOR_STANDARD = 25
-_FPS_ANCHOR_THOROUGH = 25
+_FPS_ANCHOR_FULL = 25
+_FPS_ANCHOR_THOROUGH = _FPS_ANCHOR_FULL
 _FPS_ANCHOR_HIGH = 35
 
-# Frames per step for each preset: (version_segment, fps_segment)
-_FRAMES_PER_STEP = {
-    PRESET_LOW: (25, 20),
-    PRESET_QUICK: (15, 20),
-    PRESET_STANDARD: (25, 30),
-    PRESET_THOROUGH: (40, 45),
-    PRESET_HIGH: (35, 40),
+# Target total durations in seconds.  Legacy low/high keep approximate
+# targets for API compatibility; the public presets are fast/standard/full.
+_PRESET_TARGET_SECONDS = {
+    PRESET_LOW: 15.0,
+    PRESET_FAST: 15.0,
+    PRESET_STANDARD: 30.0,
+    PRESET_FULL: 60.0,
+    PRESET_HIGH: 60.0,
 }
+
+# Kept for older tests/callers that import the constant directly.  Actual
+# frame counts are computed from _PRESET_TARGET_SECONDS in resolve_preset().
+_FRAMES_PER_STEP = {
+    PRESET_LOW: (6, 7),
+    PRESET_FAST: (8, 14),
+    PRESET_STANDARD: (11, 24),
+    PRESET_FULL: (18, 32),
+    PRESET_HIGH: (28, 80),
+}
+
+_CALIBRATION_EC_LEVEL = 1
+_CALIBRATION_BORDER_MODULES = 4.0
+_CALIBRATION_BOX_SIZE = 10
+_CALIBRATION_PAYLOAD_SAFETY_BYTES = 1
 
 # Meta/end segment timing.
 _META_SECONDS = 2.0   # 2s of meta frames
@@ -149,6 +181,59 @@ def _get_display_refresh_rate() -> int:
     return 60
 
 
+def _canonical_preset_name(preset_name: str) -> str:
+    return _PRESET_ALIASES.get(preset_name, preset_name)
+
+
+def _frames_for_target_duration(version_ladder: list[int],
+                                fps_ladder: list[int],
+                                target_seconds: float) -> tuple[int, int]:
+    fixed_seconds = _META_SECONDS + _END_SECONDS
+    remaining = max(1.0, target_seconds - fixed_seconds)
+    version_seconds = remaining * 0.5
+    fps_seconds = remaining - version_seconds
+
+    frames_per_version_step = max(
+        2,
+        round(version_seconds * _VERSION_LADDER_FPS / len(version_ladder)),
+    )
+    fps_weight = sum(1.0 / fps for fps in fps_ladder if fps > 0)
+    frames_per_fps_step = max(2, round(fps_seconds / fps_weight))
+    return frames_per_version_step, frames_per_fps_step
+
+
+def _estimate_sequence_duration(config: PresetConfig) -> float:
+    version_seconds = (
+        len(config.version_ladder)
+        * config.frames_per_version_step
+        / _VERSION_LADDER_FPS
+    )
+    fps_seconds = sum(
+        config.frames_per_fps_step / fps for fps in config.fps_ladder
+    )
+    return _META_SECONDS + version_seconds + fps_seconds + _END_SECONDS
+
+
+def _presentation_repeat_count(frame_seq: int, target_fps: int,
+                               presentation_fps: int) -> int:
+    if target_fps <= 0 or presentation_fps <= 0:
+        return 1
+    ratio = presentation_fps / target_fps
+    start = int(frame_seq * ratio + 0.5)
+    end = int((frame_seq + 1) * ratio + 0.5)
+    return max(1, end - start)
+
+
+def _presentation_frame_count(
+    frame_seq: list[tuple[CalibrationFrame, int, int]],
+    presentation_fps: int,
+) -> int:
+    return sum(
+        _presentation_repeat_count(cf.frame_seq, target_fps, presentation_fps)
+        for cf, _qr_ver, target_fps in frame_seq
+    )
+
+
 def resolve_preset(preset_name: str,
                    display_hz: int | None = None) -> PresetConfig:
     """Build a fully resolved :class:`PresetConfig` for *preset_name*.
@@ -156,34 +241,34 @@ def resolve_preset(preset_name: str,
     Parameters
     ----------
     preset_name:
-        One of ``"low"``, ``"quick"``, ``"standard"``, ``"thorough"``,
-        ``"high"``.
+        One of ``"fast"``, ``"standard"``, ``"full"``.  Legacy aliases
+        ``"quick"`` and ``"thorough"`` are accepted.
     display_hz:
         Display refresh rate in Hz (used only by the ``"high"`` preset to
         cap the FPS ladder).  ``None`` means auto-detect.
     """
-    if preset_name not in PRESET_IDS:
+    canonical_name = _canonical_preset_name(preset_name)
+    if canonical_name not in PRESET_IDS:
         raise ValueError(f"Unknown preset: {preset_name!r}")
-    pid = PRESET_IDS[preset_name]
-    fpv, fpf = _FRAMES_PER_STEP[pid]
+    pid = PRESET_IDS[canonical_name]
 
-    if preset_name == "low":
+    if canonical_name == "low":
         ver = list(_VERSION_LADDER_LOW)
         fps = list(_FPS_LADDER_LOW)
         anchor = _FPS_ANCHOR_LOW
-    elif preset_name == "quick":
-        ver = list(_VERSION_LADDER_QUICK)
-        fps = list(_FPS_LADDER_QUICK)
-        anchor = _FPS_ANCHOR_QUICK
-    elif preset_name == "standard":
+    elif canonical_name == "fast":
+        ver = list(_VERSION_LADDER_FAST)
+        fps = list(_FPS_LADDER_FAST)
+        anchor = _FPS_ANCHOR_FAST
+    elif canonical_name == "standard":
         ver = list(_VERSION_LADDER_STANDARD)
         fps = list(_FPS_LADDER_STANDARD)
         anchor = _FPS_ANCHOR_STANDARD
-    elif preset_name == "thorough":
-        ver = list(_VERSION_LADDER_THOROUGH)
-        fps = list(_FPS_LADDER_THOROUGH)
-        anchor = _FPS_ANCHOR_THOROUGH
-    elif preset_name == "high":
+    elif canonical_name == "full":
+        ver = list(_VERSION_LADDER_FULL)
+        fps = list(_FPS_LADDER_FULL)
+        anchor = _FPS_ANCHOR_FULL
+    elif canonical_name == "high":
         ver = list(_VERSION_LADDER_HIGH)
         if display_hz is None:
             display_hz = _get_display_refresh_rate()
@@ -194,9 +279,12 @@ def resolve_preset(preset_name: str,
     else:
         raise ValueError(f"Unknown preset: {preset_name!r}")
 
+    fpv, fpf = _frames_for_target_duration(
+        ver, fps, _PRESET_TARGET_SECONDS[pid])
+
     return PresetConfig(
         preset_id=pid,
-        preset_name=preset_name,
+        preset_name=canonical_name,
         version_ladder=ver,
         fps_ladder=fps,
         fps_anchor_version=anchor,
@@ -329,8 +417,10 @@ class CalibrationResult:
 def _estimate_throughput(qr_version: int, fps: int,
                          overhead: float) -> float:
     """Estimate throughput in bytes/sec for a given parameter set."""
-    # Use ec_level=0 (L) — calibration always uses L for max capacity.
-    capacity = _QR_CAPACITY.get((qr_version, 0), 0)
+    if not 1 <= qr_version <= 40:
+        return 0.0
+    capacity = _alphanumeric_byte_capacity(
+        qr_version, _CALIBRATION_EC_LEVEL)
     if capacity == 0 or overhead <= 0:
         return 0.0
     return capacity * fps / overhead
@@ -609,11 +699,13 @@ def generate_calibration(
     frame_seq = _build_frame_sequence(config)
     total_logical = len(frame_seq)
 
+    duration = _estimate_sequence_duration(config)
     reporter.info(
         f"Calibration: preset={config.preset_name}, "
         f"version_steps={len(config.version_ladder)}, "
         f"fps_steps={len(config.fps_ladder)}, "
-        f"total_frames={total_logical}"
+        f"duration≈{duration:.1f}s, "
+        f"logical_frames={total_logical}"
     )
 
     if display:
@@ -626,17 +718,69 @@ def generate_calibration(
     return config
 
 
+def _calibration_payload(cal_frame: CalibrationFrame,
+                         qr_version: int) -> bytes:
+    """Return a dense, deterministic calibration payload for one QR."""
+    header = cal_frame.pack()
+    capacity = _alphanumeric_byte_capacity(qr_version, _CALIBRATION_EC_LEVEL)
+    target_size = max(
+        len(header),
+        capacity - _CALIBRATION_PAYLOAD_SAFETY_BYTES,
+    )
+    if target_size <= len(header):
+        return header
+
+    seed = header + bytes([qr_version])
+    payload = bytearray(header)
+    counter = 0
+    while len(payload) < target_size:
+        payload.extend(hashlib.blake2s(
+            seed + counter.to_bytes(4, "big"),
+            digest_size=32,
+        ).digest())
+        counter += 1
+    return bytes(payload[:target_size])
+
+
+def _scale_to_fit_square(img: np.ndarray, side: int) -> np.ndarray:
+    """Integer-scale *img* as large as possible, then center-pad to side."""
+    if img.shape[0] > side or img.shape[1] > side:
+        raise ValueError(
+            f"image {img.shape[1]}x{img.shape[0]} exceeds canvas {side}x{side}"
+        )
+    scale = max(1, min(side // img.shape[0], side // img.shape[1]))
+    if scale > 1:
+        img = cv2.resize(
+            img,
+            (img.shape[1] * scale, img.shape[0] * scale),
+            interpolation=cv2.INTER_NEAREST,
+        )
+    if img.shape[0] == side and img.shape[1] == side:
+        return img
+    if img.ndim == 2:
+        canvas = np.full((side, side), 255, dtype=img.dtype)
+        y_off = (side - img.shape[0]) // 2
+        x_off = (side - img.shape[1]) // 2
+        canvas[y_off:y_off + img.shape[0], x_off:x_off + img.shape[1]] = img
+    else:
+        canvas = np.full((side, side, img.shape[2]), 255, dtype=img.dtype)
+        y_off = (side - img.shape[0]) // 2
+        x_off = (side - img.shape[1]) // 2
+        canvas[y_off:y_off + img.shape[0], x_off:x_off + img.shape[1], :] = img
+    return canvas
+
+
 def _encode_cal_frame_to_qr(
     cal_frame: CalibrationFrame,
     qr_version: int,
-    border: float = 2,
+    border: float = _CALIBRATION_BORDER_MODULES,
 ) -> np.ndarray:
     """Encode a CalibrationFrame into a BGR QR image."""
-    payload_bytes = cal_frame.pack()
+    payload_bytes = _calibration_payload(cal_frame, qr_version)
     return generate_qr_image(
         payload_bytes,
-        ec_level=0,  # L — max capacity
-        box_size=10,
+        ec_level=_CALIBRATION_EC_LEVEL,
+        box_size=_CALIBRATION_BOX_SIZE,
         border=border,
         version=qr_version,
         alphanumeric=True,  # base45 high-density
@@ -652,9 +796,8 @@ def _generate_video(
 ) -> None:
     """Write calibration frames to an MP4 file.
 
-    For the FPS ladder segment, the video is written at a high constant
-    container frame rate.  Effective target FPS is simulated by inserting
-    white spacer frames between QR frames.
+    The video uses a fixed square frame.  Lower target FPS values are
+    simulated by holding the current QR frame for multiple container frames.
     """
     from .encoder import _PYAV_CODEC_MAP, _PYAV_CONTAINER_FORMAT
 
@@ -669,64 +812,39 @@ def _generate_video(
     pyav_codec, pix_fmt, _default_ext, stream_opts = codec_info
     container_format = _PYAV_CONTAINER_FORMAT[codec]
 
-    # Determine frame size from a probe QR image at the smallest version.
-    probe_cf = CalibrationFrame(SEG_META, 0, 0, 1, 0)
-    probe_img = _encode_cal_frame_to_qr(
-        probe_cf, min(config.version_ladder))
-    h_ref, w_ref = probe_img.shape[:2]
-
     output = av.open(output_path, "w", format=container_format)
     out_stream = output.add_stream(pyav_codec, rate=container_rate)
-    out_stream.width = w_ref
-    out_stream.height = h_ref
+    frame_side = (
+        (4 * max(config.version_ladder) + 17)
+        + 2 * int(_CALIBRATION_BORDER_MODULES)
+    ) * _CALIBRATION_BOX_SIZE
+    out_stream.width = frame_side
+    out_stream.height = frame_side
     out_stream.pix_fmt = pix_fmt
     if stream_opts:
         out_stream.options = stream_opts
 
-    blank = np.full((h_ref, w_ref, 3), 255, dtype=np.uint8)
     written = 0
 
     try:
         for idx, (cf, qr_ver, target_fps) in enumerate(frame_seq):
-            qr_img = _encode_cal_frame_to_qr(cf, qr_ver)
-            # Resize to match reference dimensions (different versions
-            # produce different-sized images).
-            if qr_img.shape[:2] != (h_ref, w_ref):
-                qr_img = cv2.resize(
-                    qr_img, (w_ref, h_ref),
-                    interpolation=cv2.INTER_NEAREST,
-                )
-
-            if cf.segment_id == SEG_FPS:
-                # Insert QR frame + spacer frames to simulate target_fps
-                # within the constant container_rate.
-                spacing = max(1, round(container_rate / target_fps))
+            payload_bytes = _calibration_payload(cf, qr_ver)
+            mod_img = generate_qr_module_image(
+                payload_bytes,
+                ec_level=_CALIBRATION_EC_LEVEL,
+                border=_CALIBRATION_BORDER_MODULES,
+                version=qr_ver,
+                alphanumeric=True,
+            )
+            qr_img = _scale_to_fit_square(mod_img, frame_side)
+            qr_img = cv2.cvtColor(qr_img, cv2.COLOR_GRAY2BGR)
+            repeats = _presentation_repeat_count(
+                cf.frame_seq, target_fps, container_rate)
+            for _ in range(repeats):
                 frame_av = av.VideoFrame.from_ndarray(qr_img, format="bgr24")
                 for packet in out_stream.encode(frame_av):
                     output.mux(packet)
                 written += 1
-                # Spacer frames (blank white)
-                for _ in range(spacing - 1):
-                    spacer_av = av.VideoFrame.from_ndarray(
-                        blank, format="bgr24")
-                    for packet in out_stream.encode(spacer_av):
-                        output.mux(packet)
-                    written += 1
-            else:
-                # Meta / Version / End segments: write at their fixed fps.
-                # Container rate may be higher, so insert spacer frames.
-                seg_fps = target_fps  # _META_FPS or _VERSION_LADDER_FPS
-                spacing = max(1, round(container_rate / seg_fps))
-                frame_av = av.VideoFrame.from_ndarray(qr_img, format="bgr24")
-                for packet in out_stream.encode(frame_av):
-                    output.mux(packet)
-                written += 1
-                for _ in range(spacing - 1):
-                    spacer_av = av.VideoFrame.from_ndarray(
-                        blank, format="bgr24")
-                    for packet in out_stream.encode(spacer_av):
-                        output.mux(packet)
-                    written += 1
 
             if idx % 50 == 0 or idx == len(frame_seq) - 1:
                 pct = (idx + 1) / len(frame_seq) * 100
@@ -754,8 +872,8 @@ def _generate_display(
 ) -> None:
     """Play calibration frames via Qt display player.
 
-    The Qt player natively controls frame timing, so no spacer frames
-    are needed.  Each frame is displayed for ``1/target_fps`` seconds.
+    Frames are expanded to the display refresh rate by holding each QR
+    update for the appropriate number of refresh ticks.
     """
     from .display_player import DisplayProducerState
     from .display_player_qt import (
@@ -768,55 +886,47 @@ def _generate_display(
         plan_module_cache,
         pack_module_image,
     )
-    from .qr_utils import generate_qr_module_image
-
     require_pyside6()
 
     # Determine module-frame cache sizing from the largest version.
     max_ver = max(config.version_ladder)
-    border = 2
-    modules_side = 4 * max_ver + 17 + 2 * border
+    border = _CALIBRATION_BORDER_MODULES
+    modules_side = 4 * max_ver + 17 + 2 * int(border)
 
-    total_frames = len(frame_seq)
-    budget = plan_module_cache(total_frames, modules_side)
-    cache = ModuleFrameCache(
-        budget,
-        module_side=modules_side,
-    )
+    display_fps = _get_display_refresh_rate()
+    total_frames = _presentation_frame_count(frame_seq, display_fps)
+    budget = plan_module_cache(total_frames, modules_side, display_fps)
+    cache = ModuleFrameCache.from_plan(total_frames, modules_side, budget)
     state = DisplayProducerState(total_frames)
 
-    # Pre-generate all frames into the cache, adjusting for per-frame
-    # QR version differences (pad smaller versions to max size).
-    for idx, (cf, qr_ver, _target_fps) in enumerate(frame_seq):
-        payload_bytes = cf.pack()
+    # Pre-generate all presentation frames into the cache.  Smaller QR
+    # versions are resized, not padded, so every version fills the window.
+    out_idx = 0
+    for cf, qr_ver, target_fps in frame_seq:
+        payload_bytes = _calibration_payload(cf, qr_ver)
         mod_img = generate_qr_module_image(
             payload_bytes,
-            ec_level=0,
+            ec_level=_CALIBRATION_EC_LEVEL,
             border=border,
             version=qr_ver,
             alphanumeric=True,
         )
-        # Pad to max module side if needed.
-        if mod_img.shape[0] < modules_side or mod_img.shape[1] < modules_side:
-            padded = np.full(
-                (modules_side, modules_side), 255, dtype=np.uint8)
-            y_off = (modules_side - mod_img.shape[0]) // 2
-            x_off = (modules_side - mod_img.shape[1]) // 2
-            padded[y_off:y_off + mod_img.shape[0],
-                   x_off:x_off + mod_img.shape[1]] = mod_img
-            mod_img = padded
+        mod_img = _scale_to_fit_square(mod_img, modules_side)
         packed = pack_module_image(mod_img)
-        cache.put_packed(idx, packed, modules_side)
-        state.mark_produced()
+        repeats = _presentation_repeat_count(
+            cf.frame_seq, target_fps, display_fps)
+        for _ in range(repeats):
+            cache.put_packed(out_idx, packed)
+            state.mark_produced()
+            out_idx += 1
+    cache.mark_done()
+    state.mark_done()
 
-    # Use the average fps across segments as the display fps hint.
-    # The Qt player will use this as a baseline; individual segment
-    # timing is embedded in the frame data.
-    avg_fps = 10  # reasonable default for calibration
     player_config = DisplayPlayerQtConfig(
         title="QRStream Calibration",
+        lock_window_size=True,
     )
-    play_display_qt(cache, state, avg_fps, config=player_config)
+    play_display_qt(cache, state, display_fps, config=player_config)
     reporter.info("Calibration display complete.")
 
 
@@ -907,24 +1017,21 @@ def analyze_calibration(
 
     # ── Phase 2: Group by segment and step, compute detect rates ────
 
-    # Version segment: group by param (= qr_version)
-    version_counts: dict[int, int] = {}       # version -> detected count
+    # Version segment: group by param (= qr_version).  Held presentation
+    # frames repeat the same logical QR, so count unique step/frame IDs.
+    version_seen: dict[int, set[tuple[int, int]]] = {}
     version_expected: dict[int, int] = {}     # version -> expected count
 
     # FPS segment: group by param (= target_fps)
-    fps_counts: dict[int, int] = {}
+    fps_seen: dict[int, set[tuple[int, int]]] = {}
     fps_expected: dict[int, int] = {}
 
     for cf in decoded_frames:
+        key = (cf.step_index, cf.frame_seq)
         if cf.segment_id == SEG_VERSION:
-            ver = cf.param
-            version_counts[ver] = version_counts.get(ver, 0) + 1
-            # We don't know expected from the frame alone until we see
-            # all frames — use frame_seq max + 1 as proxy, or get from
-            # a full config.
+            version_seen.setdefault(cf.param, set()).add(key)
         elif cf.segment_id == SEG_FPS:
-            fps = cf.param
-            fps_counts[fps] = fps_counts.get(fps, 0) + 1
+            fps_seen.setdefault(cf.param, set()).add(key)
 
     # To determine expected counts, we resolve the preset config and
     # use its frames_per_step values.  However, the decode side may not
@@ -950,13 +1057,13 @@ def analyze_calibration(
     version_detect_rates: dict[int, float] = {}
     for ver in sorted(version_expected.keys()):
         expected = version_expected[ver]
-        detected = version_counts.get(ver, 0)
+        detected = len(version_seen.get(ver, set()))
         version_detect_rates[ver] = min(detected / expected, 1.0) if expected > 0 else 0.0
 
     fps_detect_rates: dict[int, float] = {}
     for fps in sorted(fps_expected.keys()):
         expected = fps_expected[fps]
-        detected = fps_counts.get(fps, 0)
+        detected = len(fps_seen.get(fps, set()))
         fps_detect_rates[fps] = min(detected / expected, 1.0) if expected > 0 else 0.0
 
     # ── Phase 3: Check FPS anchor reliability ───────────────────────

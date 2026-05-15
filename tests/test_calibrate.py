@@ -20,23 +20,23 @@ from qrstream.calibrate import (
     TierRecommendation,
     _EXCELLENT_THRESHOLD,
     _FPS_ANCHOR_RELIABILITY_THRESHOLD,
-    _FRAMES_PER_STEP,
     _MIN_OVERHEAD_RQ,
     _POOR_THRESHOLD,
     _TIERS,
-    _VERSION_LADDER_HIGH,
-    _VERSION_LADDER_LOW,
-    _VERSION_LADDER_QUICK,
-    _VERSION_LADDER_STANDARD,
-    _VERSION_LADDER_THOROUGH,
+    _CALIBRATION_EC_LEVEL,
     _build_frame_sequence,
+    _calibration_payload,
     _container_fps,
+    _estimate_sequence_duration,
     _estimate_throughput,
     compute_recommendations,
     format_results,
     resolve_preset,
 )
-from qrstream.protocol import _QR_CAPACITY
+from qrstream.protocol import _alphanumeric_byte_capacity
+
+
+CANONICAL_PRESETS = ["low", "fast", "standard", "full", "high"]
 
 
 # ── CalibrationFrame pack/unpack ────────────────────────────────────
@@ -109,13 +109,24 @@ class TestCalibrationFrame:
         unpacked = CalibrationFrame.unpack(packed)
         assert unpacked == cf
 
+    def test_dynamic_payload_keeps_header_unpackable(self):
+        cf = CalibrationFrame(SEG_VERSION, 30, 5, 12, 0)
+        payload = _calibration_payload(cf, 30)
+        assert len(payload) > CAL_STRUCT_SIZE
+        assert CalibrationFrame.unpack(payload) == cf
+
+    def test_dynamic_payload_changes_by_frame(self):
+        cf1 = CalibrationFrame(SEG_VERSION, 30, 5, 12, 0)
+        cf2 = CalibrationFrame(SEG_VERSION, 30, 5, 12, 1)
+        assert _calibration_payload(cf1, 30) != _calibration_payload(cf2, 30)
+
 
 # ── Preset configuration ────────────────────────────────────────────
 
 class TestPresetConfig:
     """Unit tests for preset ladder configurations."""
 
-    @pytest.mark.parametrize("name", list(PRESET_IDS.keys()))
+    @pytest.mark.parametrize("name", CANONICAL_PRESETS)
     def test_resolve_preset(self, name):
         cfg = resolve_preset(name, display_hz=60)
         assert cfg.preset_name == name
@@ -123,7 +134,7 @@ class TestPresetConfig:
         assert len(cfg.version_ladder) > 0
         assert len(cfg.fps_ladder) > 0
 
-    @pytest.mark.parametrize("name", list(PRESET_IDS.keys()))
+    @pytest.mark.parametrize("name", CANONICAL_PRESETS)
     def test_version_ladder_monotonic(self, name):
         cfg = resolve_preset(name, display_hz=60)
         for i in range(1, len(cfg.version_ladder)):
@@ -132,7 +143,7 @@ class TestPresetConfig:
                 f"{cfg.version_ladder}"
             )
 
-    @pytest.mark.parametrize("name", list(PRESET_IDS.keys()))
+    @pytest.mark.parametrize("name", CANONICAL_PRESETS)
     def test_fps_ladder_monotonic(self, name):
         cfg = resolve_preset(name, display_hz=60)
         for i in range(1, len(cfg.fps_ladder)):
@@ -141,7 +152,7 @@ class TestPresetConfig:
                 f"{cfg.fps_ladder}"
             )
 
-    @pytest.mark.parametrize("name", list(PRESET_IDS.keys()))
+    @pytest.mark.parametrize("name", CANONICAL_PRESETS)
     def test_version_ladder_within_qr_range(self, name):
         cfg = resolve_preset(name, display_hz=60)
         for v in cfg.version_ladder:
@@ -163,6 +174,24 @@ class TestPresetConfig:
         for pid, name in PRESET_NAMES.items():
             assert PRESET_IDS[name] == pid
 
+    @pytest.mark.parametrize("alias,canonical", [
+        ("quick", "fast"),
+        ("thorough", "full"),
+    ])
+    def test_legacy_preset_aliases(self, alias, canonical):
+        cfg = resolve_preset(alias, display_hz=60)
+        assert cfg.preset_name == canonical
+        assert cfg.preset_id == PRESET_IDS[canonical]
+
+    @pytest.mark.parametrize("name,target", [
+        ("fast", 15.0),
+        ("standard", 30.0),
+        ("full", 60.0),
+    ])
+    def test_public_preset_duration_targets(self, name, target):
+        cfg = resolve_preset(name, display_hz=60)
+        assert _estimate_sequence_duration(cfg) == pytest.approx(target, abs=1.0)
+
     def test_unknown_preset_raises(self):
         with pytest.raises(ValueError, match="Unknown preset"):
             resolve_preset("nonexistent", display_hz=60)
@@ -183,7 +212,7 @@ class TestFrameSequence:
                     + cfg.end_frames)
         assert len(frames) == expected
 
-    @pytest.mark.parametrize("name", list(PRESET_IDS.keys()))
+    @pytest.mark.parametrize("name", CANONICAL_PRESETS)
     def test_frame_sequence_segment_order(self, name):
         cfg = resolve_preset(name, display_hz=60)
         frames = _build_frame_sequence(cfg)
@@ -348,7 +377,7 @@ class TestThroughput:
 
     def test_throughput_formula(self):
         """Throughput = capacity * fps / overhead."""
-        cap = _QR_CAPACITY.get((25, 0), 0)
+        cap = _alphanumeric_byte_capacity(25, _CALIBRATION_EC_LEVEL)
         assert cap > 0
         tp = _estimate_throughput(25, 10, 1.2)
         expected = cap * 10 / 1.2
@@ -421,13 +450,13 @@ class TestFormatResults:
 class TestCalibrateE2E:
     """End-to-end tests: generate calibration video -> analyze."""
 
-    def test_roundtrip_quick(self, tmp_path):
-        """Generate quick preset MP4 -> analyze -> 100% detect rates."""
+    def test_roundtrip_fast(self, tmp_path):
+        """Generate fast preset MP4 -> analyze -> 100% detect rates."""
         from qrstream.calibrate import generate_calibration, analyze_calibration
 
         out = str(tmp_path / "cal.mp4")
         config = generate_calibration(
-            preset_name="quick",
+            preset_name="fast",
             output_path=out,
             display_hz=60,
         )
@@ -469,8 +498,7 @@ class TestCalibrateE2E:
                 f"{f}fps missing from analysis results"
             )
 
-    @pytest.mark.parametrize("preset", ["low", "quick", "standard",
-                                         "thorough", "high"])
+    @pytest.mark.parametrize("preset", ["fast", "standard", "full"])
     def test_preset_generates_valid_video(self, tmp_path, preset):
         """All presets generate a video that can be opened and analyzed."""
         from qrstream.calibrate import generate_calibration, analyze_calibration

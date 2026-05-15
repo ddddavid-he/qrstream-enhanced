@@ -92,6 +92,7 @@ class DisplayPlayerQtConfig:
     producer_fps_window_seconds: float = 3.0
     producer_grace_factor: float = 1.05
     metadata: DisplayMetadata | None = None
+    lock_window_size: bool = False
 
 
 # ── Helpers (no PySide6 dependency) ───────────────────────────────
@@ -360,8 +361,10 @@ else:
             self._apply_theme()
             self._setup_shortcuts()
 
-            if not self._restore_geometry():
+            if config.lock_window_size or not self._restore_geometry():
                 self._auto_size()
+            if config.lock_window_size:
+                self.setFixedSize(self.size())
 
             self._setup_timer()
             self._update_display()
@@ -492,7 +495,8 @@ else:
             self.move(frame.topLeft())
 
         def closeEvent(self, event) -> None:  # noqa: N802
-            self._settings.setValue("window/geometry", self.saveGeometry())
+            if not self._config.lock_window_size:
+                self._settings.setValue("window/geometry", self.saveGeometry())
             self._timer.stop()
             super().closeEvent(event)
 
@@ -608,6 +612,8 @@ else:
             self._play_btn.setText("▶")
 
         def _zoom(self, delta: int) -> None:
+            if self._config.lock_window_size:
+                return
             step = 80
             w = self.width() + delta * step
             h = self.height() + delta * step

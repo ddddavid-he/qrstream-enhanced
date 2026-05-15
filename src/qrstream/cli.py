@@ -632,9 +632,10 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
         help='Analyze a captured calibration video (decoder side)')
     cal.add_argument(
         '--precision',
-        choices=['low', 'quick', 'standard', 'thorough', 'high'],
+        metavar='{fast,standard,full}',
         default='standard',
-        help='Calibration precision preset (default: standard)')
+        help='Calibration preset: fast (~15s), standard (~30s), '
+             'or full (~60s). Default: standard')
     cal.add_argument(
         '--display-hz', type=int, default=None,
         help='Override display refresh rate in Hz for video output mode '
