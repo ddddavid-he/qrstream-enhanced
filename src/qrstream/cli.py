@@ -281,7 +281,7 @@ def _close_reporter(reporter) -> None:
 
 def cmd_encode(args):
     """Handle the 'encode' subcommand."""
-    from .encoder import encode_to_display, encode_to_video
+    from .encoder import encode_to_video
 
     if not os.path.exists(args.file):
         print(f"Error: File not found: {args.file}")
@@ -364,6 +364,7 @@ def cmd_encode(args):
             fountain_codec=fountain_codec,
         )
         if display:
+            from .encoder import encode_to_display
             encode_to_display(
                 output_path=output if output_requested else None,
                 codec=args.codec,
@@ -439,6 +440,66 @@ def cmd_decode(args):
                 os.unlink(output_path)
         except OSError:
             pass
+        raise
+    finally:
+        _close_reporter(reporter)
+
+
+def cmd_calibrate(args):
+    """Handle the 'calibrate' subcommand."""
+    from .calibrate import (
+        generate_calibration,
+        analyze_calibration,
+        format_results,
+    )
+
+    mode, reporter = _build_reporter(args)
+
+    try:
+        if getattr(args, 'display', False):
+            # Encoder side: display mode
+            generate_calibration(
+                preset_name=args.precision,
+                display=True,
+                codec=args.codec,
+                reporter=reporter,
+            )
+        elif args.output:
+            # Encoder side: video output mode
+            err = _check_output_path_writable(args.output)
+            if err is not None:
+                print(f"Error: {err}", file=sys.stderr)
+                sys.exit(1)
+            generate_calibration(
+                preset_name=args.precision,
+                output_path=args.output,
+                display_hz=args.display_hz,
+                codec=args.codec,
+                reporter=reporter,
+            )
+        elif args.input:
+            # Decoder side: analyze captured video
+            if not os.path.exists(args.input):
+                print(f"Error: File not found: {args.input}",
+                      file=sys.stderr)
+                sys.exit(1)
+            result = analyze_calibration(
+                video_path=args.input,
+                workers=args.workers,
+                reporter=reporter,
+            )
+            print(format_results(result))
+        else:
+            print("Error: Specify --display, -o, or -i.",
+                  file=sys.stderr)
+            sys.exit(1)
+    except ImportError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(3)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
         raise
     finally:
         _close_reporter(reporter)
@@ -555,6 +616,38 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
         help='Display the colour palette used by the UI '
              '(detect-rate gradient, block-map, etc.)')
 
+    # ── calibrate ────────────────────────────────────────────────
+    cal = subparsers.add_parser(
+        'calibrate',
+        help='Auto-calibrate channel parameters for optimal encode settings')
+    cal_mode = cal.add_mutually_exclusive_group(required=True)
+    cal_mode.add_argument(
+        '--display', action='store_true',
+        help='Play calibration sequence on screen via Qt player')
+    cal_mode.add_argument(
+        '-o', '--output', metavar='PATH',
+        help='Write calibration video to file (encoder side)')
+    cal_mode.add_argument(
+        '-i', '--input', metavar='PATH',
+        help='Analyze a captured calibration video (decoder side)')
+    cal.add_argument(
+        '--precision',
+        choices=['low', 'quick', 'standard', 'thorough', 'high'],
+        default='standard',
+        help='Calibration precision preset (default: standard)')
+    cal.add_argument(
+        '--display-hz', type=int, default=None,
+        help='Override display refresh rate in Hz for video output mode '
+             '(default: auto-detect in display mode, 60 in video mode)')
+    cal.add_argument(
+        '--codec', default='h264',
+        choices=['h264', 'mp4v', 'mjpeg'],
+        help='Video codec for calibration output (default: h264)')
+    cal.add_argument(
+        '-w', '--workers', type=int, default=None,
+        help='Parallel workers for analysis (default: auto)')
+    _add_output_mode_group(cal)
+
     return parser
 
 
@@ -567,6 +660,8 @@ def main(argv: list[str] | None = None):
             cmd_encode(args)
         elif args.command == 'decode':
             cmd_decode(args)
+        elif args.command == 'calibrate':
+            cmd_calibrate(args)
         elif args.command == 'colors':
             cmd_colors()
         else:

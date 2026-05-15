@@ -536,6 +536,19 @@ class ProgressReporter(Protocol):
     def encode_done(self, *, output_path: str,
                     size_bytes: int) -> None: ...
 
+    # Calibrate
+    def calibrate_generate_start(self, *, preset: str,
+                                 total_frames: int) -> None: ...
+    def calibrate_generate_update(self, *,
+                                  progress_pct: float) -> None: ...
+    def calibrate_generate_done(self, *,
+                                output_path: str | None) -> None: ...
+    def calibrate_analyze_start(self, *,
+                                total_frames: int) -> None: ...
+    def calibrate_analyze_update(self, *, progress_pct: float,
+                                 segment: str) -> None: ...
+    def calibrate_analyze_done(self) -> None: ...
+
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -650,6 +663,14 @@ class QuietReporter:
 
     def encode_done(self, *, output_path: str, size_bytes: int) -> None:
         self._write(f"Encoded: {output_path} ({_fmt_size(size_bytes)})")
+
+    # Calibrate ----------------------------------------------------
+    def calibrate_generate_start(self, **_kw) -> None: return
+    def calibrate_generate_update(self, **_kw) -> None: return
+    def calibrate_generate_done(self, **_kw) -> None: return
+    def calibrate_analyze_start(self, **_kw) -> None: return
+    def calibrate_analyze_update(self, **_kw) -> None: return
+    def calibrate_analyze_done(self) -> None: return
 
 
 # ── Log reporter (key=value) ─────────────────────────────────────
@@ -861,6 +882,38 @@ class LogReporter:
     def encode_done(self, *, output_path: str, size_bytes: int) -> None:
         self._write_line(phase="encode", status="done",
                          output=output_path, size=_fmt_size(size_bytes))
+
+    # Calibrate
+    def calibrate_generate_start(self, *, preset: str,
+                                 total_frames: int) -> None:
+        self._write_line(phase="calibrate-generate", status="start",
+                         preset=preset, total_frames=total_frames)
+
+    def calibrate_generate_update(self, *, progress_pct: float) -> None:
+        if not self._should_emit("calibrate-generate", progress_pct):
+            return
+        self._write_line(phase="calibrate-generate",
+                         progress=_fmt_pct(progress_pct))
+
+    def calibrate_generate_done(self, *,
+                                output_path: str | None) -> None:
+        self._write_line(phase="calibrate-generate", status="done",
+                         output=output_path or "(display)")
+
+    def calibrate_analyze_start(self, *, total_frames: int) -> None:
+        self._write_line(phase="calibrate-analyze", status="start",
+                         total_frames=total_frames)
+
+    def calibrate_analyze_update(self, *, progress_pct: float,
+                                 segment: str) -> None:
+        if not self._should_emit("calibrate-analyze", progress_pct):
+            return
+        self._write_line(phase="calibrate-analyze",
+                         progress=_fmt_pct(progress_pct),
+                         segment=segment)
+
+    def calibrate_analyze_done(self) -> None:
+        self._write_line(phase="calibrate-analyze", status="done")
 
 
 # ── Rich reporter ────────────────────────────────────────────────
@@ -1928,6 +1981,42 @@ class RichReporter:
         self._console.print(
             f"[bold green]Done[/bold green]   {output_path}  "
             f"[dim]{_fmt_size(size_bytes)}[/dim]"
+        )
+
+    # Calibrate ────────────────────────────────────────────────────
+    # Calibrate events reuse the generic info/warn for now; full
+    # Rich progress integration can be added later.
+    def calibrate_generate_start(self, *, preset: str,
+                                 total_frames: int) -> None:
+        self._console.print(
+            f"[bold]Calibration[/bold]  preset={preset}  "
+            f"frames={total_frames}"
+        )
+
+    def calibrate_generate_update(self, *,
+                                  progress_pct: float) -> None:
+        pass  # TODO: Rich progress bar for calibration
+
+    def calibrate_generate_done(self, *,
+                                output_path: str | None) -> None:
+        target = output_path or "(display)"
+        self._console.print(
+            f"[bold green]Done[/bold green]   Calibration video: {target}"
+        )
+
+    def calibrate_analyze_start(self, *, total_frames: int) -> None:
+        self._console.print(
+            f"[bold]Analyzing[/bold]  calibration video  "
+            f"frames={total_frames}"
+        )
+
+    def calibrate_analyze_update(self, *, progress_pct: float,
+                                 segment: str) -> None:
+        pass  # TODO: Rich progress bar for analysis
+
+    def calibrate_analyze_done(self) -> None:
+        self._console.print(
+            "[bold green]Done[/bold green]   Calibration analysis complete"
         )
 
 

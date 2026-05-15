@@ -38,13 +38,6 @@ from .display_cache import (
     plan_module_cache,
     unpack_module_frame,
 )
-from .display_player import DisplayProducerState
-from .display_player_qt import (
-    DisplayMetadata,
-    DisplayPlayerQtConfig,
-    play_display_qt,
-    require_pyside6,
-)
 from .qr_utils import generate_qr_image, generate_qr_module_image
 from .ui import ProgressReporter, QuietReporter
 
@@ -804,6 +797,16 @@ def encode_to_display(input_path: str,
     realtime writer records frames without blocking display; any missing
     suffix is regenerated after the display window closes.
     """
+    # Lazy imports — avoid pulling PySide6 when only encode_to_video is used
+    # (allows qrstream-headless to work without GUI dependencies).
+    from .display_player import DisplayProducerState  # noqa: F811
+    from .display_player_qt import (  # noqa: F811
+        DisplayMetadata,
+        DisplayPlayerQtConfig,
+        play_display_qt,
+        require_pyside6,
+    )
+
     if reporter is None:
         reporter = QuietReporter()
 
