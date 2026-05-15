@@ -1,8 +1,9 @@
 """
-LT Fountain Code Decoder: QR video → LT decode → file reconstruction.
+Fountain Code Decoder: QR video -> decode -> file reconstruction.
 
-Supports V2/V3 protocols with CRC32 validation.
-Features adaptive sample rate and targeted frame recovery.
+Supports V3 (LT fountain codes) and V4 (RaptorQ) protocols with
+CRC32 validation.  Features adaptive sample rate and targeted frame
+recovery.
 """
 
 import io
@@ -34,7 +35,8 @@ with suppress_native_stderr():
 av.logging.set_level(av.logging.FATAL)
 
 from .lt_codec import PRNG, BlockGraph, DEFAULT_C, DEFAULT_DELTA
-from .protocol import unpack
+from .protocol import unpack, V4_VERSION
+from .raptorq_codec import RaptorQDecoder
 from .qr_utils import try_decode_qr, try_decode_qr_with_bbox
 from . import protocol as _protocol_mod
 from .ui import ProgressReporter, QuietReporter, SlidingHitWindow
@@ -112,10 +114,11 @@ _CLAHE_TILE_GRID_SIZE = (8, 8)
 
 
 class LTDecoder:
-    """Consumes LT fountain-coded blocks and reconstructs the original data.
+    """Consumes LT fountain-coded V3 blocks and reconstructs the original data.
 
-    Accepts V2/V3 blocks with CRC validation; corrupt blocks are silently
-    discarded.
+    Accepts V3 blocks with CRC validation; corrupt blocks are silently
+    discarded.  For V4 (RaptorQ) blocks, use
+    :class:`qrstream.raptorq_codec.RaptorQDecoder` instead.
     """
 
     def __init__(self, c: float = DEFAULT_C, delta: float = DEFAULT_DELTA):
@@ -301,7 +304,7 @@ class LTDecoder:
         return written
 
 
-def _attempt_ge_checkpoint(lt_decoder: LTDecoder,
+def _attempt_ge_checkpoint(lt_decoder,
                            reporter: ProgressReporter,
                            stage: str) -> bool:
     """Try a phase-boundary Gauss-Jordan rescue pass.
@@ -310,8 +313,16 @@ def _attempt_ge_checkpoint(lt_decoder: LTDecoder,
     progress.  At phase boundaries, a stalled peeling graph may already
     span all unknown source blocks; this checkpoint lets extraction stop
     early instead of scanning the next recovery level unnecessarily.
+
+    No-op for RaptorQ decoders — they have no peeling graph and handle
+    recovery internally.
     """
     if not lt_decoder.initialized or lt_decoder.done:
+        return lt_decoder.done
+
+    # RaptorQ has no Gauss-Jordan rescue path — skip entirely to avoid
+    # emitting misleading GE progress events.
+    if isinstance(lt_decoder, RaptorQDecoder):
         return lt_decoder.done
 
     reporter.ge_start(
@@ -331,7 +342,7 @@ def _attempt_ge_checkpoint(lt_decoder: LTDecoder,
     return rescued
 
 
-def _format_extraction_result(unique_blocks, lt_decoder: LTDecoder,
+def _format_extraction_result(unique_blocks, lt_decoder,
                               return_decoder: bool):
     if not return_decoder:
         return unique_blocks
@@ -1665,6 +1676,30 @@ def _adaptive_max_dim_from_probe(
     return int(mid)
 
 
+def _get_eliminated(decoder) -> dict:
+    """Return the block-recovery dict for either decoder type.
+
+    * ``LTDecoder`` → ``block_graph.eliminated``  (block_idx → numpy data)
+    * ``RaptorQDecoder`` → ``eliminated``          (block_idx → True)
+
+    Both satisfy the ``block_idx in recovered`` membership test that
+    :func:`qrstream.ui.compute_block_map_cells` requires.
+
+    TODO: Optimize RaptorQ recovery block map.  Currently we only mark
+    source ESIs as eliminated (known precisely) and fill repair coverage
+    on decode completion.  Future: track repair symbol recovery incrementally
+    during decoding for finer-grained progress UI.
+    """
+    if not decoder.initialized:
+        return {}
+    # RaptorQDecoder carries .eliminated directly.
+    if isinstance(decoder, RaptorQDecoder):
+        return decoder.eliminated
+    # LTDecoder stores it inside the block graph.
+    bg = getattr(decoder, 'block_graph', None)
+    return bg.eliminated if bg is not None else {}
+
+
 class _ScanProgressTracker:
     """Track main-scan progress and throttle reporter churn."""
 
@@ -1672,7 +1707,7 @@ class _ScanProgressTracker:
 
     def __init__(self, *, total_frames: int,
                  leading_frames_probed: int,
-                 lt_decoder: LTDecoder,
+                 lt_decoder,
                  reporter: ProgressReporter):
         self.total_frames = total_frames
         self.processed_frames = leading_frames_probed
@@ -1691,10 +1726,11 @@ class _ScanProgressTracker:
                 self.processed_frames / self.total_frames * 100
                 if self.total_frames > 0 else 100.0
             )
-        recovered = (
-            self.lt_decoder.block_graph.eliminated
-            if self.lt_decoder.initialized else {}
-        )
+        # LTDecoder: block_graph.eliminated (dict of block_idx → data)
+        # RaptorQDecoder: eliminated (dict of block_idx → True)
+        # Both support ``block_idx in recovered`` membership tests
+        # required by compute_block_map_cells().
+        recovered = _get_eliminated(self.lt_decoder)
         k = self.lt_decoder.K if self.lt_decoder.initialized else None
         return {
             "video_pct": video_pct,
@@ -1786,7 +1822,7 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
     unique_blocks = []
     decoded_count = 0
     no_detect_count = 0
-    lt_decoder = LTDecoder()
+    lt_decoder = None   # Auto-detect: LTDecoder or RaptorQDecoder
     seed_frame_map: dict[int, int] = {}  # observed seed → first frame index
 
     # ── Auto sample_rate probe ────────────────────────────────
@@ -1843,7 +1879,12 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
                     unique_blocks.append(block_bytes)
                     decoded_count += 1
                     try:
-                        done, _ = lt_decoder.decode_bytes(block_bytes, skip_crc=True)
+                        if lt_decoder is None:
+                            lt_decoder, hdr, data = _create_decoder_for_block(
+                                block_bytes)
+                            done, _ = lt_decoder.consume_block(hdr, data)
+                        else:
+                            done, _ = lt_decoder.decode_bytes(block_bytes, skip_crc=True)
                         if done:
                             if verbose:
                                 reporter.debug(
@@ -1866,11 +1907,16 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
     )
 
     if verbose and probe_count > 0:
-        pct = lt_decoder.progress * 100
+        pct = lt_decoder.progress * 100 if lt_decoder is not None else 0.0
         reporter.debug(
             f"After probe: {decoded_count} unique blocks, "
             f"progress={pct:.1f}%"
         )
+
+    # Ensure decoder exists for the main scan (fallback to LTDecoder
+    # when the probe didn't decode any block).
+    if lt_decoder is None:
+        lt_decoder = LTDecoder()
 
     # ── Main scan (remaining frames) ─────────────────────────
     reporter.scan_start(total_frames=total_frames)
@@ -1883,7 +1929,7 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
     early_done = False
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        decoded_count, no_detect_count, early_done, detect_count = _stream_scan(
+        decoded_count, no_detect_count, early_done, detect_count, lt_decoder = _stream_scan(
             executor,
             _tracked_read_frames(
                 video_path,
@@ -1905,6 +1951,9 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
             workers,
             reporter=reporter,
         )
+        # Update the tracker's decoder reference in case _stream_scan
+        # swapped it (V4 auto-detection).
+        scan_tracker.lt_decoder = lt_decoder
         if early_done and verbose:
             reporter.debug(
                 "Early termination: all source blocks recovered!"
@@ -1934,13 +1983,16 @@ def extract_qr_from_video(video_path: str, sample_rate: int = 0,
         )
 
     # ── Targeted recovery for missing seeds ───────────────────
-    # Triggered whenever the main scan finished without LT converging,
-    # regardless of ``sample_rate``.  The previous ``sample_rate > 1``
-    # guard skipped recovery on videos where the probe decided to read
-    # every frame (sample_rate=1) — but such a video can still land on
-    # a pathological ~3% LT seed subset (see v070 amd64 regression)
-    # and recovery has a cheap CLAHE-boosted rescan to offer even when
-    # the main scan already visited every frame.
+    # Triggered whenever the main scan finished without the fountain
+    # decoder converging, regardless of ``sample_rate`` or codec.
+    # Recovery re-scans video segments where missing seeds are expected,
+    # using CLAHE contrast boost and/or higher resolution to coax the
+    # QR detector into reading frames it missed on the first pass.
+    #
+    # This is codec-agnostic: both LT and RaptorQ benefit from having
+    # more unique QR frames extracted from the video.  The only
+    # LT-specific logic *inside* recovery (GE checkpoints) is already
+    # guarded by _attempt_ge_checkpoint() which no-ops for RaptorQ.
     if (not early_done and lt_decoder.initialized
             and not lt_decoder.done):
         unique_blocks, decoded_count, no_detect_count = _targeted_recovery(
@@ -2124,10 +2176,7 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
                 if level_frames > 0 else 100.0
             )
             file_pct = lt_decoder.progress * 100
-            recovered = (
-                lt_decoder.block_graph.eliminated
-                if lt_decoder.initialized else {}
-            )
+            recovered = _get_eliminated(lt_decoder)
             k = lt_decoder.K if lt_decoder.initialized else None
             reporter.recover_update(
                 progress_pct=progress_pct,
@@ -2142,7 +2191,7 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
 
         try:
             with ThreadPoolExecutor(max_workers=workers) as executor:
-                decoded_count, no_detect_count, early_done, _ = _stream_scan(
+                decoded_count, no_detect_count, early_done, _, lt_decoder = _stream_scan(
                     executor,
                     _read_frame_ranges(video_path, level_ranges,
                                        max_detect_dim=level_dim,
@@ -2161,10 +2210,7 @@ def _targeted_recovery(video_path, total_frames, src_fps, workers,
                     progress_pct=100.0,
                     hit_window=hit_window.ratio,
                     file_pct=lt_decoder.progress * 100,
-                    recovered=(
-                        lt_decoder.block_graph.eliminated
-                        if lt_decoder.initialized else {}
-                    ),
+                    recovered=_get_eliminated(lt_decoder),
                     k=lt_decoder.K if lt_decoder.initialized else None,
                     current_range=rec_state["current_range"],
                 )
@@ -2272,8 +2318,13 @@ def _stream_scan(executor: Executor, frame_iter, seen_seeds, unique_blocks,
     Reads frames via ``_prefetch_iter`` (background thread) and feeds
     them to ``executor`` using a sliding window of pending futures.
     After each completed future, ``on_frame(frame_idx, hit_bool)`` is
-    invoked — the caller owns progress / hit-window rendering via a
+    invoked --- the caller owns progress / hit-window rendering via a
     :class:`qrstream.ui.ProgressReporter`.
+
+    ``lt_decoder`` may be an LTDecoder, RaptorQDecoder, or an
+    uninitialised LTDecoder.  When the first successfully-decoded
+    block is V4, the LTDecoder is transparently swapped out for a
+    RaptorQDecoder.
 
     ``worker_fn`` defaults to :func:`_worker_detect_qr` (plain QR
     detection on the already-downscaled frame). Targeted recovery
@@ -2319,8 +2370,16 @@ def _stream_scan(executor: Executor, frame_iter, seen_seeds, unique_blocks,
                     unique_blocks.append(block_bytes)
                     decoded_count += 1
                     try:
-                        done, _ = lt_decoder.decode_bytes(
-                            block_bytes, skip_crc=True)
+                        if not lt_decoder.initialized:
+                            # First valid block — auto-detect codec.
+                            new_dec, hdr, data = _create_decoder_for_block(
+                                block_bytes)
+                            if type(new_dec) is not type(lt_decoder):
+                                lt_decoder = new_dec
+                            done, _ = lt_decoder.consume_block(hdr, data)
+                        else:
+                            done, _ = lt_decoder.decode_bytes(
+                                block_bytes, skip_crc=True)
                         if done:
                             early_done = True
                     except (ValueError, struct.error):
@@ -2355,11 +2414,30 @@ def _stream_scan(executor: Executor, frame_iter, seen_seeds, unique_blocks,
     # for GC (which can be delayed indefinitely by thread references).
     prefetched.close()
 
-    return decoded_count, no_detect_count, early_done, detect_count
+    return decoded_count, no_detect_count, early_done, detect_count, lt_decoder
+
+
+def _create_decoder_for_block(block_bytes: bytes):
+    """Peek at the version byte and return the right decoder type.
+
+    Returns ``(decoder, header, data)`` on success, or raises
+    ``ValueError`` if the block cannot be parsed.
+    """
+    header, data = unpack(block_bytes, skip_crc=True)
+    if header.version == V4_VERSION:
+        decoder = RaptorQDecoder()
+    else:
+        decoder = LTDecoder()
+    return decoder, header, data
 
 
 def _decode_into_decoder(blocks, verbose=False,
-                         reporter: ProgressReporter | None = None) -> "LTDecoder | None":
+                         reporter: ProgressReporter | None = None):
+    """Feed blocks into an auto-detected decoder to reconstruct the file.
+
+    Automatically selects LTDecoder (V3) or RaptorQDecoder (V4) based
+    on the version byte of the first valid block.
+    """
     if reporter is None:
         reporter = QuietReporter()
     if not blocks:
@@ -2367,12 +2445,18 @@ def _decode_into_decoder(blocks, verbose=False,
         print("Error: No blocks to decode")
         return None
 
-    decoder = LTDecoder()
+    decoder = None
 
     try:
         for i, block_bytes in enumerate(blocks):
             try:
-                done, compressed = decoder.decode_bytes(block_bytes)
+                if decoder is None:
+                    # Auto-detect codec from the first valid block.
+                    decoder, header, data = _create_decoder_for_block(
+                        block_bytes)
+                    done, compressed = decoder.consume_block(header, data)
+                else:
+                    done, compressed = decoder.decode_bytes(block_bytes)
                 if done:
                     if verbose:
                         reporter.debug(
@@ -2391,6 +2475,10 @@ def _decode_into_decoder(blocks, verbose=False,
     finally:
         pass
 
+    if decoder is None:
+        print("Error: No valid blocks found")
+        return None
+
     # Peeling (belief-propagation) exhausted all blocks without
     # converging. Attempt a GF(2) Gauss-Jordan rescue pass over the
     # accumulated check-node graph: if the surviving equations
@@ -2398,13 +2486,18 @@ def _decode_into_decoder(blocks, verbose=False,
     # perfect reconstruction.  This path is only entered on peeling
     # failure, so it costs nothing in the healthy case.
     #
+    # For RaptorQ decoders this is a no-op: recovery is handled
+    # internally by the raptorq library and there is no peeling graph
+    # to rescue.
+    #
     # TODO(v0.10.0): the main reason peeling fails on a post-0.8
     # stream is legacy prng_version=0 encoding. Once v0 support is
     # dropped (see ``protocol.py``), revisit whether the rescue is
     # still worth carrying — native v1 streams converge above the
     # CLI's ``_MIN_OVERHEAD`` floor, so GE would only help
     # overhead-below-floor edge cases.
-    if decoder.initialized and not decoder.done:
+    if (decoder.initialized and not decoder.done
+            and not isinstance(decoder, RaptorQDecoder)):
         rescued = decoder.try_gaussian_rescue()
         if rescued:
             if verbose:
@@ -2437,7 +2530,7 @@ def _decode_into_decoder(blocks, verbose=False,
 
 def decode_blocks(blocks, verbose=False,
                   reporter: ProgressReporter | None = None) -> "bytes | None":
-    """Feed blocks into LT decoder to reconstruct the file."""
+    """Feed blocks into an auto-detected decoder to reconstruct the file."""
     decoder = _decode_into_decoder(blocks, verbose=verbose, reporter=reporter)
     if decoder is None:
         return None
@@ -2450,7 +2543,7 @@ def decode_blocks(blocks, verbose=False,
 
 def decode_blocks_to_file(blocks, output_path: str, verbose=False,
                           reporter: ProgressReporter | None = None,
-                          decoder: LTDecoder | None = None) -> "int | None":
+                          decoder=None) -> "int | None":
     """Decode blocks and write the result directly to a file."""
     if reporter is None:
         reporter = QuietReporter()

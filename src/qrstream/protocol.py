@@ -1,7 +1,7 @@
 """
 Protocol serialization helpers for QRStream.
 
-Block layout (V3, 28 bytes overhead):
+Block layout (V3 LT / V4 RaptorQ, 28 bytes overhead):
     24-byte fixed header + data + 4-byte trailing CRC32
 
 QR-encoding flag (flag bit 0x02 in the header):
@@ -432,7 +432,7 @@ def unpack_v3(raw: bytes, skip_crc: bool = False) -> tuple[V3Header, bytes]:
 
 
 def unpack(raw: bytes, skip_crc: bool = False):
-    """Unpack a V3 block based on the version byte.
+    """Unpack a V3 or V4 block based on the version byte.
 
     V2 support was dropped in qrstream 0.6 — the V2 layout was only
     ever produced by pre-v0.4.0 internal builds (no public release
@@ -442,6 +442,8 @@ def unpack(raw: bytes, skip_crc: bool = False):
         raise ValueError("Block too short: 0 bytes")
     if raw[0] == V3_VERSION:
         return unpack_v3(raw, skip_crc=skip_crc)
+    if raw[0] == V4_VERSION:
+        return unpack_v4(raw, skip_crc=skip_crc)
     raise ValueError(f"Unsupported block version: 0x{raw[0]:02X}")
 
 
@@ -500,11 +502,155 @@ def auto_blocksize(filesize: int, ec_level: int = 1,
     return max(min(max_blocksize, filesize), 64)
 
 
+# ── V4 block layout (RaptorQ codec) ─────────────────────────────
+#
+# V4 replaces the LT fountain code with RaptorQ (RFC 6330).  The
+# header keeps the same 24-byte size, same struct packing, and same
+# trailing CRC-32, so the only external difference is the version
+# byte (0x04) and the reinterpretation of a few fields:
+#
+#   * ``seed`` → ``esi`` (Encoding Symbol Identifier, uint32)
+#   * prng_version flag bit (0x04) is unused (always cleared)
+#   * ``blocksize`` → ``symbol_size`` (same semantics, new name)
+#   * ``block_count`` → ``symbol_count`` (K, same semantics)
+
+V4_VERSION = 0x04
+
+V4_HEADER_SIZE = V3_HEADER_SIZE            # 24 bytes, identical struct
+V4_TRAILING_CRC_SIZE = V3_TRAILING_CRC_SIZE
+V4_BLOCK_OVERHEAD = V4_HEADER_SIZE + V4_TRAILING_CRC_SIZE
+
+
+@dataclass
+class V4Header:
+    """Parsed V4 (RaptorQ) block header."""
+    version: int
+    compressed: bool
+    filesize: int
+    symbol_size: int     # same position as V3 blocksize
+    symbol_count: int    # same position as V3 block_count (K)
+    esi: int             # Encoding Symbol Identifier (was seed)
+    block_seq: int
+    crc32: int
+    binary_qr: bool = False
+    reserved: int = 0
+
+    # Compatibility properties so downstream code that accesses
+    # V3-style field names still works.
+    @property
+    def blocksize(self) -> int:
+        return self.symbol_size
+
+    @property
+    def block_count(self) -> int:
+        return self.symbol_count
+
+    @property
+    def seed(self) -> int:
+        return self.esi
+
+    @property
+    def prng_version(self) -> int:
+        """V4 has no PRNG; always returns -1 to signal 'not LT'."""
+        return -1
+
+    @property
+    def alphanumeric_qr(self) -> bool:
+        return self.binary_qr
+
+
+def pack_v4(filesize: int, symbol_size: int, symbol_count: int,
+            esi: int, block_seq: int, data: bytes,
+            compressed: bool = False,
+            binary_qr: bool = False,
+            alphanumeric_qr: bool | None = None) -> bytes:
+    """Serialize a V4 (RaptorQ) block to bytes.
+
+    Wire format is identical to V3 except for the version byte (0x04)
+    and the absence of the prng_version flag bit.
+    """
+    high_density = _resolve_alphanumeric_flag(binary_qr, alphanumeric_qr)
+    if filesize > 0xFFFFFFFFFFFFFFFF:
+        raise ValueError("V4 filesize exceeds uint64 limit")
+    if symbol_count > 0xFFFFFFFF:
+        raise ValueError("V4 symbol_count exceeds uint32 limit")
+    if symbol_size > 0xFFFF:
+        raise ValueError("V4 symbol_size exceeds uint16 limit")
+    if esi > 0xFFFFFFFF:
+        raise ValueError("V4 esi exceeds uint32 limit")
+    if len(data) > symbol_size:
+        raise ValueError("Symbol data longer than symbol_size")
+
+    flags = 0x00
+    if compressed:
+        flags |= 0x01
+    if high_density:
+        flags |= 0x02
+    # Flag bit 0x04 (prng_version) is not used by V4.
+
+    header = struct.pack(
+        '>BBQHIIHH',
+        V4_VERSION,
+        flags,
+        filesize,
+        symbol_size,
+        symbol_count,
+        esi,
+        block_seq,
+        0,  # reserved
+    )
+    crc = zlib.crc32(header + data) & 0xFFFFFFFF
+    return header + data + struct.pack('>I', crc)
+
+
+def unpack_v4(raw: bytes, skip_crc: bool = False) -> tuple[V4Header, bytes]:
+    """Unpack a V4 (RaptorQ) block."""
+    if len(raw) < V4_BLOCK_OVERHEAD:
+        raise ValueError(f"Block too short: {len(raw)} bytes")
+    if raw[0] != V4_VERSION:
+        raise ValueError(f"Not a V4 block: version byte 0x{raw[0]:02X}")
+
+    (version, flags, filesize, symbol_size, symbol_count,
+     esi, block_seq, reserved) = struct.unpack('>BBQHIIHH', raw[:V4_HEADER_SIZE])
+
+    data = raw[V4_HEADER_SIZE:-V4_TRAILING_CRC_SIZE]
+    stored_crc = struct.unpack('>I', raw[-V4_TRAILING_CRC_SIZE:])[0]
+
+    if len(data) != symbol_size:
+        raise ValueError(
+            f"V4 data length mismatch: expected {symbol_size}, got {len(data)}")
+
+    if not skip_crc:
+        computed_crc = zlib.crc32(raw[:-V4_TRAILING_CRC_SIZE]) & 0xFFFFFFFF
+        if computed_crc != stored_crc:
+            raise ValueError(
+                f"CRC32 mismatch: stored=0x{stored_crc:08X}, "
+                f"computed=0x{computed_crc:08X}")
+
+    header = V4Header(
+        version=version,
+        compressed=bool(flags & 0x01),
+        filesize=filesize,
+        symbol_size=symbol_size,
+        symbol_count=symbol_count,
+        esi=esi,
+        block_seq=block_seq,
+        crc32=stored_crc,
+        binary_qr=bool(flags & 0x02),
+        reserved=reserved,
+    )
+    return header, data
+
+
 __all__ = [
     "V3_VERSION",
     "V3_HEADER_SIZE", "V3_TRAILING_CRC_SIZE", "V3_BLOCK_OVERHEAD",
     "V3Header",
     "pack_v3", "unpack", "unpack_v3",
+    "V4_VERSION",
+    "V4_HEADER_SIZE", "V4_TRAILING_CRC_SIZE", "V4_BLOCK_OVERHEAD",
+    "V4Header",
+    "pack_v4", "unpack_v4",
     "auto_blocksize",
     "cobs_encode", "cobs_decode",
     "base45_encode", "base45_decode",

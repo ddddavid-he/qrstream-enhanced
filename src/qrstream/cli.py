@@ -165,18 +165,23 @@ def cmd_colors():
 
 
 # Minimum overhead the default LT codec (SplitMix64 PRNG mixer,
-# qrstream ≥ 0.8) needs to converge on sequential seeds across all
+# qrstream >= 0.8) needs to converge on sequential seeds across all
 # K we've benchmarked (328..4096).  The empirical worst case is
-# K=328 at 1.19×; we round up to 1.20× as the hard floor and
-# recommend ≥1.50× for real captures where frame loss / detector
+# K=328 at 1.19x; we round up to 1.20x as the hard floor and
+# recommend >=1.50x for real captures where frame loss / detector
 # misses eat into the margin.
 #
-# Anything below the floor indicates either a misunderstanding of
-# the codec (LT can't converge below its PRNG-dependent threshold,
-# period) or a test/benchmark use case — those can bypass via the
-# LTEncoder API directly.
-_MIN_OVERHEAD = 1.20
-_RECOMMENDED_OVERHEAD = 1.50
+# RaptorQ (RFC 6330) is near-optimal: any K packets suffice, so the
+# overhead floor is effectively 1.0x.  We use 1.02x as the safety
+# margin and recommend >=1.10x for real captures.
+_MIN_OVERHEAD_LT = 1.20
+_RECOMMENDED_OVERHEAD_LT = 1.50
+_MIN_OVERHEAD_RQ = 1.02
+_RECOMMENDED_OVERHEAD_RQ = 1.10
+
+# Legacy aliases (used by some tests).
+_MIN_OVERHEAD = _MIN_OVERHEAD_LT
+_RECOMMENDED_OVERHEAD = _RECOMMENDED_OVERHEAD_LT
 
 
 def _resolve_mode(args) -> OutputMode:
@@ -291,18 +296,29 @@ def cmd_encode(args):
             print(f"Error: {err}", file=sys.stderr)
             sys.exit(1)
 
-    if args.overhead < _MIN_OVERHEAD:
+    fountain_codec = getattr(args, 'fountain_codec', 'raptorq')
+
+    if fountain_codec == 'raptorq':
+        min_oh = _MIN_OVERHEAD_RQ
+        rec_oh = _RECOMMENDED_OVERHEAD_RQ
+        codec_name = 'RaptorQ'
+    else:
+        min_oh = _MIN_OVERHEAD_LT
+        rec_oh = _RECOMMENDED_OVERHEAD_LT
+        codec_name = 'LT'
+
+    if args.overhead < min_oh:
         print(
-            f"Error: --overhead {args.overhead} is below the LT codec's "
-            f"convergence floor ({_MIN_OVERHEAD}×). Decoding would fail "
-            f"even on a perfect capture. Use --overhead {_RECOMMENDED_OVERHEAD} "
+            f"Error: --overhead {args.overhead} is below the {codec_name} codec's "
+            f"convergence floor ({min_oh}x). Decoding would fail "
+            f"even on a perfect capture. Use --overhead {rec_oh} "
             f"or higher for reliable real-world recording."
         )
         sys.exit(2)
-    if args.overhead < _RECOMMENDED_OVERHEAD:
+    if args.overhead < rec_oh:
         print(
-            f"Warning: --overhead {args.overhead} is near the LT convergence "
-            f"floor. Recommended: ≥{_RECOMMENDED_OVERHEAD} so camera frame "
+            f"Warning: --overhead {args.overhead} is near the {codec_name} convergence "
+            f"floor. Recommended: >={rec_oh} so camera frame "
             f"loss and QR detector misses don't push decoding below the "
             f"threshold."
         )
@@ -336,6 +352,7 @@ def cmd_encode(args):
             force_compress=args.force_compress,
             auto_mask=args.auto_mask,
             reporter=reporter,
+            fountain_codec=fountain_codec,
         )
         if display:
             encode_to_display(
@@ -497,6 +514,10 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                           'or base64 (standard, QR byte mode).')
     enc.add_argument('--codec', choices=['h264', 'mp4v', 'mjpeg'], default='h264',
                      help='Video codec: h264 (default), mp4v, or mjpeg (faster, larger)')
+    enc.add_argument('--fountain-codec', dest='fountain_codec',
+                     choices=['raptorq', 'lt'], default='raptorq',
+                     help='Fountain code: raptorq (default, RFC 6330, near-optimal) '
+                          'or lt (legacy LT codes)')
     enc.add_argument('-w', '--workers', type=int, default=None,
                      help='Parallel workers for QR generation (default: 1; higher values may not improve performance)')
     enc.add_argument('--auto-mask', action='store_true',
