@@ -13,13 +13,9 @@ name: real-world-tests
 #   * Splitting it out keeps unit tests fast while still letting
 #     dev/main pushes and release gates exercise the real recordings.
 #
-# Gating vs. non-gating:
-#   * Most real-phone-v3 and all real-phone-v4 cases are gating:
-#     any failure fails this job.
-#   * ``v070`` is marked ``xfail(strict=False)`` in
-#     ``tests/test_real_recordings.py`` so its occasional
-#     misdetection on specific ffmpeg builds shows up as XFAIL /
-#     XPASS in the report but never blocks a release.
+# All committed real-phone fixture cases are gating: any failure
+# fails this job.  Historical marginal captures were removed once
+# focused unit regressions covered their failure modes.
 
 on:
   push:
