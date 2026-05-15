@@ -3,15 +3,22 @@
 import struct
 from math import ceil
 
+import qrstream.raptorq_codec as rq
 from qrstream.raptorq_codec import (
     RaptorQEncoder,
     RaptorQDecoder,
+    _rq_order_packets,
     _rq_payload_id,
     _rq_payload_id_parts,
     _rq_source_block_layout,
     _rq_source_index,
 )
-from qrstream.protocol import V4_VERSION, unpack
+from qrstream.protocol import V4_VERSION, pack_v4, unpack
+
+
+def _packet(sbn: int, local_esi: int, symbol_size: int = 4) -> bytes:
+    payload_id = _rq_payload_id(sbn, local_esi)
+    return struct.pack('>I', payload_id) + bytes([payload_id & 0xFF]) * symbol_size
 
 
 class TestRaptorQPayloadIdMapping:
@@ -35,6 +42,12 @@ class TestRaptorQPayloadIdMapping:
         assert _rq_source_index(_rq_payload_id(1, 28_201), k) == 56_404
         assert _rq_source_index(_rq_payload_id(0, 28_203), k) is None
         assert _rq_source_index(_rq_payload_id(1, 28_202), k) is None
+
+    def test_mapping_uses_explicit_source_block_count(self):
+        assert _rq_source_block_layout(10, 3) == [(0, 4), (4, 3), (7, 3)]
+        assert _rq_source_index(_rq_payload_id(1, 0), 10, 3) == 4
+        assert _rq_source_index(_rq_payload_id(2, 2), 10, 3) == 9
+        assert _rq_source_index(_rq_payload_id(2, 3), 10, 3) is None
 
 
 class TestRaptorQEncoder:
@@ -111,6 +124,60 @@ class TestRaptorQEncoder:
         # _seq is reset to 0 by generate_blocks, so should be 0,1,2
         assert seqs == [0, 1, 2]
 
+    def test_multi_source_block_packet_ordering(self):
+        packets = [
+            _packet(0, 0), _packet(0, 1), _packet(0, 2), _packet(0, 3),
+            _packet(1, 0), _packet(1, 1), _packet(1, 2),
+        ]
+
+        ordered = _rq_order_packets(packets, total_symbols=5, source_blocks=2)
+        payload_ids = [struct.unpack('>I', pkt[:4])[0] for pkt in ordered]
+
+        assert payload_ids == [
+            _rq_payload_id(0, 0),
+            _rq_payload_id(1, 0),
+            _rq_payload_id(0, 1),
+            _rq_payload_id(1, 1),
+            _rq_payload_id(0, 2),
+            _rq_payload_id(0, 3),
+            _rq_payload_id(1, 2),
+        ]
+
+    def test_generate_blocks_writes_z_and_round_robin_order(self):
+        class FakePacketSource:
+            def get_encoded_packets(self, repair_per_block):
+                assert repair_per_block == 1
+                return [
+                    _packet(0, 0), _packet(0, 1),
+                    _packet(0, 2), _packet(0, 3),
+                    _packet(1, 0), _packet(1, 1), _packet(1, 2),
+                ]
+
+        encoder = RaptorQEncoder.__new__(RaptorQEncoder)
+        encoder.filesize = 20
+        encoder.blocksize = 4
+        encoder.K = 5
+        encoder.source_blocks = 2
+        encoder.compressed = False
+        encoder.alphanumeric_qr = False
+        encoder._encoder = FakePacketSource()
+        encoder._seq = 0
+
+        blocks = list(RaptorQEncoder.generate_blocks(encoder, 7))
+        payload_ids = [payload_id for _, payload_id, _ in blocks]
+        headers = [unpack(packed)[0] for packed, _, _ in blocks]
+
+        assert payload_ids == [
+            _rq_payload_id(0, 0),
+            _rq_payload_id(1, 0),
+            _rq_payload_id(0, 1),
+            _rq_payload_id(1, 1),
+            _rq_payload_id(0, 2),
+            _rq_payload_id(0, 3),
+            _rq_payload_id(1, 2),
+        ]
+        assert all(header.reserved == 2 for header in headers)
+
 
 class TestRaptorQDecoder:
     """RaptorQDecoder consumes V4 packets and recovers data."""
@@ -156,6 +223,95 @@ class TestRaptorQDecoder:
 
         assert decoder.num_recovered == 2
         assert decoder.progress == 0.2
+
+    def test_multi_source_block_eliminated_uses_payload_id_z(self, monkeypatch):
+        class DummyInnerDecoder:
+            def decode(self, packet):
+                return None
+
+        class DummyDecoderFactory:
+            @staticmethod
+            def with_defaults(padded_len, symbol_size):
+                return DummyInnerDecoder()
+
+        class DummyRaptorQ:
+            Decoder = DummyDecoderFactory
+
+        monkeypatch.setattr(rq, "_raptorq", DummyRaptorQ)
+
+        decoder = RaptorQDecoder()
+        first = pack_v4(
+            filesize=20,
+            symbol_size=4,
+            symbol_count=5,
+            esi=_rq_payload_id(1, 0),
+            block_seq=0,
+            data=b'\x00' * 4,
+            reserved=2,
+        )
+        done, _ = decoder.decode_bytes(first)
+
+        assert not done
+        assert decoder.source_blocks == 2
+        assert decoder.eliminated == {3: True}
+        assert decoder.num_recovered == 1
+        assert decoder.progress == 0.2
+
+        second = pack_v4(
+            filesize=20,
+            symbol_size=4,
+            symbol_count=5,
+            esi=_rq_payload_id(1, 1),
+            block_seq=1,
+            data=b'\x00' * 4,
+            reserved=2,
+        )
+        repair = pack_v4(
+            filesize=20,
+            symbol_size=4,
+            symbol_count=5,
+            esi=_rq_payload_id(0, 3),
+            block_seq=2,
+            data=b'\x00' * 4,
+            reserved=2,
+        )
+
+        decoder.decode_bytes(second)
+        decoder.decode_bytes(repair)
+
+        assert decoder.eliminated == {3: True, 4: True}
+        assert decoder.num_recovered == 2
+        assert decoder.progress == 0.4
+
+    def test_legacy_reserved_zero_uses_single_source_block(self, monkeypatch):
+        class DummyInnerDecoder:
+            def decode(self, packet):
+                return None
+
+        class DummyDecoderFactory:
+            @staticmethod
+            def with_defaults(padded_len, symbol_size):
+                return DummyInnerDecoder()
+
+        class DummyRaptorQ:
+            Decoder = DummyDecoderFactory
+
+        monkeypatch.setattr(rq, "_raptorq", DummyRaptorQ)
+
+        decoder = RaptorQDecoder()
+        packed = pack_v4(
+            filesize=16,
+            symbol_size=4,
+            symbol_count=4,
+            esi=_rq_payload_id(0, 2),
+            block_seq=0,
+            data=b'\x00' * 4,
+            reserved=0,
+        )
+        decoder.decode_bytes(packed)
+
+        assert decoder.source_blocks == 1
+        assert decoder.eliminated == {2: True}
 
     def test_is_done(self):
         data = b'\xAB' * 128

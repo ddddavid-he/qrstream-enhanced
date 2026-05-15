@@ -75,40 +75,27 @@ class _FixtureSpec:
     def __init__(
         self,
         video: str,
-        input_bin: str,
+        input_bin: str | None,
         expected_sha: str,
         min_uniq_blocks: int,
         qr_version: int,
         ec_level: int,
     ):
         self.video = _FIXTURES_DIR / video
-        self.input_bin = _FIXTURES_DIR / input_bin
+        self.input_bin = _FIXTURES_DIR / input_bin if input_bin else None
         self.expected_sha = expected_sha
         self.min_uniq_blocks = min_uniq_blocks
         self.qr_version = qr_version
         self.ec_level = ec_level
 
 
-# Keep this list in sync with
-# tests/test_real_recordings.py::(_GATING_CASES, _NON_GATING_CASES).
+# Keep this list in sync with tests/test_real_recordings.py::_GATING_CASES
+# for LT fixtures that benefit from layer-by-layer diagnostics.
 # ``min_uniq_blocks`` is a conservative lower bound on what
 # extract_qr_from_video should yield *after* targeted recovery; it
 # must be greater than K (number of source blocks in the fixture)
 # and leave some margin for normal run-to-run variance.
 _FIXTURES = {
-    "v070": _FixtureSpec(
-        video="real-phone-v3/v070.mp4",
-        input_bin="real-phone-v3/v070.input.bin",
-        expected_sha=(
-            "2a20b62e35bf4b3a7f5fa4854397eeafea99d1efb8db38737cda4df55a4d5b8d"
-        ),
-        # v070 fixture: 307200 bytes, blocksize=938 → K=328.  Main
-        # scan historically lands at ~488 unique blocks; recovery can
-        # add a few more.  Assert we stay well above K.
-        min_uniq_blocks=360,
-        qr_version=25,
-        ec_level=1,
-    ),
     "v061": _FixtureSpec(
         video="real-phone-v3/v061.mp4",
         input_bin="real-phone-v3/v061.input.bin",
@@ -116,17 +103,6 @@ _FIXTURES = {
             "4a440b6da851a9a2e35eacca95b7b2fe29e3560c169b0a57211fccc2f5469443"
         ),
         min_uniq_blocks=40,
-        qr_version=25,
-        ec_level=1,
-    ),
-    "v073-10kB": _FixtureSpec(
-        video="real-phone-v4/v073-10kB.mp4",
-        input_bin="real-phone-v4/v073-10kB.input.bin",
-        expected_sha=(
-            "897d28b6b6e8540e08cb2e10f790a7cd40c84d56840e03349fef4a05a95ee8a4"
-        ),
-        # K=11; phone capture consistently yields ~16 unique blocks.
-        min_uniq_blocks=11,
         qr_version=25,
         ec_level=1,
     ),
@@ -150,6 +126,17 @@ _FIXTURES = {
         # K≈326; capture yields ~387 unique blocks.
         min_uniq_blocks=330,
         qr_version=25,
+        ec_level=1,
+    ),
+    "lt-pi-1MB": _FixtureSpec(
+        video="real-phone-current/lt-pi-1MB.mp4",
+        input_bin=None,
+        expected_sha=(
+            "7806ee47461b49ef1f578e14461b2c83c09c6d7a9a914275da1d71e9cbbf7069"
+        ),
+        # K=449; compressed phone fixture yields ~480 unique blocks.
+        min_uniq_blocks=450,
+        qr_version=40,
         ec_level=1,
     ),
 }
@@ -222,30 +209,20 @@ def _ground_truth_block_for_seed(enc: LTEncoder, seed: int) -> bytes:
     return data
 
 
-# Param-level xfail for v070: low-quality capture kept as worst-case
-# smoke signal (see tests/test_real_recordings.py for the full
-# rationale). All other fixtures must pass the full L1–L4 stack.
-_XFAIL_V070 = pytest.mark.xfail(
-    strict=False,
-    reason="v070 is a low-quality capture kept as a worst-case "
-           "smoke signal; do not block releases on its layered "
-           "assertions.",
-)
-
-
 @pytest.fixture(
     scope="module",
     params=[
         pytest.param("v061", id="v3-v061"),
-        pytest.param("v070", id="v3-v070", marks=_XFAIL_V070),
-        pytest.param("v073-10kB", id="v4-v073-10kB"),
         pytest.param("v073-100kB", id="v4-v073-100kB"),
         pytest.param("v073-300kB", id="v4-v073-300kB"),
+        pytest.param("lt-pi-1MB", id="current-lt-pi-1MB"),
     ],
 )
 def fixture_spec(request) -> _FixtureSpec:
     spec = _FIXTURES[request.param]
-    if not spec.video.exists() or not spec.input_bin.exists():
+    if not spec.video.exists() or (
+        spec.input_bin is not None and not spec.input_bin.exists()
+    ):
         pytest.skip(f"fixture {request.param} missing on this checkout")
     return spec
 
@@ -285,6 +262,9 @@ def test_layer2_each_block_matches_ground_truth(fixture_spec):
     identical under zlib-ng.  See the module-level note above
     ``_ZLIB_NG_SKIP`` for the two candidate long-term fixes.
     """
+    if fixture_spec.input_bin is None:
+        pytest.skip("fixture has no committed source file for L2 oracle")
+
     blocks = extract_qr_from_video(
         str(fixture_spec.video), sample_rate=0, verbose=False, workers=None,
     )

@@ -509,10 +509,11 @@ def auto_blocksize(filesize: int, ec_level: int = 1,
 # trailing CRC-32, so the only external difference is the version
 # byte (0x04) and the reinterpretation of a few fields:
 #
-#   * ``seed`` → ``esi`` (Encoding Symbol Identifier, uint32)
+#   * ``seed`` → ``esi`` (RaptorQ PayloadId: SBN || local ESI, uint32)
 #   * prng_version flag bit (0x04) is unused (always cleared)
 #   * ``blocksize`` → ``symbol_size`` (same semantics, new name)
 #   * ``block_count`` → ``symbol_count`` (K, same semantics)
+#   * ``reserved`` → ``source_blocks`` (Z; 0 means legacy/single-SB)
 
 V4_VERSION = 0x04
 
@@ -563,11 +564,13 @@ def pack_v4(filesize: int, symbol_size: int, symbol_count: int,
             esi: int, block_seq: int, data: bytes,
             compressed: bool = False,
             binary_qr: bool = False,
-            alphanumeric_qr: bool | None = None) -> bytes:
+            alphanumeric_qr: bool | None = None,
+            reserved: int = 0) -> bytes:
     """Serialize a V4 (RaptorQ) block to bytes.
 
     Wire format is identical to V3 except for the version byte (0x04)
-    and the absence of the prng_version flag bit.
+    and the absence of the prng_version flag bit.  ``esi`` stores the raw
+    4-byte RaptorQ PayloadId; ``reserved`` stores source-block count Z.
     """
     high_density = _resolve_alphanumeric_flag(binary_qr, alphanumeric_qr)
     if filesize > 0xFFFFFFFFFFFFFFFF:
@@ -578,6 +581,8 @@ def pack_v4(filesize: int, symbol_size: int, symbol_count: int,
         raise ValueError("V4 symbol_size exceeds uint16 limit")
     if esi > 0xFFFFFFFF:
         raise ValueError("V4 esi exceeds uint32 limit")
+    if reserved < 0 or reserved > 0xFFFF:
+        raise ValueError("V4 reserved exceeds uint16 limit")
     if len(data) > symbol_size:
         raise ValueError("Symbol data longer than symbol_size")
 
@@ -597,7 +602,7 @@ def pack_v4(filesize: int, symbol_size: int, symbol_count: int,
         symbol_count,
         esi,
         block_seq,
-        0,  # reserved
+        reserved,
     )
     crc = zlib.crc32(header + data) & 0xFFFFFFFF
     return header + data + struct.pack('>I', crc)

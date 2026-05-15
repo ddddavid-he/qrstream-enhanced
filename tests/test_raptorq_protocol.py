@@ -35,6 +35,22 @@ class TestV4PackUnpack:
         assert header.block_seq == 7
         assert unpacked_data == data
 
+    def test_reserved_roundtrip(self):
+        data = b'\xAB' * 64
+        packed = pack_v4(
+            filesize=1024,
+            symbol_size=64,
+            symbol_count=16,
+            esi=0x01000000,
+            block_seq=7,
+            data=data,
+            reserved=2,
+        )
+        header, unpacked_data = unpack_v4(packed)
+        assert header.esi == 0x01000000
+        assert header.reserved == 2
+        assert unpacked_data == data
+
     def test_compressed_flag(self):
         data = b'\x00' * 32
         packed = pack_v4(
@@ -177,6 +193,15 @@ class TestV4Validation:
         try:
             pack_v4(filesize=100, symbol_size=32, symbol_count=4,
                     esi=0x1_0000_0000, block_seq=0, data=b'\x00' * 32)
+            assert False, "Expected ValueError"
+        except ValueError:
+            pass
+
+    def test_reserved_exceeds_uint16_raises(self):
+        try:
+            pack_v4(filesize=100, symbol_size=32, symbol_count=4,
+                    esi=0, block_seq=0, data=b'\x00' * 32,
+                    reserved=0x1_0000)
             assert False, "Expected ValueError"
         except ValueError:
             pass
