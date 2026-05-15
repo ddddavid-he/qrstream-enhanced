@@ -59,19 +59,34 @@ def _rq_num_source_blocks(total_symbols: int) -> int:
     return ceil(total_symbols / _RQ_MAX_SOURCE_SYMBOLS_PER_BLOCK)
 
 
-def _rq_source_block_layout(total_symbols: int) -> list[tuple[int, int]]:
+def _rq_source_blocks_from_packets(packets: list[bytes]) -> int:
+    """Return Z by counting unique SBNs in serialised RaptorQ packets."""
+    sbns = set()
+    for pkt in packets:
+        if len(pkt) >= _RQ_ESI_HEADER_SIZE:
+            payload_id = struct.unpack('>I', pkt[:_RQ_ESI_HEADER_SIZE])[0]
+            sbn, _ = _rq_payload_id_parts(payload_id)
+            sbns.add(sbn)
+    return len(sbns)
+
+
+def _rq_source_block_layout(total_symbols: int,
+                            source_blocks: int | None = None
+                            ) -> list[tuple[int, int]]:
     """Return ``[(global_start, symbol_count), ...]`` for RaptorQ SBNs.
 
     The upstream Rust implementation uses RFC 6330 ``Partition[Kt, Z]``:
     the first ``ZL`` source blocks are one symbol larger when ``Kt`` is not
-    divisible by ``Z``.
+    divisible by ``Z``.  If ``source_blocks`` is omitted, QRStream mirrors
+    the default ``raptorq`` Z; decoded V4 frames pass header.reserved here.
     """
-    source_blocks = _rq_num_source_blocks(total_symbols)
-    if source_blocks <= 0:
+    if source_blocks is None:
+        source_blocks = _rq_num_source_blocks(total_symbols)
+    if total_symbols <= 0 or source_blocks <= 0:
         return []
 
     large = ceil(total_symbols / source_blocks)
-    small = total_symbols // source_blocks
+    small = large - 1
     large_count = total_symbols - small * source_blocks
 
     layout: list[tuple[int, int]] = []
@@ -83,13 +98,14 @@ def _rq_source_block_layout(total_symbols: int) -> list[tuple[int, int]]:
     return layout
 
 
-def _rq_source_index(payload_id: int, total_symbols: int) -> int | None:
+def _rq_source_index(payload_id: int, total_symbols: int,
+                     source_blocks: int | None = None) -> int | None:
     """Map a systematic PayloadId to QRStream's global source index.
 
     Returns ``None`` for repair PayloadIds or out-of-range source block ids.
     """
     sbn, local_esi = _rq_payload_id_parts(payload_id)
-    layout = _rq_source_block_layout(total_symbols)
+    layout = _rq_source_block_layout(total_symbols, source_blocks)
     if sbn >= len(layout):
         return None
     offset, count = layout[sbn]
@@ -98,14 +114,49 @@ def _rq_source_index(payload_id: int, total_symbols: int) -> int | None:
     return offset + local_esi
 
 
-def _rq_repair_ordinal(payload_id: int, total_symbols: int) -> tuple[int, int]:
+def _rq_source_ordinal(payload_id: int, total_symbols: int,
+                       source_blocks: int | None = None
+                       ) -> tuple[int, int] | None:
+    """Return ``(local_esi, sbn)`` for source-first round-robin ordering."""
+    source_idx = _rq_source_index(payload_id, total_symbols, source_blocks)
+    if source_idx is None:
+        return None
+    sbn, local_esi = _rq_payload_id_parts(payload_id)
+    return local_esi, sbn
+
+
+def _rq_repair_ordinal(payload_id: int, total_symbols: int,
+                       source_blocks: int | None = None) -> tuple[int, int]:
     """Return ``(repair_index_within_sbn, sbn)`` for stable repair ordering."""
     sbn, local_esi = _rq_payload_id_parts(payload_id)
-    layout = _rq_source_block_layout(total_symbols)
+    layout = _rq_source_block_layout(total_symbols, source_blocks)
     if sbn < len(layout):
         _, count = layout[sbn]
         return max(0, local_esi - count), sbn
     return local_esi, sbn
+
+
+def _rq_order_packets(packets: list[bytes], total_symbols: int,
+                      source_blocks: int | None = None) -> list[bytes]:
+    """Order RaptorQ packets as source round-robin, then repair round-robin."""
+    source_packets: list[tuple[tuple[int, int], bytes]] = []
+    repair_packets: list[tuple[tuple[int, int], bytes]] = []
+    for pkt in packets:
+        payload_id = struct.unpack('>I', pkt[:_RQ_ESI_HEADER_SIZE])[0]
+        source_ordinal = _rq_source_ordinal(
+            payload_id, total_symbols, source_blocks)
+        if source_ordinal is None:
+            repair_packets.append(
+                (_rq_repair_ordinal(payload_id, total_symbols, source_blocks),
+                 pkt))
+        else:
+            source_packets.append((source_ordinal, pkt))
+
+    source_packets.sort(key=lambda item: item[0])
+    repair_packets.sort(key=lambda item: item[0])
+    ordered = [pkt for _, pkt in source_packets]
+    ordered.extend(pkt for _, pkt in repair_packets)
+    return ordered
 
 
 class RaptorQEncoder:
@@ -148,6 +199,9 @@ class RaptorQEncoder:
         self.blocksize = actual_symbol_size
         self.K = len(probe_packets) if probe_packets else (
             ceil(self.filesize / self.blocksize) if self.filesize > 0 else 0)
+        self.source_blocks = _rq_source_blocks_from_packets(probe_packets)
+        if self.K > 0 and self.source_blocks == 0:
+            self.source_blocks = _rq_num_source_blocks(self.K)
         self._seq = 0
 
     # Keep ``binary_qr`` as a read-only alias for symmetry with
@@ -159,37 +213,27 @@ class RaptorQEncoder:
     def generate_blocks(self, count: int):
         """Generate ``count`` encoded symbols as packed V4 byte strings.
 
-        Systematic packets are emitted first in global source-symbol order;
-        repair packets follow in source-block round-robin order.  The
+        Systematic packets are emitted first in source-block round-robin
+        order; repair packets follow in source-block round-robin order.  The
         upstream ``raptorq`` API returns packets grouped per source block
         (source + repair), so QRStream reorders them to keep early frames
         useful for block-map rendering and evenly distribute repair symbols.
 
         Yields ``(packed_v4_bytes, payload_id, seq)`` triples.
         """
-        source_blocks = _rq_num_source_blocks(self.K)
+        source_blocks = self.source_blocks or _rq_num_source_blocks(self.K)
         repair_count = max(0, count - self.K)
         repair_per_block = (
             ceil(repair_count / source_blocks)
             if source_blocks > 0 else 0
         )
         packets = self._encoder.get_encoded_packets(repair_per_block)
+        packet_source_blocks = _rq_source_blocks_from_packets(packets)
+        if packet_source_blocks > 0:
+            source_blocks = packet_source_blocks
+            self.source_blocks = source_blocks
 
-        source_packets: list[tuple[int, bytes]] = []
-        repair_packets: list[tuple[tuple[int, int], bytes]] = []
-        for pkt in packets:
-            payload_id = struct.unpack('>I', pkt[:_RQ_ESI_HEADER_SIZE])[0]
-            source_idx = _rq_source_index(payload_id, self.K)
-            if source_idx is None:
-                repair_packets.append(
-                    (_rq_repair_ordinal(payload_id, self.K), pkt))
-            else:
-                source_packets.append((source_idx, pkt))
-
-        source_packets.sort(key=lambda item: item[0])
-        repair_packets.sort(key=lambda item: item[0])
-        ordered_packets = [pkt for _, pkt in source_packets]
-        ordered_packets.extend(pkt for _, pkt in repair_packets)
+        ordered_packets = _rq_order_packets(packets, self.K, source_blocks)
 
         self._seq = 0
         for pkt in ordered_packets[:count]:
@@ -205,6 +249,7 @@ class RaptorQEncoder:
                 data=symbol_data,
                 compressed=self.compressed,
                 alphanumeric_qr=self.alphanumeric_qr,
+                reserved=source_blocks,
             )
             yield packed, payload_id, seq
             self._seq += 1
@@ -220,6 +265,8 @@ class RaptorQDecoder:
         self.K = 0
         self.filesize = 0
         self.blocksize = 0      # = symbol_size
+        # V4 reserved; 0 on wire means legacy single-SB.
+        self.source_blocks = 1
         self.done = False
         self.compressed = False
         self.protocol_version = None
@@ -266,6 +313,7 @@ class RaptorQDecoder:
         symbol_count = header.block_count   # V4Header.block_count property
         payload_id = header.seed            # V4Header.seed property
         compressed = header.compressed
+        source_blocks = header.reserved if header.reserved > 0 else 1
 
         if symbol_size <= 0:
             raise ValueError(f"Invalid symbol_size: {symbol_size}")
@@ -275,6 +323,7 @@ class RaptorQDecoder:
             self.filesize = filesize
             self.blocksize = symbol_size
             self.K = symbol_count
+            self.source_blocks = source_blocks
             self.compressed = compressed
             # Padded length for raptorq decoder (K * symbol_size).
             padded_len = self.K * symbol_size
@@ -295,6 +344,10 @@ class RaptorQDecoder:
             if symbol_count != self.K:
                 raise ValueError(
                     f"symbol_count mismatch: {symbol_count} != {self.K}")
+            if source_blocks != self.source_blocks:
+                raise ValueError(
+                    f"source_blocks mismatch: {source_blocks} != "
+                    f"{self.source_blocks}")
             if compressed != self.compressed:
                 raise ValueError(
                     f"compressed flag mismatch: {compressed} != "
@@ -315,7 +368,7 @@ class RaptorQDecoder:
         self._fed_count += 1
 
         # Track systematic source-symbol reception for block map display.
-        source_idx = _rq_source_index(payload_id, self.K)
+        source_idx = _rq_source_index(payload_id, self.K, self.source_blocks)
         if source_idx is not None:
             self.eliminated[source_idx] = True
 
