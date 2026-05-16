@@ -883,21 +883,20 @@ def generate_calibration(
     frame_seq = _build_frame_sequence(config)
     total_logical = len(frame_seq)
 
-    duration = _estimate_sequence_duration(config)
-    reporter.info(
-        f"Calibration: preset={config.preset_name}, "
-        f"version_steps={len(config.version_ladder)}, "
-        f"fps_steps={len(config.fps_ladder)}, "
-        f"duration≈{duration:.1f}s, "
-        f"logical_frames={total_logical}"
-    )
+    if not display and not output_path:
+        raise ValueError("Either output_path or display must be specified")
 
+    reporter.calibrate_generate_start(
+        preset=config.preset_name,
+        total_frames=total_logical,
+    )
     if display:
         _generate_display(config, frame_seq, reporter)
-    elif output_path:
-        _generate_video(config, frame_seq, output_path, codec, reporter)
     else:
-        raise ValueError("Either output_path or display must be specified")
+        assert output_path is not None
+        _generate_video(config, frame_seq, output_path, codec, reporter)
+    reporter.calibrate_generate_done(
+        output_path=output_path if output_path else None)
 
     return config
 
@@ -1008,8 +1007,6 @@ def _generate_video(
     if stream_opts:
         out_stream.options = stream_opts
 
-    written = 0
-
     try:
         for idx, (cf, qr_ver, target_fps) in enumerate(frame_seq):
             payload_bytes = _calibration_payload(cf, qr_ver)
@@ -1028,25 +1025,16 @@ def _generate_video(
                 frame_av = av.VideoFrame.from_ndarray(qr_img, format="bgr24")
                 for packet in out_stream.encode(frame_av):
                     output.mux(packet)
-                written += 1
 
             if idx % 50 == 0 or idx == len(frame_seq) - 1:
                 pct = (idx + 1) / len(frame_seq) * 100
-                reporter.info(
-                    f"Generating calibration video: {pct:.0f}% "
-                    f"({idx + 1}/{len(frame_seq)} logical frames)"
-                )
+                reporter.calibrate_generate_update(progress_pct=pct)
 
         # Flush
         for packet in out_stream.encode():
             output.mux(packet)
     finally:
         output.close()
-
-    reporter.info(
-        f"Calibration video written: {output_path} "
-        f"({written} container frames @ {container_rate}fps)"
-    )
 
 
 class _CalibrationDisplayCache:
@@ -1152,7 +1140,6 @@ def _generate_display(
         ignore_saved_geometry=True,
     )
     play_display_qt(cache, state, display_fps, config=player_config)
-    reporter.info("Calibration display complete.")
 
 
 # ── Calibration video analysis (decoder side) ───────────────────────
@@ -1365,6 +1352,12 @@ def analyze_calibration(
 
 # ── Pretty-printing results (Rich) ─────────────────────────────────
 
+def _format_percent(value: float | None) -> str:
+    if value is None:
+        return "--"
+    return f"{value:.1%}"
+
+
 def format_results(result: CalibrationResult) -> str:
     """Format calibration results as a human-readable string.
 
@@ -1391,30 +1384,39 @@ def format_results(result: CalibrationResult) -> str:
     if any(r.available for r in result.recommendations):
         lines.append(
             f"  {'Tier':<12} {'Version':>8} {'FPS':>6} "
-            f"{'Overhead':>9} {'Success':>9} {'Throughput':>12}"
+            f"{'Overhead':>9} {'Success':>9} {'p_frame':>8} "
+            f"{'Source':>10} {'Throughput':>12}"
         )
         lines.append(
-            f"  {'-'*12} {'-'*8} {'-'*6} {'-'*9} {'-'*9} {'-'*12}"
+            f"  {'-'*12} {'-'*8} {'-'*6} {'-'*9} {'-'*9} "
+            f"{'-'*8} {'-'*10} {'-'*12}"
         )
         for rec in result.recommendations:
             if rec.available:
                 tp = _format_throughput(rec.throughput_bps or 0)
-                success = (
-                    f"{rec.estimated_success:.1%}"
-                    if rec.estimated_success is not None else "--"
-                )
+                success = _format_percent(rec.estimated_success)
+                p_frame = _format_percent(rec.frame_detect_probability)
+                source = rec.source or "--"
                 lines.append(
                     f"  {rec.tier.capitalize():<12} "
                     f"{'V' + str(rec.qr_version):>8} "
                     f"{rec.fps:>6} "
                     f"{rec.overhead:>9.2f} "
                     f"{success:>9} "
+                    f"{p_frame:>8} "
+                    f"{source:>10} "
                     f"{tp:>12}"
                 )
             else:
                 lines.append(
-                    f"  {rec.tier.capitalize():<12}    "
-                    f"{'-- unavailable --':>38}"
+                    f"  {rec.tier.capitalize():<12} "
+                    f"{'--':>8} "
+                    f"{'--':>6} "
+                    f"{'--':>9} "
+                    f"{'--':>9} "
+                    f"{'--':>8} "
+                    f"{'--':>10} "
+                    f"{'-- unavailable --':>12}"
                 )
         lines.append("")
 
@@ -1507,28 +1509,28 @@ def render_results(result: CalibrationResult):
         table.add_column("FPS", justify="right")
         table.add_column("Overhead", justify="right")
         table.add_column("Success", justify="right")
+        table.add_column("p_frame", justify="right")
+        table.add_column("Source", justify="right")
         table.add_column("Throughput", justify="right")
 
         for rec in result.recommendations:
             row_style = tier_styles.get(rec.tier, "white")
             if rec.available:
-                success = (
-                    f"{rec.estimated_success:.1%}"
-                    if rec.estimated_success is not None else "--"
-                )
                 table.add_row(
                     rec.tier.capitalize(),
                     f"V{rec.qr_version}",
                     str(rec.fps),
                     f"{rec.overhead:.2f}",
-                    success,
+                    _format_percent(rec.estimated_success),
+                    _format_percent(rec.frame_detect_probability),
+                    rec.source or "--",
                     _format_throughput(rec.throughput_bps or 0),
                     style=row_style,
                 )
             else:
                 table.add_row(
                     rec.tier.capitalize(),
-                    "--", "--", "--", "--", "-- unavailable --",
+                    "--", "--", "--", "--", "--", "--", "-- unavailable --",
                     style="dim",
                 )
         parts.extend([Text(""), table])

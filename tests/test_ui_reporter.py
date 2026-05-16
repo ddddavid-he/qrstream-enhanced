@@ -208,6 +208,59 @@ class TestLogReporter:
         assert "total=10" in done
 
 
+# ── Calibration progress integration ─────────────────────────────
+
+
+class TestCalibrationProgressIntegration:
+    def test_generate_calibration_output_uses_semantic_reporter(
+            self, monkeypatch, tmp_path):
+        import qrstream.calibrate as cal_mod
+
+        events: list[tuple[str, dict]] = []
+
+        class Recorder:
+            def info(self, message):
+                raise AssertionError(f"unexpected info progress: {message}")
+
+            def calibrate_generate_start(self, **kw):
+                events.append(("start", kw))
+
+            def calibrate_generate_update(self, **kw):
+                events.append(("update", kw))
+
+            def calibrate_generate_done(self, **kw):
+                events.append(("done", kw))
+
+        monkeypatch.setattr(
+            cal_mod,
+            "_build_frame_sequence",
+            lambda _config: [object(), object(), object()],
+        )
+
+        def fake_generate_video(config, frame_seq, output_path, codec, reporter):
+            assert config.preset_name == "fast"
+            assert len(frame_seq) == 3
+            assert output_path == str(tmp_path / "cal.mp4")
+            assert codec == "h264"
+            reporter.calibrate_generate_update(progress_pct=100.0)
+
+        monkeypatch.setattr(cal_mod, "_generate_video", fake_generate_video)
+
+        out = str(tmp_path / "cal.mp4")
+        cal_mod.generate_calibration(
+            preset_name="fast",
+            output_path=out,
+            display_hz=60,
+            reporter=Recorder(),
+        )
+
+        assert events == [
+            ("start", {"preset": "fast", "total_frames": 3}),
+            ("update", {"progress_pct": 100.0}),
+            ("done", {"output_path": out}),
+        ]
+
+
 # ── Resolver ─────────────────────────────────────────────────────
 
 

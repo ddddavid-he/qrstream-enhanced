@@ -494,12 +494,18 @@ class TestRecommendations:
                 TierRecommendation(
                     "safe", True, 40, 30, 1.30, 4000.0,
                     estimated_success=0.991,
+                    frame_detect_probability=0.873,
+                    source="separable",
                 ),
             ],
         )
         text = format_results(result)
         assert "Success" in text
         assert "99.1%" in text
+        assert "p_frame" in text
+        assert "87.3%" in text
+        assert "Source" in text
+        assert "separable" in text
 
     def test_compute_recommendations_records_target_k(self):
         result = compute_recommendations(
