@@ -1023,3 +1023,25 @@ class TestCalibrateE2E:
         result = analyze_calibration(video_path=out)
         assert len(result.version_detect_rates) > 0
         assert result.preset == preset
+
+
+# ── Pairwise plan diversity ─────────────────────────────────────────
+
+
+class TestPairwisePlanDiversity:
+    """The pairwise probe plan must include an interior point at the
+    high-V mid-F region so the optimizer can interpolate near its
+    typical pick (high V, mid FPS) without falling back to the
+    separable model."""
+
+    def test_plan_includes_high_v_mid_f(self):
+        cfg = resolve_preset("standard", display_hz=60)
+        plan = _select_pairwise_plan(cfg.version_ladder, cfg.fps_ladder)
+        max_ver_idx = len(cfg.version_ladder) - 1
+        mid_fps_idx = (len(cfg.fps_ladder) - 1) // 2
+        assert (max_ver_idx, mid_fps_idx) in plan
+
+    def test_plan_unique_pairs(self):
+        cfg = resolve_preset("standard", display_hz=60)
+        plan = _select_pairwise_plan(cfg.version_ladder, cfg.fps_ladder)
+        assert len(plan) == len(set(plan))

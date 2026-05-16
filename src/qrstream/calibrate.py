@@ -248,6 +248,7 @@ def _select_pairwise_plan(
         (0, max_fps_idx),               # FPS frontier at reliable version
         (mid_ver_idx, mid_fps_idx),     # balanced joint point
         (max_ver_idx, 0),               # version frontier at stable FPS
+        (max_ver_idx, mid_fps_idx),     # high-V mid-F (likely-picked region)
         (max_ver_idx, max_fps_idx),     # throughput frontier
     ]
 
