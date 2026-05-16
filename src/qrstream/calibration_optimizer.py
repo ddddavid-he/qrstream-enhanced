@@ -84,6 +84,7 @@ class OptimizerConfig:
     rq_decode_margin: float = RQ_DECODE_MARGIN
     overhead_ladder: tuple[float, ...] | None = None
     ec_level: int = 1
+    success_target_override: float | None = None
 
     @property
     def resolved_overhead_ladder(self) -> tuple[float, ...]:
@@ -181,6 +182,8 @@ def optimize_calibration(
     results: dict[str, CalibrationCandidate | None] = {}
     for tier, target_success in TIER_SUCCESS_TARGETS.items():
         z = TIER_WILSON_Z[tier]
+        if config.success_target_override is not None:
+            target_success = max(target_success, config.success_target_override)
         best: tuple[float, float, int, int, float, CalibrationCandidate] | None = None
 
         for version in versions:

@@ -229,3 +229,32 @@ def test_optimizer_falls_back_to_separable_with_insufficient_pairs():
     aggressive = result["aggressive"]
     assert aggressive is not None
     assert aggressive.source in {"separable", "fallback"}
+
+
+def test_optimizer_respects_success_target_override():
+    """Bumping the success target forces overhead to climb."""
+    # Pick a moderate p so that aggressive (target 0.90) and the
+    # 0.999 override land on different ladder rungs.
+    version_stats = {40: stats_from_rate(0.70, 200)}
+    fps_stats = {30: stats_from_rate(0.70, 200)}
+
+    baseline = optimize_calibration(
+        version_stats,
+        fps_stats,
+        config=OptimizerConfig(fps_anchor_version=40),
+    )
+    strict = optimize_calibration(
+        version_stats,
+        fps_stats,
+        config=OptimizerConfig(
+            fps_anchor_version=40, success_target_override=0.999),
+    )
+
+    base_aggr = baseline["aggressive"]
+    strict_aggr = strict["aggressive"]
+    assert base_aggr is not None
+    assert strict_aggr is not None
+    # A strictly higher success target cannot reduce required overhead.
+    assert strict_aggr.overhead >= base_aggr.overhead
+    # And on this rate the strict run must in fact bump it.
+    assert strict_aggr.overhead > base_aggr.overhead

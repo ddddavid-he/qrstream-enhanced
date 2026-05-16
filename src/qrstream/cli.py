@@ -520,18 +520,25 @@ def cmd_calibrate(args):
                           file=sys.stderr)
                     sys.exit(1)
                 target_size = os.path.getsize(args.target_file)
+            confidence = getattr(args, 'confidence', None)
+            if confidence is not None and not 0.0 < confidence < 1.0:
+                print("Error: --confidence must be in (0, 1).",
+                      file=sys.stderr)
+                sys.exit(1)
             result = analyze_calibration(
                 video_path=args.input,
                 workers=args.workers,
                 reporter=reporter,
                 target_k=estimate_target_k(target_size),
                 fountain_codec=args.fountain_codec,
+                confidence=confidence,
             )
+            verbose = mode is OutputMode.VERBOSE
             console = getattr(reporter, '_console', None)
             if console is not None:
-                console.print(render_results(result))
+                console.print(render_results(result, verbose=verbose))
             else:
-                print(format_results(result))
+                print(format_results(result, verbose=verbose))
         else:
             print("Error: Specify --display, -o, or -i.",
                   file=sys.stderr)
@@ -701,6 +708,10 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
         '--fountain-codec', dest='fountain_codec',
         choices=['raptorq', 'lt'], default='raptorq',
         help='Fountain code model for overhead estimates (default: raptorq)')
+    cal.add_argument(
+        '--confidence', type=float, default=None, metavar='P',
+        help='Override decode-success target across all tiers '
+             '(analysis mode; e.g. 0.95). Higher values bump overhead.')
     cal.add_argument(
         '-w', '--workers', type=int, default=None,
         help='Parallel workers for analysis (default: auto)')

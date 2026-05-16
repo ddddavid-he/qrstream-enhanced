@@ -796,6 +796,7 @@ def compute_recommendations(
     fountain_codec: str = "raptorq",
     pairwise_detect_rates: dict[tuple[int, int], float] | None = None,
     display_hz: int | None = 60,
+    confidence: float | None = None,
 ) -> CalibrationResult:
     """Compute three-tier recommendations from raw detect rates.
 
@@ -822,6 +823,11 @@ def compute_recommendations(
         f"ℹ Recommendations assume K≈{target_k} source symbols "
         f"for {fountain_codec}."
     )
+    if confidence is not None:
+        messages.append(
+            f"ℹ Decode-success target floor overridden to "
+            f"{confidence:.1%}."
+        )
 
     if version_detect_rates:
         sorted_versions = sorted(version_detect_rates.keys())
@@ -924,6 +930,7 @@ def compute_recommendations(
             target_k=target_k,
             capture_fps_ceiling=fps_ceiling if fps_data_reliable else None,
             fps_anchor_version=anchor_version,
+            success_target_override=confidence,
         ),
     )
 
@@ -1418,6 +1425,7 @@ def analyze_calibration(
     reporter: ProgressReporter | None = None,
     target_k: int = DEFAULT_TARGET_K,
     fountain_codec: str = "raptorq",
+    confidence: float | None = None,
 ) -> CalibrationResult:
     """Analyze a captured calibration video and produce recommendations.
 
@@ -1647,6 +1655,7 @@ def analyze_calibration(
         fountain_codec=fountain_codec,
         pairwise_detect_rates=pairwise_detect_rates,
         display_hz=analysis_display_hz,
+        confidence=confidence,
     )
 
     return result

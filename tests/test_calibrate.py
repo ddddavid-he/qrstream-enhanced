@@ -1045,3 +1045,49 @@ class TestPairwisePlanDiversity:
         cfg = resolve_preset("standard", display_hz=60)
         plan = _select_pairwise_plan(cfg.version_ladder, cfg.fps_ladder)
         assert len(plan) == len(set(plan))
+
+# ── CLI --confidence flag ───────────────────────────────────────────
+
+
+class TestCalibrateConfidenceFlag:
+    """The --confidence flag overrides decode-success target for the
+    analysis pipeline; it must parse, validate, and reach the optimizer."""
+
+    def test_parser_accepts_confidence_flag(self, tmp_path):
+        from qrstream.cli import build_parser
+        parser = build_parser()
+        ns = parser.parse_args([
+            'calibrate', '-i', str(tmp_path / 'fake.mov'),
+            '--confidence', '0.99',
+        ])
+        assert ns.confidence == pytest.approx(0.99)
+
+    def test_compute_recommendations_threads_confidence(self):
+        # Force a moderate detection rate so overhead must rise to meet
+        # the override target.
+        version_rates = {25: 0.85, 40: 0.85}
+        fps_rates = {30: 0.85}
+
+        baseline = compute_recommendations(
+            version_detect_rates=version_rates,
+            fps_detect_rates=fps_rates,
+            fps_data_reliable=True,
+            preset_name="standard",
+        )
+        strict = compute_recommendations(
+            version_detect_rates=version_rates,
+            fps_detect_rates=fps_rates,
+            fps_data_reliable=True,
+            preset_name="standard",
+            confidence=0.999,
+        )
+
+        base_aggr = next(
+            r for r in baseline.recommendations if r.tier == "aggressive")
+        strict_aggr = next(
+            r for r in strict.recommendations if r.tier == "aggressive")
+
+        assert base_aggr.available
+        assert strict_aggr.available
+        # A higher success target must not lower required overhead.
+        assert strict_aggr.overhead >= base_aggr.overhead
