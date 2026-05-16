@@ -612,13 +612,42 @@ class TestRecommendations:
                 ),
             ],
         )
-        text = format_results(result)
+        # Diagnostic columns appear only in verbose mode.
+        text = format_results(result, verbose=True)
         assert "Success" in text
         assert "99.1%" in text
         assert "p_frame" in text
         assert "87.3%" in text
         assert "Source" in text
         assert "separable" in text
+
+    def test_format_default_hides_diagnostic_columns(self):
+        result = CalibrationResult(
+            preset="standard",
+            channel_quality="excellent",
+            version_detect_rates={40: 1.0},
+            fps_detect_rates={30: 0.95},
+            fps_data_reliable=True,
+            recommendations=[
+                TierRecommendation(
+                    "safe", True, 40, 30, 1.30, 4000.0,
+                    estimated_success=0.991,
+                    frame_detect_probability=0.873,
+                    source="separable",
+                ),
+            ],
+        )
+        text = format_results(result)
+        # User-facing columns are present.
+        assert "Tier" in text
+        assert "Version" in text
+        assert "Overhead" in text
+        assert "Throughput" in text
+        # Diagnostic columns are hidden by default.
+        assert "Success" not in text
+        assert "p_frame" not in text
+        assert "Source" not in text
+        assert "separable" not in text
 
     def test_compute_recommendations_uses_pairwise_source(self):
         result = compute_recommendations(

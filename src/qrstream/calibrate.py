@@ -1669,11 +1669,16 @@ def _format_percent(value: float | None) -> str:
     return f"{value:.1%}"
 
 
-def format_results(result: CalibrationResult) -> str:
+def format_results(result: CalibrationResult, verbose: bool = False) -> str:
     """Format calibration results as a human-readable string.
 
     Uses plain text formatting (no Rich markup) for maximum
     compatibility.  The CLI layer may further wrap this in Rich panels.
+
+    When ``verbose`` is False (default), diagnostic columns
+    (``Success`` / ``p_frame`` / ``Source``) are hidden — they are
+    internal model outputs that don't directly inform the user's
+    encode decision.
     """
     lines: list[str] = []
     lines.append("QRStream Calibration Results")
@@ -1693,42 +1698,63 @@ def format_results(result: CalibrationResult) -> str:
 
     # Recommendations table
     if any(r.available for r in result.recommendations):
-        lines.append(
-            f"  {'Tier':<12} {'Version':>8} {'FPS':>6} "
-            f"{'Overhead':>9} {'Success':>9} {'p_frame':>8} "
-            f"{'Source':>10} {'Throughput':>12}"
-        )
-        lines.append(
-            f"  {'-'*12} {'-'*8} {'-'*6} {'-'*9} {'-'*9} "
-            f"{'-'*8} {'-'*10} {'-'*12}"
-        )
+        if verbose:
+            lines.append(
+                f"  {'Tier':<12} {'Version':>8} {'FPS':>6} "
+                f"{'Overhead':>9} {'Success':>9} {'p_frame':>8} "
+                f"{'Source':>16} {'Throughput':>12}"
+            )
+            lines.append(
+                f"  {'-'*12} {'-'*8} {'-'*6} {'-'*9} {'-'*9} "
+                f"{'-'*8} {'-'*16} {'-'*12}"
+            )
+        else:
+            lines.append(
+                f"  {'Tier':<12} {'Version':>8} {'FPS':>6} "
+                f"{'Overhead':>9} {'Throughput':>12}"
+            )
+            lines.append(
+                f"  {'-'*12} {'-'*8} {'-'*6} {'-'*9} {'-'*12}"
+            )
         for rec in result.recommendations:
             if rec.available:
                 tp = _format_throughput(rec.throughput_bps or 0)
-                success = _format_percent(rec.estimated_success)
-                p_frame = _format_percent(rec.frame_detect_probability)
-                source = rec.source or "--"
-                lines.append(
-                    f"  {rec.tier.capitalize():<12} "
-                    f"{'V' + str(rec.qr_version):>8} "
-                    f"{rec.fps:>6} "
-                    f"{rec.overhead:>9.2f} "
-                    f"{success:>9} "
-                    f"{p_frame:>8} "
-                    f"{source:>10} "
-                    f"{tp:>12}"
-                )
+                if verbose:
+                    success = _format_percent(rec.estimated_success)
+                    p_frame = _format_percent(rec.frame_detect_probability)
+                    source = rec.source or "--"
+                    lines.append(
+                        f"  {rec.tier.capitalize():<12} "
+                        f"{'V' + str(rec.qr_version):>8} "
+                        f"{rec.fps:>6} "
+                        f"{rec.overhead:>9.2f} "
+                        f"{success:>9} "
+                        f"{p_frame:>8} "
+                        f"{source:>16} "
+                        f"{tp:>12}"
+                    )
+                else:
+                    lines.append(
+                        f"  {rec.tier.capitalize():<12} "
+                        f"{'V' + str(rec.qr_version):>8} "
+                        f"{rec.fps:>6} "
+                        f"{rec.overhead:>9.2f} "
+                        f"{tp:>12}"
+                    )
             else:
-                lines.append(
-                    f"  {rec.tier.capitalize():<12} "
-                    f"{'--':>8} "
-                    f"{'--':>6} "
-                    f"{'--':>9} "
-                    f"{'--':>9} "
-                    f"{'--':>8} "
-                    f"{'--':>10} "
-                    f"{'-- unavailable --':>12}"
-                )
+                if verbose:
+                    lines.append(
+                        f"  {rec.tier.capitalize():<12} "
+                        f"{'--':>8} {'--':>6} {'--':>9} "
+                        f"{'--':>9} {'--':>8} {'--':>16} "
+                        f"{'-- unavailable --':>12}"
+                    )
+                else:
+                    lines.append(
+                        f"  {rec.tier.capitalize():<12} "
+                        f"{'--':>8} {'--':>6} {'--':>9} "
+                        f"{'-- unavailable --':>12}"
+                    )
         lines.append("")
 
         # Recommended command
@@ -1756,10 +1782,13 @@ def format_results(result: CalibrationResult) -> str:
     return "\n".join(lines)
 
 
-def render_results(result: CalibrationResult):
+def render_results(result: CalibrationResult, verbose: bool = False):
     """Return a Rich renderable for calibration results.
 
     Falls back to the plain-text formatter if Rich is unavailable.
+
+    When ``verbose`` is False (default), diagnostic columns
+    (``Success`` / ``p_frame`` / ``Source``) are hidden.
     """
     try:
         from rich import box
@@ -1768,7 +1797,7 @@ def render_results(result: CalibrationResult):
         from rich.table import Table
         from rich.text import Text
     except Exception:  # pragma: no cover — Rich is normally installed
-        return format_results(result)
+        return format_results(result, verbose=verbose)
 
     quality_styles = {
         "excellent": "bold green",
@@ -1819,31 +1848,35 @@ def render_results(result: CalibrationResult):
         table.add_column("Version", justify="right")
         table.add_column("FPS", justify="right")
         table.add_column("Overhead", justify="right")
-        table.add_column("Success", justify="right")
-        table.add_column("p_frame", justify="right")
-        table.add_column("Source", justify="right")
+        if verbose:
+            table.add_column("Success", justify="right")
+            table.add_column("p_frame", justify="right")
+            table.add_column("Source", justify="right")
         table.add_column("Throughput", justify="right")
 
+        unavailable_placeholder_count = 4 if not verbose else 7
         for rec in result.recommendations:
             row_style = tier_styles.get(rec.tier, "white")
             if rec.available:
-                table.add_row(
+                row = [
                     rec.tier.capitalize(),
                     f"V{rec.qr_version}",
                     str(rec.fps),
                     f"{rec.overhead:.2f}",
-                    _format_percent(rec.estimated_success),
-                    _format_percent(rec.frame_detect_probability),
-                    rec.source or "--",
-                    _format_throughput(rec.throughput_bps or 0),
-                    style=row_style,
-                )
+                ]
+                if verbose:
+                    row.extend([
+                        _format_percent(rec.estimated_success),
+                        _format_percent(rec.frame_detect_probability),
+                        rec.source or "--",
+                    ])
+                row.append(_format_throughput(rec.throughput_bps or 0))
+                table.add_row(*row, style=row_style)
             else:
-                table.add_row(
-                    rec.tier.capitalize(),
-                    "--", "--", "--", "--", "--", "--", "-- unavailable --",
-                    style="dim",
-                )
+                row = [rec.tier.capitalize()]
+                row.extend(["--"] * (unavailable_placeholder_count - 1))
+                row.append("-- unavailable --")
+                table.add_row(*row, style="dim")
         parts.extend([Text(""), table])
 
         recommended = next(
