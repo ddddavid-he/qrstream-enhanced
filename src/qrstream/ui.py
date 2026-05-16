@@ -536,6 +536,19 @@ class ProgressReporter(Protocol):
     def encode_done(self, *, output_path: str,
                     size_bytes: int) -> None: ...
 
+    # Calibrate
+    def calibrate_generate_start(self, *, preset: str,
+                                 total_frames: int) -> None: ...
+    def calibrate_generate_update(self, *,
+                                  progress_pct: float) -> None: ...
+    def calibrate_generate_done(self, *,
+                                output_path: str | None) -> None: ...
+    def calibrate_analyze_start(self, *,
+                                total_frames: int) -> None: ...
+    def calibrate_analyze_update(self, *, progress_pct: float,
+                                 segment: str) -> None: ...
+    def calibrate_analyze_done(self) -> None: ...
+
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -650,6 +663,14 @@ class QuietReporter:
 
     def encode_done(self, *, output_path: str, size_bytes: int) -> None:
         self._write(f"Encoded: {output_path} ({_fmt_size(size_bytes)})")
+
+    # Calibrate ----------------------------------------------------
+    def calibrate_generate_start(self, **_kw) -> None: return
+    def calibrate_generate_update(self, **_kw) -> None: return
+    def calibrate_generate_done(self, **_kw) -> None: return
+    def calibrate_analyze_start(self, **_kw) -> None: return
+    def calibrate_analyze_update(self, **_kw) -> None: return
+    def calibrate_analyze_done(self) -> None: return
 
 
 # ── Log reporter (key=value) ─────────────────────────────────────
@@ -861,6 +882,38 @@ class LogReporter:
     def encode_done(self, *, output_path: str, size_bytes: int) -> None:
         self._write_line(phase="encode", status="done",
                          output=output_path, size=_fmt_size(size_bytes))
+
+    # Calibrate
+    def calibrate_generate_start(self, *, preset: str,
+                                 total_frames: int) -> None:
+        self._write_line(phase="calibrate-generate", status="start",
+                         preset=preset, total_frames=total_frames)
+
+    def calibrate_generate_update(self, *, progress_pct: float) -> None:
+        if not self._should_emit("calibrate-generate", progress_pct):
+            return
+        self._write_line(phase="calibrate-generate",
+                         progress=_fmt_pct(progress_pct))
+
+    def calibrate_generate_done(self, *,
+                                output_path: str | None) -> None:
+        self._write_line(phase="calibrate-generate", status="done",
+                         output=output_path or "(display)")
+
+    def calibrate_analyze_start(self, *, total_frames: int) -> None:
+        self._write_line(phase="calibrate-analyze", status="start",
+                         total_frames=total_frames)
+
+    def calibrate_analyze_update(self, *, progress_pct: float,
+                                 segment: str) -> None:
+        if not self._should_emit("calibrate-analyze", progress_pct):
+            return
+        self._write_line(phase="calibrate-analyze",
+                         progress=_fmt_pct(progress_pct),
+                         segment=segment)
+
+    def calibrate_analyze_done(self) -> None:
+        self._write_line(phase="calibrate-analyze", status="done")
 
 
 # ── Rich reporter ────────────────────────────────────────────────
@@ -1928,6 +1981,121 @@ class RichReporter:
         self._console.print(
             f"[bold green]Done[/bold green]   {output_path}  "
             f"[dim]{_fmt_size(size_bytes)}[/dim]"
+        )
+
+    # Calibrate ────────────────────────────────────────────────────
+    def calibrate_generate_start(self, *, preset: str,
+                                 total_frames: int) -> None:
+        self._stop_live()
+        self._console.print(
+            f"[bold cyan]Calibrate[/bold cyan]  "
+            f"preset=[bold]{preset}[/bold]  frames=[bold]{total_frames}[/bold]"
+        )
+        self._progress = Progress(
+            TextColumn(
+                f"[bold cyan]{_pad_status_label('Calib')}[/bold cyan]"
+            ),
+            BarColumn(bar_width=None, complete_style="cyan",
+                      finished_style="bright_cyan", pulse_style="cyan"),
+            TextColumn("{task.percentage:>3.0f}%"),
+            console=self._console,
+            transient=False,
+        )
+        self._task_id = self._progress.add_task("calibrate", total=1000)
+        self._live = Live(
+            self._progress,
+            console=self._console,
+            refresh_per_second=12,
+            transient=False,
+        )
+        self._live.start()
+
+    def calibrate_generate_update(self, *,
+                                  progress_pct: float) -> None:
+        if self._progress is None or self._task_id is None:
+            return
+        try:
+            self._progress.update(
+                self._task_id,
+                completed=max(0.0, min(1000.0, progress_pct * 10.0)),
+            )
+        except Exception:
+            pass
+
+    def calibrate_generate_done(self, *,
+                                output_path: str | None) -> None:
+        if self._progress is not None and self._task_id is not None:
+            try:
+                self._progress.update(self._task_id, completed=1000)
+            except Exception:
+                pass
+        self._stop_live()
+        target = output_path or "(display)"
+        self._console.print(
+            f"[bold green]Done[/bold green]   Calibration video: {target}"
+        )
+
+    def calibrate_analyze_start(self, *, total_frames: int) -> None:
+        self._stop_live()
+        frame_count = total_frames if total_frames > 0 else "?"
+        self._console.print(
+            f"[bold cyan]Analyze[/bold cyan]  calibration video  "
+            f"frames=[bold]{frame_count}[/bold]"
+        )
+        pct_column = (TextColumn("{task.percentage:>3.0f}%")
+                      if total_frames > 0 else TextColumn("[cyan]scan[/cyan]"))
+        self._progress = Progress(
+            TextColumn(
+                f"[bold cyan]{_pad_status_label('Analyze')}[/bold cyan]"
+            ),
+            BarColumn(bar_width=None, complete_style="cyan",
+                      finished_style="bright_cyan", pulse_style="cyan"),
+            pct_column,
+            TextColumn("[dim]{task.fields[segment]}[/dim]"),
+            console=self._console,
+            transient=False,
+        )
+        total = 1000 if total_frames > 0 else None
+        self._task_id = self._progress.add_task(
+            "analyze", total=total,
+            segment=f"0/{frame_count} frames, 0 decoded",
+        )
+        self._live = Live(
+            self._progress,
+            console=self._console,
+            refresh_per_second=12,
+            transient=False,
+        )
+        self._live.start()
+
+    def calibrate_analyze_update(self, *, progress_pct: float,
+                                 segment: str) -> None:
+        if self._progress is None or self._task_id is None:
+            return
+        try:
+            task = self._progress.tasks[self._task_id]
+            if task.total is None:
+                self._progress.update(self._task_id, segment=segment)
+            else:
+                self._progress.update(
+                    self._task_id,
+                    completed=max(0.0, min(1000.0, progress_pct * 10.0)),
+                    segment=segment,
+                )
+        except Exception:
+            pass
+
+    def calibrate_analyze_done(self) -> None:
+        if self._progress is not None and self._task_id is not None:
+            try:
+                task = self._progress.tasks[self._task_id]
+                if task.total is not None:
+                    self._progress.update(self._task_id, completed=1000)
+            except Exception:
+                pass
+        self._stop_live()
+        self._console.print(
+            "[bold green]Done[/bold green]   Calibration analysis complete"
         )
 
 

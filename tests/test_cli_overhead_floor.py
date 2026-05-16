@@ -1,9 +1,9 @@
 """Tests for the CLI's ``--overhead`` floor/warning behaviour.
 
-The LT codec cannot converge below ~1.2× overhead regardless of
-capture quality. The CLI must reject values below that floor
-(exit 2) so users don't waste a long encode on an un-decodable
-output.
+The LT codec cannot converge below ~1.2x overhead regardless of
+capture quality. RaptorQ uses 1.05x as its tested minimum. The CLI
+must reject values below the active codec's floor (exit 2) so users
+don't waste a long encode on an un-decodable output.
 """
 
 from __future__ import annotations
@@ -13,18 +13,35 @@ import sys
 import pytest
 
 from qrstream.cli import (
+    _DEFAULT_OVERHEAD_LT,
+    _DEFAULT_OVERHEAD_RQ,
     _MIN_OVERHEAD,
+    _MIN_OVERHEAD_LT,
+    _MIN_OVERHEAD_RQ,
     _RECOMMENDED_OVERHEAD,
+    _RECOMMENDED_OVERHEAD_LT,
+    _RECOMMENDED_OVERHEAD_RQ,
     build_parser,
     cmd_encode,
 )
 
 
-def _args(overhead: float, input_path: str, output_path: str):
+def _args(overhead: float, input_path: str, output_path: str,
+          fountain_codec: str = 'raptorq'):
     parser = build_parser()
     return parser.parse_args(
         ['encode', input_path, '-o', output_path,
-         '--overhead', str(overhead)]
+         '--overhead', str(overhead),
+         '--fountain-codec', fountain_codec]
+    )
+
+
+def _args_without_overhead(input_path: str, output_path: str,
+                           fountain_codec: str = 'raptorq'):
+    parser = build_parser()
+    return parser.parse_args(
+        ['encode', input_path, '-o', output_path,
+         '--fountain-codec', fountain_codec]
     )
 
 
@@ -33,7 +50,8 @@ def test_cli_rejects_overhead_below_floor(tmp_path, capsys):
     src.write_bytes(b"hello")
     out = tmp_path / "out.mp4"
 
-    args = _args(0.9, str(src), str(out))
+    # Test with LT codec (original behaviour)
+    args = _args(0.9, str(src), str(out), fountain_codec='lt')
     with pytest.raises(SystemExit) as exc_info:
         cmd_encode(args)
     assert exc_info.value.code == 2
@@ -42,8 +60,23 @@ def test_cli_rejects_overhead_below_floor(tmp_path, capsys):
     assert "below the LT codec" in captured.out
 
 
+def test_cli_rejects_overhead_below_raptorq_floor(tmp_path, capsys):
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"hello")
+    out = tmp_path / "out.mp4"
+
+    args = _args(_MIN_OVERHEAD_RQ - 0.01, str(src), str(out),
+                 fountain_codec='raptorq')
+    with pytest.raises(SystemExit) as exc_info:
+        cmd_encode(args)
+    assert exc_info.value.code == 2
+
+    captured = capsys.readouterr()
+    assert "below the RaptorQ codec" in captured.out
+
+
 def test_cli_warns_between_floor_and_recommended(tmp_path, capsys, monkeypatch):
-    """1.2 ≤ overhead < 1.5 is allowed but must emit a warning."""
+    """1.2 <= overhead < 1.5 is allowed for LT but must emit a warning."""
     src = tmp_path / "src.bin"
     src.write_bytes(b"x" * 256)
     out = tmp_path / "out.mp4"
@@ -62,7 +95,7 @@ def test_cli_warns_between_floor_and_recommended(tmp_path, capsys, monkeypatch):
     import qrstream.encoder as enc_mod
     monkeypatch.setattr(enc_mod, "encode_to_video", fake_encode)
 
-    args = _args(1.3, str(src), str(out))
+    args = _args(1.3, str(src), str(out), fountain_codec='lt')
     cmd_encode(args)
     captured = capsys.readouterr()
     assert "Warning" in captured.out
@@ -80,11 +113,49 @@ def test_cli_silent_at_or_above_recommended(tmp_path, capsys, monkeypatch):
     import qrstream.encoder as enc_mod
     monkeypatch.setattr(enc_mod, "encode_to_video", fake_encode)
 
-    args = _args(_RECOMMENDED_OVERHEAD, str(src), str(out))
+    args = _args(_RECOMMENDED_OVERHEAD_LT, str(src), str(out), fountain_codec='lt')
     cmd_encode(args)
     captured = capsys.readouterr()
     assert "Warning" not in captured.out
     assert "below the LT codec" not in captured.out
+
+
+def test_cli_uses_raptorq_default_overhead(tmp_path, capsys, monkeypatch):
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"x" * 256)
+    out = tmp_path / "out.mp4"
+    called = {}
+
+    def fake_encode(**kwargs):
+        called.update(kwargs)
+
+    import qrstream.encoder as enc_mod
+    monkeypatch.setattr(enc_mod, "encode_to_video", fake_encode)
+
+    args = _args_without_overhead(str(src), str(out), fountain_codec='raptorq')
+    cmd_encode(args)
+    captured = capsys.readouterr()
+    assert "Warning" not in captured.out
+    assert called.get("overhead") == _DEFAULT_OVERHEAD_RQ
+
+
+def test_cli_preserves_lt_default_overhead(tmp_path, capsys, monkeypatch):
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"x" * 256)
+    out = tmp_path / "out.mp4"
+    called = {}
+
+    def fake_encode(**kwargs):
+        called.update(kwargs)
+
+    import qrstream.encoder as enc_mod
+    monkeypatch.setattr(enc_mod, "encode_to_video", fake_encode)
+
+    args = _args_without_overhead(str(src), str(out), fountain_codec='lt')
+    cmd_encode(args)
+    captured = capsys.readouterr()
+    assert "Warning" not in captured.out
+    assert called.get("overhead") == _DEFAULT_OVERHEAD_LT
 
 
 def test_cli_floor_matches_prng_v1_convergence_floor():
@@ -94,3 +165,8 @@ def test_cli_floor_matches_prng_v1_convergence_floor():
     silently regress below a safe number."""
     assert 1.20 <= _MIN_OVERHEAD < _RECOMMENDED_OVERHEAD
     assert _RECOMMENDED_OVERHEAD <= 2.0
+
+
+def test_raptorq_floor_matches_validated_minimum():
+    assert _MIN_OVERHEAD_RQ == 1.05
+    assert _MIN_OVERHEAD_RQ < _RECOMMENDED_OVERHEAD_RQ

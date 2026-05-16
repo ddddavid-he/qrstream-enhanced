@@ -2,8 +2,8 @@
 Unified CLI for QRStream.
 
 Usage:
-    qrstream -V | --version
-    qrstream encode <file> [-o output.mp4] [--display] [--overhead 2.0]
+    qrstream -v | --version
+    qrstream encode <file> [-o output.mp4] [--display] [--overhead RATIO]
                           [--fps 10] [--output-mode MODE]
     qrstream decode <video> -o output_file [-s sample_rate]
                           [--output-mode MODE]
@@ -17,15 +17,24 @@ Usage:
 * ``verbose``     — Verbose diagnostic output (Rich on TTY, log-verbose
                     otherwise).
 
-The legacy ``-v / --verbose`` flag is accepted as a hidden alias for
-``--output-mode verbose`` to keep existing scripts working.
+The hidden ``-V / --verbose`` flag is accepted on subcommands as an alias
+for ``--output-mode verbose``.
 """
 
 import sys
 import os
+import re
 import argparse
 
 from .__init__ import __version__
+from .overhead_policy import (
+    DEFAULT_OVERHEAD_LT as _DEFAULT_OVERHEAD_LT,
+    DEFAULT_OVERHEAD_RQ as _DEFAULT_OVERHEAD_RQ,
+    MIN_OVERHEAD_LT as _MIN_OVERHEAD_LT,
+    MIN_OVERHEAD_RQ as _MIN_OVERHEAD_RQ,
+    RECOMMENDED_OVERHEAD_LT as _RECOMMENDED_OVERHEAD_LT,
+    RECOMMENDED_OVERHEAD_RQ as _RECOMMENDED_OVERHEAD_RQ,
+)
 from .ui import OutputMode, resolve_output_mode
 
 
@@ -164,25 +173,15 @@ def cmd_colors():
     console.print()
 
 
-# Minimum overhead the default LT codec (SplitMix64 PRNG mixer,
-# qrstream ≥ 0.8) needs to converge on sequential seeds across all
-# K we've benchmarked (328..4096).  The empirical worst case is
-# K=328 at 1.19×; we round up to 1.20× as the hard floor and
-# recommend ≥1.50× for real captures where frame loss / detector
-# misses eat into the margin.
-#
-# Anything below the floor indicates either a misunderstanding of
-# the codec (LT can't converge below its PRNG-dependent threshold,
-# period) or a test/benchmark use case — those can bypass via the
-# LTEncoder API directly.
-_MIN_OVERHEAD = 1.20
-_RECOMMENDED_OVERHEAD = 1.50
+# Legacy aliases (used by some tests).
+_MIN_OVERHEAD = _MIN_OVERHEAD_LT
+_RECOMMENDED_OVERHEAD = _RECOMMENDED_OVERHEAD_LT
 
 
 def _resolve_mode(args) -> OutputMode:
-    """Reconcile legacy ``-v`` with the new ``--output-mode`` flag.
+    """Reconcile ``--verbose`` with the new ``--output-mode`` flag.
 
-    ``-v`` is kept as a hidden alias that upgrades ``auto`` to
+    ``-V / --verbose`` is a hidden alias that upgrades ``auto`` to
     ``verbose``; users who explicitly pass ``--output-mode`` get
     their choice honoured verbatim.
     """
@@ -191,6 +190,43 @@ def _resolve_mode(args) -> OutputMode:
     if getattr(args, 'verbose', False) and mode is OutputMode.AUTO:
         return OutputMode.VERBOSE
     return mode
+
+
+_SIZE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([kmgt]?i?b?|bytes?)?\s*$", re.I)
+_SIZE_UNITS = {
+    None: 1,
+    "": 1,
+    "b": 1,
+    "byte": 1,
+    "bytes": 1,
+    "k": 1000,
+    "kb": 1000,
+    "m": 1000 ** 2,
+    "mb": 1000 ** 2,
+    "g": 1000 ** 3,
+    "gb": 1000 ** 3,
+    "t": 1000 ** 4,
+    "tb": 1000 ** 4,
+    "kib": 1024,
+    "mib": 1024 ** 2,
+    "gib": 1024 ** 3,
+    "tib": 1024 ** 4,
+}
+
+
+def _parse_size_bytes(value: str) -> int:
+    match = _SIZE_RE.match(value)
+    if match is None:
+        raise argparse.ArgumentTypeError(
+            "size must look like 100M, 1.5GiB, or a byte count")
+    number = float(match.group(1))
+    unit = (match.group(2) or "").lower()
+    if unit not in _SIZE_UNITS:
+        raise argparse.ArgumentTypeError(f"unsupported size unit: {unit}")
+    size = int(number * _SIZE_UNITS[unit])
+    if size <= 0:
+        raise argparse.ArgumentTypeError("size must be positive")
+    return size
 
 
 def _check_output_path_writable(output: str) -> str | None:
@@ -272,7 +308,7 @@ def _close_reporter(reporter) -> None:
 
 def cmd_encode(args):
     """Handle the 'encode' subcommand."""
-    from .encoder import encode_to_display, encode_to_video
+    from .encoder import encode_to_video
 
     if not os.path.exists(args.file):
         print(f"Error: File not found: {args.file}")
@@ -291,18 +327,34 @@ def cmd_encode(args):
             print(f"Error: {err}", file=sys.stderr)
             sys.exit(1)
 
-    if args.overhead < _MIN_OVERHEAD:
+    fountain_codec = getattr(args, 'fountain_codec', 'raptorq')
+
+    if fountain_codec == 'raptorq':
+        min_oh = _MIN_OVERHEAD_RQ
+        rec_oh = _RECOMMENDED_OVERHEAD_RQ
+        default_oh = _DEFAULT_OVERHEAD_RQ
+        codec_name = 'RaptorQ'
+    else:
+        min_oh = _MIN_OVERHEAD_LT
+        rec_oh = _RECOMMENDED_OVERHEAD_LT
+        default_oh = _DEFAULT_OVERHEAD_LT
+        codec_name = 'LT'
+
+    if args.overhead is None:
+        args.overhead = default_oh
+
+    if args.overhead < min_oh:
         print(
-            f"Error: --overhead {args.overhead} is below the LT codec's "
-            f"convergence floor ({_MIN_OVERHEAD}×). Decoding would fail "
-            f"even on a perfect capture. Use --overhead {_RECOMMENDED_OVERHEAD} "
+            f"Error: --overhead {args.overhead} is below the {codec_name} codec's "
+            f"convergence floor ({min_oh}x). Decoding would fail "
+            f"even on a perfect capture. Use --overhead {rec_oh} "
             f"or higher for reliable real-world recording."
         )
         sys.exit(2)
-    if args.overhead < _RECOMMENDED_OVERHEAD:
+    if args.overhead < rec_oh:
         print(
-            f"Warning: --overhead {args.overhead} is near the LT convergence "
-            f"floor. Recommended: ≥{_RECOMMENDED_OVERHEAD} so camera frame "
+            f"Warning: --overhead {args.overhead} is near the {codec_name} convergence "
+            f"floor. Recommended: >={rec_oh} so camera frame "
             f"loss and QR detector misses don't push decoding below the "
             f"threshold."
         )
@@ -336,8 +388,10 @@ def cmd_encode(args):
             force_compress=args.force_compress,
             auto_mask=args.auto_mask,
             reporter=reporter,
+            fountain_codec=fountain_codec,
         )
         if display:
+            from .encoder import encode_to_display
             encode_to_display(
                 output_path=output if output_requested else None,
                 codec=args.codec,
@@ -418,8 +472,91 @@ def cmd_decode(args):
         _close_reporter(reporter)
 
 
+def cmd_calibrate(args):
+    """Handle the 'calibrate' subcommand."""
+    from .calibrate import (
+        estimate_target_k,
+        generate_calibration,
+        analyze_calibration,
+        format_results,
+        render_results,
+    )
+
+    mode, reporter = _build_reporter(args)
+
+    try:
+        if (getattr(args, 'display', False)
+                or (not args.output and not args.input)):
+            # Encoder side: display mode (default when no mode is specified)
+            generate_calibration(
+                preset_name=args.precision,
+                display=True,
+                codec=args.codec,
+                reporter=reporter,
+            )
+        elif args.output:
+            # Encoder side: video output mode
+            err = _check_output_path_writable(args.output)
+            if err is not None:
+                print(f"Error: {err}", file=sys.stderr)
+                sys.exit(1)
+            generate_calibration(
+                preset_name=args.precision,
+                output_path=args.output,
+                display_hz=args.display_hz,
+                codec=args.codec,
+                reporter=reporter,
+            )
+        elif args.input:
+            # Decoder side: analyze captured video
+            if not os.path.exists(args.input):
+                print(f"Error: File not found: {args.input}",
+                      file=sys.stderr)
+                sys.exit(1)
+            target_size = args.target_size
+            if args.target_file:
+                if not os.path.exists(args.target_file):
+                    print(f"Error: File not found: {args.target_file}",
+                          file=sys.stderr)
+                    sys.exit(1)
+                target_size = os.path.getsize(args.target_file)
+            confidence = getattr(args, 'confidence', None)
+            if confidence is not None and not 0.0 < confidence < 1.0:
+                print("Error: --confidence must be in (0, 1).",
+                      file=sys.stderr)
+                sys.exit(1)
+            result = analyze_calibration(
+                video_path=args.input,
+                workers=args.workers,
+                reporter=reporter,
+                target_k=estimate_target_k(target_size),
+                fountain_codec=args.fountain_codec,
+                confidence=confidence,
+            )
+            verbose = mode is OutputMode.VERBOSE
+            console = getattr(reporter, '_console', None)
+            if console is not None:
+                console.print(render_results(result, verbose=verbose))
+            else:
+                print(format_results(result, verbose=verbose))
+        else:
+            print("Error: Specify --display, -o, or -i.",
+                  file=sys.stderr)
+            sys.exit(1)
+    except ImportError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(3)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        raise
+    finally:
+        _close_reporter(reporter)
+
+
 def _add_output_mode_group(sub: argparse.ArgumentParser) -> None:
-    """Attach the shared ``--output-mode`` option plus hidden ``-v``."""
+    """Attach the shared ``--output-mode`` option plus hidden ``-V``."""
     sub.add_argument(
         '--output-mode',
         dest='output_mode',
@@ -431,8 +568,8 @@ def _add_output_mode_group(sub: argparse.ArgumentParser) -> None:
              '"quiet" prints only errors and the final path. '
              '"verbose" enables full diagnostic output.',
     )
-    # Legacy alias kept hidden: ``-v`` → upgrade ``auto`` to ``verbose``.
-    sub.add_argument('-v', '--verbose', action='store_true',
+    # Hidden alias: ``-V`` → upgrade ``auto`` to ``verbose``.
+    sub.add_argument('-V', '--verbose', action='store_true',
                      help=argparse.SUPPRESS)
 
 
@@ -441,7 +578,7 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=prog,
         description='QRStream: Encode and decode files via QR code video streams')
-    parser.add_argument('-V', '--version', action='version',
+    parser.add_argument('-v', '--version', action='version',
                         version=f'%(prog)s {__version__}')
 
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
@@ -457,10 +594,12 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                      help='Display encoded QR frames in the built-in GUI player. '
                           'When used with -o, the video is saved after display '
                           'rendering completes if needed.')
-    enc.add_argument('--overhead', type=float, default=2.0,
-                     help=f'Ratio of encoded blocks to source blocks '
-                          f'(default: 2.0, minimum: {_MIN_OVERHEAD}, '
-                          f'recommended: ≥{_RECOMMENDED_OVERHEAD})')
+    enc.add_argument('--overhead', type=float, default=None,
+                     help='Ratio of encoded blocks to source blocks '
+                          f'(default: {_DEFAULT_OVERHEAD_RQ} for raptorq, '
+                          f'{_DEFAULT_OVERHEAD_LT} for lt; minimum: '
+                          f'{_MIN_OVERHEAD_RQ} for raptorq, '
+                          f'{_MIN_OVERHEAD_LT} for lt)')
     enc.add_argument('--fps', type=int, default=10,
                      help='Frames per second in output video (default: 10)')
     # TODO(v0.10.0): remove ``--ec-level`` entirely.  QR-level error
@@ -497,6 +636,10 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                           'or base64 (standard, QR byte mode).')
     enc.add_argument('--codec', choices=['h264', 'mp4v', 'mjpeg'], default='h264',
                      help='Video codec: h264 (default), mp4v, or mjpeg (faster, larger)')
+    enc.add_argument('--fountain-codec', dest='fountain_codec',
+                     choices=['raptorq', 'lt'], default='raptorq',
+                     help='Fountain code: raptorq (default, RFC 6330, near-optimal) '
+                          'or lt (legacy LT codes)')
     enc.add_argument('-w', '--workers', type=int, default=None,
                      help='Parallel workers for QR generation (default: 1; higher values may not improve performance)')
     enc.add_argument('--auto-mask', action='store_true',
@@ -523,6 +666,57 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
         help='Display the colour palette used by the UI '
              '(detect-rate gradient, block-map, etc.)')
 
+    # ── calibrate ────────────────────────────────────────────────
+    cal = subparsers.add_parser(
+        'calibrate',
+        help='Auto-calibrate channel parameters for optimal encode settings')
+    cal_mode = cal.add_mutually_exclusive_group()
+    cal_mode.add_argument(
+        '--display', action='store_true',
+        help='Play calibration sequence on screen via Qt player (default)')
+    cal_mode.add_argument(
+        '-o', '--output', metavar='PATH',
+        help='Write calibration video to file (encoder side)')
+    cal_mode.add_argument(
+        '-i', '--input', metavar='PATH',
+        help='Analyze a captured calibration video (decoder side)')
+    cal.add_argument(
+        '--precision',
+        metavar='{low,fast,standard,full,high}',
+        default='standard',
+        help='Calibration preset: low for weak channels; fast (~15s), '
+             'standard (~30s), full (~60s), or high (~60s). '
+             'Default: standard')
+    cal.add_argument(
+        '--display-hz', type=int, default=None,
+        help='Override display refresh rate in Hz for video output mode '
+             '(default: auto-detect in display mode, 60 in video mode)')
+    cal.add_argument(
+        '--codec', default='h264',
+        choices=['h264', 'mp4v', 'mjpeg'],
+        help='Video codec for calibration output (default: h264)')
+    target_group = cal.add_mutually_exclusive_group()
+    target_group.add_argument(
+        '--target-size', type=_parse_size_bytes, default=None,
+        help='Target payload size for file-specific overhead estimates '
+             '(analysis mode; e.g. 100M, 1.5GiB)')
+    target_group.add_argument(
+        '--target-file', metavar='PATH', default=None,
+        help='Target payload file for file-specific overhead estimates '
+             '(analysis mode)')
+    cal.add_argument(
+        '--fountain-codec', dest='fountain_codec',
+        choices=['raptorq', 'lt'], default='raptorq',
+        help='Fountain code model for overhead estimates (default: raptorq)')
+    cal.add_argument(
+        '--confidence', type=float, default=None, metavar='P',
+        help='Override decode-success target across all tiers '
+             '(analysis mode; e.g. 0.95). Higher values bump overhead.')
+    cal.add_argument(
+        '-w', '--workers', type=int, default=None,
+        help='Parallel workers for analysis (default: auto)')
+    _add_output_mode_group(cal)
+
     return parser
 
 
@@ -535,6 +729,8 @@ def main(argv: list[str] | None = None):
             cmd_encode(args)
         elif args.command == 'decode':
             cmd_decode(args)
+        elif args.command == 'calibrate':
+            cmd_calibrate(args)
         elif args.command == 'colors':
             cmd_colors()
         else:

@@ -21,6 +21,7 @@ from qrstream.cli import (
     _check_output_path_writable,
     _close_reporter,
     build_parser,
+    cmd_calibrate,
     cmd_decode,
     cmd_encode,
 )
@@ -269,6 +270,37 @@ class TestCmdEncodeGate:
         assert "display" in called
         assert "video" not in called
         assert called["display"]["output_path"] is None
+
+
+class TestCmdCalibrateDefaults:
+    def test_calibrate_without_mode_defaults_to_display(self, monkeypatch):
+        called: dict = {}
+        import qrstream.calibrate as cal_mod
+        monkeypatch.setattr(
+            cal_mod, "generate_calibration",
+            lambda **kw: called.setdefault("kw", kw),
+        )
+
+        parser = build_parser()
+        args = parser.parse_args(["calibrate"])
+        cmd_calibrate(args)
+
+        assert called["kw"]["display"] is True
+        assert called["kw"]["preset_name"] == "standard"
+
+    def test_calibrate_analyze_accepts_target_size(self, tmp_path):
+        video = tmp_path / "capture.mov"
+        video.write_bytes(b"placeholder")
+
+        parser = build_parser()
+        args = parser.parse_args([
+            "calibrate", "-i", str(video),
+            "--target-size", "100M",
+            "--fountain-codec", "lt",
+        ])
+
+        assert args.target_size == 100_000_000
+        assert args.fountain_codec == "lt"
 
 
 class TestCmdDecodeGate:

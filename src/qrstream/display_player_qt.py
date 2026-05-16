@@ -92,6 +92,10 @@ class DisplayPlayerQtConfig:
     producer_fps_window_seconds: float = 3.0
     producer_grace_factor: float = 1.05
     metadata: DisplayMetadata | None = None
+    lock_window_size: bool = False
+    integer_scale: bool = False
+    initial_screen_fraction: float = 0.70
+    ignore_saved_geometry: bool = False
 
 
 # ── Helpers (no PySide6 dependency) ───────────────────────────────
@@ -360,8 +364,11 @@ else:
             self._apply_theme()
             self._setup_shortcuts()
 
-            if not self._restore_geometry():
+            if (config.ignore_saved_geometry or config.lock_window_size
+                    or not self._restore_geometry()):
                 self._auto_size()
+            if config.lock_window_size:
+                self.setFixedSize(self.size())
 
             self._setup_timer()
             self._update_display()
@@ -477,14 +484,16 @@ else:
             return False
 
         def _auto_size(self) -> None:
-            """Size the window to ~70% of the smaller screen dimension."""
+            """Size the window from the configured screen fraction."""
             screen = self.screen()
             if screen is None:
                 self.resize(800, 860)
                 return
             avail = screen.availableGeometry()
-            target = int(min(avail.width(), avail.height()) * 0.70)
-            target = max(400, target)
+            fraction = max(0.1, min(1.0, self._config.initial_screen_fraction))
+            max_qr_side = max(320, min(avail.width(), avail.height() - 60))
+            target = int(max_qr_side * fraction)
+            target = max(400, min(target, max_qr_side))
             self.resize(target, target + 60)
             # centre on screen
             frame = self.frameGeometry()
@@ -492,7 +501,8 @@ else:
             self.move(frame.topLeft())
 
         def closeEvent(self, event) -> None:  # noqa: N802
-            self._settings.setValue("window/geometry", self.saveGeometry())
+            if not self._config.lock_window_size:
+                self._settings.setValue("window/geometry", self.saveGeometry())
             self._timer.stop()
             super().closeEvent(event)
 
@@ -561,8 +571,14 @@ else:
                 qimg = _numpy_to_qimage(placeholder)
 
             pixmap = QPixmap.fromImage(qimg)
+            if self._config.integer_scale and module_img is not None:
+                module_side = max(module_img.shape[0], module_img.shape[1])
+                scale = max(1, side // max(1, module_side))
+                target_side = min(side, module_side * scale)
+            else:
+                target_side = side
             scaled = pixmap.scaled(
-                side, side,
+                target_side, target_side,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.FastTransformation,
             )
@@ -608,6 +624,8 @@ else:
             self._play_btn.setText("▶")
 
         def _zoom(self, delta: int) -> None:
+            if self._config.lock_window_size:
+                return
             step = 80
             w = self.width() + delta * step
             h = self.height() + delta * step

@@ -1,5 +1,7 @@
 """
-LT Fountain Code Encoder: file → LT encoded blocks → QR frames → video.
+Fountain Code Encoder: file -> encoded blocks -> QR frames -> video.
+
+Supports both LT fountain codes (legacy) and RaptorQ (RFC 6330).
 """
 
 import mmap
@@ -29,18 +31,12 @@ from .protocol import (
     auto_blocksize,
     pack_v3,
 )
+from .raptorq_codec import RaptorQEncoder
 from .display_cache import (
     ModuleFrameCache,
     pack_module_image,
     plan_module_cache,
     unpack_module_frame,
-)
-from .display_player import DisplayProducerState
-from .display_player_qt import (
-    DisplayMetadata,
-    DisplayPlayerQtConfig,
-    play_display_qt,
-    require_pyside6,
 )
 from .qr_utils import generate_qr_image, generate_qr_module_image
 from .ui import ProgressReporter, QuietReporter
@@ -429,15 +425,24 @@ def encode_to_video(input_path: str, output_path: str,
                     alphanumeric_qr: bool | None = None,
                     force_compress: bool = False,
                     auto_mask: bool = False,
-                    reporter: ProgressReporter | None = None):
-    """Encode a file to a QR-code video using LT fountain codes.
+                    reporter: ProgressReporter | None = None,
+                    fountain_codec: str = 'raptorq'):
+    """Encode a file to a QR-code video using fountain codes.
+
+    ``fountain_codec`` selects the erasure code: ``'raptorq'``
+    (default, RFC 6330, near-optimal recovery) or ``'lt'`` (legacy
+    LT fountain codes with SplitMix64 PRNG).
+
+    .. deprecated:: 0.9
+       The ``'lt'`` codec is legacy.  It will be removed in v1.0.0,
+       leaving RaptorQ as the sole fountain codec.
 
     ``binary_qr`` and ``alphanumeric_qr`` are aliases for the
     high-density QR mode flag; prefer ``alphanumeric_qr`` in new code.
     When enabled (default), frames are encoded via base45 into QR
     alphanumeric mode, carrying ~29% more payload per frame than base64.
 
-    ``reporter`` — optional :class:`qrstream.ui.ProgressReporter` used
+    ``reporter`` --- optional :class:`qrstream.ui.ProgressReporter` used
     for progress/status rendering.  When ``None`` a :class:`QuietReporter`
     is used so the function stays side-effect-free for programmatic use.
 
@@ -446,7 +451,7 @@ def encode_to_video(input_path: str, output_path: str,
         pipeline and will be removed in v0.10.0.  QR-level Reed-Solomon
         only rescues *bit* errors within a detected frame, but
         WeChatQRCode either decodes a frame's payload or returns
-        ``None``; borderline frames are handled by LT fountain overhead
+        ``None``; borderline frames are handled by fountain overhead
         at the video level.  The CLI already hides ``--ec-level``; the
         API keyword is retained for one deprecation window.
     """
@@ -503,12 +508,25 @@ def encode_to_video(input_path: str, output_path: str,
                 f"(overhead={overhead}x, {mode_str})"
             )
 
-        encoder = LTEncoder(
-            payload,
-            blocksize,
-            compressed=compress,
-            alphanumeric_qr=high_density,
-        )
+        if fountain_codec == 'raptorq':
+            encoder = RaptorQEncoder(
+                payload,
+                blocksize,
+                compressed=compress,
+                alphanumeric_qr=high_density,
+            )
+        elif fountain_codec == 'lt':
+            encoder = LTEncoder(
+                payload,
+                blocksize,
+                compressed=compress,
+                alphanumeric_qr=high_density,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported fountain_codec: {fountain_codec!r}. "
+                f"Choose 'raptorq' or 'lt'."
+            )
 
         first_packed, _, _ = next(encoder.generate_blocks(1))
         first_qr = generate_qr_image(
@@ -769,7 +787,8 @@ def encode_to_display(input_path: str,
                       output_path: str | None = None,
                       codec: str = 'h264',
                       video_queue_frames: int | None = None,
-                      report_display_done: bool = True) -> ModuleFrameCache:
+                      report_display_done: bool = True,
+                      fountain_codec: str = 'raptorq') -> ModuleFrameCache:
     """Encode a file into a display module-frame cache and play it.
 
     QR frames are rendered at one pixel per module, bit-packed into
@@ -778,6 +797,16 @@ def encode_to_display(input_path: str,
     realtime writer records frames without blocking display; any missing
     suffix is regenerated after the display window closes.
     """
+    # Lazy imports — avoid pulling PySide6 when only encode_to_video is used
+    # (allows qrstream-headless to work without GUI dependencies).
+    from .display_player import DisplayProducerState  # noqa: F811
+    from .display_player_qt import (  # noqa: F811
+        DisplayMetadata,
+        DisplayPlayerQtConfig,
+        play_display_qt,
+        require_pyside6,
+    )
+
     if reporter is None:
         reporter = QuietReporter()
 
@@ -834,12 +863,25 @@ def encode_to_display(input_path: str,
                 f"(overhead={overhead}x, {mode_str})"
             )
 
-        encoder = LTEncoder(
-            payload,
-            blocksize,
-            compressed=compress,
-            alphanumeric_qr=high_density,
-        )
+        if fountain_codec == 'raptorq':
+            encoder = RaptorQEncoder(
+                payload,
+                blocksize,
+                compressed=compress,
+                alphanumeric_qr=high_density,
+            )
+        elif fountain_codec == 'lt':
+            encoder = LTEncoder(
+                payload,
+                blocksize,
+                compressed=compress,
+                alphanumeric_qr=high_density,
+            )
+        else:
+            raise ValueError(
+                f"Unsupported fountain_codec: {fountain_codec!r}. "
+                f"Choose 'raptorq' or 'lt'."
+            )
         first_packed, _, _ = next(encoder.generate_blocks(1))
         first_module = generate_qr_module_image(
             first_packed,
@@ -907,24 +949,29 @@ def encode_to_display(input_path: str,
 
         blank_module = np.full((module_side, module_side), 255, dtype=np.uint8)
 
+        # Pre-generate all packed frames for the ``_module_frame_at``
+        # fallback path.  LTEncoder can regenerate any block by seed,
+        # but RaptorQEncoder requires batch generation; caching the
+        # packed bytes unifies both codecs.
+        _packed_cache: dict[int, bytes] = {}
+
+        def _ensure_packed_cache():
+            """Lazily populate the packed-frame cache if not yet built."""
+            if _packed_cache:
+                return
+            encoder._seq = 0
+            for offset, (packed, _, _) in enumerate(
+                    encoder.generate_blocks(num_blocks)):
+                _packed_cache[offset] = packed
+
         def _module_frame_at(frame_index: int):
             if frame_index < lead_in_frames:
                 return blank_module.copy()
             block_index = frame_index - lead_in_frames
-            seed = block_index + 1
-            encoder._seq = block_index
-            block_data, seq = encoder.generate_block(seed)
-            packed = pack_v3(
-                filesize=payload_size,
-                blocksize=blocksize,
-                block_count=K,
-                seed=seed,
-                block_seq=seq,
-                data=block_data,
-                compressed=compress,
-                alphanumeric_qr=high_density,
-                prng_version=encoder.prng_version,
-            )
+            _ensure_packed_cache()
+            packed = _packed_cache.get(block_index)
+            if packed is None:
+                return blank_module.copy()
             return generate_qr_module_image(
                 packed,
                 ec_level=ec_level,
