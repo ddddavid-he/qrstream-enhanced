@@ -303,3 +303,79 @@ Implement a pure, testable optimizer function that accepts synthetic observation
 maps and returns tier recommendations. Keep the existing CLI behavior unchanged,
 then migrate the current recommendation logic into that optimizer before adding a
 true overhead search dimension.
+
+## 2026-05-16 Branch Status
+
+Initial phase-1 implementation exists on `feature/calibrate`:
+
+- `src/qrstream/calibration_optimizer.py` now performs a bounded discrete search
+  over QR version, FPS, and overhead.
+- The optimizer uses Wilson lower bounds, a binomial RaptorQ success model, and a
+  default reference `K=1000` source symbols because `calibrate` is primarily used
+  for long transfers.
+- `compute_recommendations()` delegates to the optimizer while preserving the
+  existing public API shape.
+- `calibrate -i` accepts `--target-size`, `--target-file`, and
+  `--fountain-codec` for target-aware overhead estimates.
+- Output now includes estimated decode success.
+
+Validation command used:
+
+```bash
+uv run pytest tests/test_calibrate.py tests/test_calibration_optimizer.py tests/test_cli_output_path_check.py
+```
+
+## Next Algorithm Discussion Items
+
+A real 4K@60 capture (`/Users/ddddavid/Desktop/calibrate.MOV`) exposed an
+over-conservative recommendation:
+
+```text
+Raw observations:
+  V40 detect rate = 100%
+  30fps detect rate = 82.8%
+
+Current recommendation:
+  balanced = V40 @ 30fps, overhead=2.0
+```
+
+Root cause in the current phase-1 model:
+
+1. The FPS conservative envelope assumes detection should be non-increasing as FPS
+   rises. In this capture, 30fps measured better than 20/25fps, so the envelope
+   suppresses the 30fps estimate.
+2. Balanced/safe Wilson lower bounds further reduce the effective probability.
+3. With no direct pairwise `p(V,F)` probe, `V40@30fps` is inferred from marginal
+   ladders instead of measured directly.
+
+Topics to resolve before the next implementation pass:
+
+1. **FPS smoothing policy**
+   - Should monotonic envelope be disabled for `balanced`/`aggressive`?
+   - Should it be replaced by PAVA/isotonic regression, local smoothing, or a
+     confidence-aware rule that only suppresses statistically significant bumps?
+
+2. **Wilson/confidence policy**
+   - Should `balanced` use a weaker lower-bound correction or raw rate with a
+     minimum sample gate?
+   - Should `safe` remain conservative while `balanced` targets practical
+     throughput?
+
+3. **Overhead ladder and objective**
+   - Current ladder may jump from feasible moderate overhead to `2.0` when
+     `p_frame` is underestimated.
+   - Consider denser ladder around `1.15..1.50` and tie-breakers that prefer lower
+     overhead when throughput/success are close.
+
+4. **Effective p_frame visibility**
+   - Output should show raw rate, effective `p_frame`, and whether the source was
+     pairwise / separable / fallback so users can see why overhead was chosen.
+
+5. **Pairwise probes**
+   - Add direct frontier probes such as `V35@30`, `V38@30`, `V40@30`, `V35@45`,
+     `V38@45`, `V35@60` to avoid over-relying on marginal ladders.
+
+6. **Manual sanity check for current capture**
+   - Given raw `V40=100%` and `30fps=82.8%`, overhead around `1.3` is already
+     plausible under the current binomial model; `1.2` needs effective detection
+     probability around `84.6%` for `K=1000` and RaptorQ margin `1.5%`.
