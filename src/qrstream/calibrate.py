@@ -26,6 +26,13 @@ with suppress_native_stderr():
     import numpy as np
     import av
 
+from .calibration_optimizer import (
+    DEFAULT_TARGET_K,
+    DetectionStats,
+    OptimizerConfig,
+    optimize_calibration,
+    stats_from_rate,
+)
 from .overhead_policy import MIN_OVERHEAD_RQ as _MIN_OVERHEAD_RQ
 from .protocol import (
     _alphanumeric_byte_capacity,
@@ -409,6 +416,9 @@ class TierRecommendation:
     fps: int | None = None
     overhead: float | None = None
     throughput_bps: float | None = None  # bytes/sec estimate
+    estimated_success: float | None = None
+    frame_detect_probability: float | None = None
+    source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -452,6 +462,36 @@ def _rate_in_tier(rate: float, tier_cfg: dict[str, float]) -> bool:
     return rate >= tier_cfg["min_rate"]
 
 
+def _stats_from_rates(
+    rates: dict[int, float],
+    expected_counts: dict[int, int],
+    default_total: int = 100,
+) -> dict[int, DetectionStats]:
+    stats: dict[int, DetectionStats] = {}
+    for key, rate in rates.items():
+        total = expected_counts.get(key, default_total)
+        stats[key] = stats_from_rate(rate, total)
+    return stats
+
+
+def _expected_counts_for_preset(
+    preset_name: str,
+) -> tuple[dict[int, int], dict[int, int], int | None]:
+    try:
+        config = resolve_preset(preset_name, display_hz=60)
+    except ValueError:
+        return {}, {}, None
+    version_expected = {
+        version: config.frames_per_version_step
+        for version in config.version_ladder
+    }
+    fps_expected = {
+        fps: config.frames_per_fps_step
+        for fps in config.fps_ladder
+    }
+    return version_expected, fps_expected, config.fps_anchor_version
+
+
 def _capture_fps_ceiling(video_metadata: VideoMetadata | None) -> int | None:
     if video_metadata is None or video_metadata.fps is None:
         return None
@@ -483,6 +523,8 @@ def compute_recommendations(
     fps_data_reliable: bool,
     preset_name: str,
     video_metadata: VideoMetadata | None = None,
+    target_k: int = DEFAULT_TARGET_K,
+    fountain_codec: str = "raptorq",
 ) -> CalibrationResult:
     """Compute three-tier recommendations from raw detect rates.
 
@@ -588,41 +630,45 @@ def compute_recommendations(
     if not fps_data_reliable:
         effective_fps_detect_rates = {10: 0.90}
 
+    version_expected, fps_expected, anchor_version = _expected_counts_for_preset(
+        preset_name)
+    version_stats = _stats_from_rates(version_detect_rates, version_expected)
+    fps_stats = _stats_from_rates(effective_fps_detect_rates, fps_expected)
+
+    candidates = optimize_calibration(
+        version_stats=version_stats,
+        fps_stats=fps_stats,
+        config=OptimizerConfig(
+            codec=fountain_codec,
+            target_k=target_k,
+            capture_fps_ceiling=fps_ceiling if fps_data_reliable else None,
+            fps_anchor_version=anchor_version,
+        ),
+    )
+
     best_pair_rate = 0.0
-    for tier_name, cfg in _TIERS.items():
-        safety = cfg["safety_margin"]
-        best: tuple[float, float, int, int, float, float, float] | None = None
+    for ver_dr in version_detect_rates.values():
+        for fps_dr in effective_fps_detect_rates.values():
+            best_pair_rate = max(best_pair_rate, min(ver_dr, fps_dr))
 
-        for ver, ver_dr in version_detect_rates.items():
-            for fps, fps_dr in effective_fps_detect_rates.items():
-                pair_rate = min(ver_dr, fps_dr)
-                best_pair_rate = max(best_pair_rate, pair_rate)
-                if not _rate_in_tier(pair_rate, cfg):
-                    continue
-
-                combined_dr = ver_dr * fps_dr
-                raw_overhead = 1.0 / combined_dr if combined_dr > 0 else 10.0
-                overhead = round(max(raw_overhead * safety, _MIN_OVERHEAD_RQ), 2)
-                throughput = _estimate_throughput(ver, fps, overhead)
-                candidate = (throughput, pair_rate, ver, fps, overhead,
-                             ver_dr, fps_dr)
-                if best is None or candidate > best:
-                    best = candidate
-
-        if best is None:
+    for tier_name in _TIERS:
+        candidate = candidates.get(tier_name)
+        if candidate is None:
             recommendations.append(TierRecommendation(
                 tier=tier_name, available=False,
             ))
             continue
 
-        throughput, _pair_rate, max_ver, max_fps, overhead, _ver_dr, _fps_dr = best
         recommendations.append(TierRecommendation(
             tier=tier_name,
             available=True,
-            qr_version=max_ver,
-            fps=max_fps,
-            overhead=overhead,
-            throughput_bps=throughput,
+            qr_version=candidate.qr_version,
+            fps=candidate.fps,
+            overhead=candidate.overhead,
+            throughput_bps=candidate.estimated_throughput_bps,
+            estimated_success=candidate.estimated_success,
+            frame_detect_probability=candidate.frame_detect_probability,
+            source=candidate.source,
         ))
 
     if recommendations and all(not r.available for r in recommendations):

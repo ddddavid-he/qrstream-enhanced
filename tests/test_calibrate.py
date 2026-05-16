@@ -282,8 +282,8 @@ class TestRecommendations:
         assert by_tier["aggressive"].qr_version == 40
         assert by_tier["aggressive"].fps == 30
 
-    def test_tier_thresholds_are_cumulative(self):
-        """Safe >=90%, balanced >=80%, aggressive >=70%."""
+    def test_tier_targets_have_probability_semantics(self):
+        """Tiers are gated by estimated decode success probability."""
         ver_rates = {40: 1.0}
         fps_rates = {10: 0.95, 15: 0.85, 20: 0.75, 25: 0.65}
 
@@ -295,11 +295,11 @@ class TestRecommendations:
         by_tier = {r.tier: r for r in result.recommendations}
 
         assert by_tier["safe"].available
-        assert by_tier["safe"].fps == 10
+        assert by_tier["safe"].estimated_success >= 0.99
         assert by_tier["balanced"].available
-        assert by_tier["balanced"].fps == 15
+        assert by_tier["balanced"].estimated_success >= 0.95
         assert by_tier["aggressive"].available
-        assert by_tier["aggressive"].fps == 20
+        assert by_tier["aggressive"].estimated_success >= 0.90
 
     def test_high_quality_channel_has_all_tiers(self):
         ver_rates = {40: 1.0}
@@ -328,11 +328,11 @@ class TestRecommendations:
         safe = result.recommendations[0]
         assert safe.tier == "safe"
         assert not safe.available
-        assert any("Cannot produce reliable" in m for m in result.messages)
+        assert any("Safe tier unavailable" in m for m in result.messages)
 
     def test_safe_unavailable_but_balanced_available_is_not_fatal(self):
         ver_rates = {40: 1.0}
-        fps_rates = {15: 0.85}
+        fps_rates = {15: 0.64}
 
         result = compute_recommendations(
             ver_rates, fps_rates,
