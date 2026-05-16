@@ -31,6 +31,7 @@ from qrstream.calibrate import (
     _estimate_sequence_duration,
     _estimate_throughput,
     compute_recommendations,
+    estimate_target_k,
     format_results,
     resolve_preset,
 )
@@ -464,6 +465,35 @@ class TestRecommendations:
         assert "Video" in text
         assert "1920x1080" in text
         assert "29.97fps" in text
+
+    def test_format_includes_estimated_success(self):
+        result = CalibrationResult(
+            preset="standard",
+            channel_quality="excellent",
+            version_detect_rates={40: 1.0},
+            fps_detect_rates={30: 0.95},
+            fps_data_reliable=True,
+            recommendations=[
+                TierRecommendation(
+                    "safe", True, 40, 30, 1.30, 4000.0,
+                    estimated_success=0.991,
+                ),
+            ],
+        )
+        text = format_results(result)
+        assert "Success" in text
+        assert "99.1%" in text
+
+    def test_compute_recommendations_records_target_k(self):
+        result = compute_recommendations(
+            {40: 1.0}, {30: 1.0}, True, "standard", target_k=2500)
+
+        assert result.target_k == 2500
+        assert any("K≈2500" in m for m in result.messages)
+
+    def test_estimate_target_k_defaults_to_long_file_scale(self):
+        assert estimate_target_k(None) == 1000
+        assert estimate_target_k(100_000_000) > 1000
 
 
 # ── Throughput estimate ─────────────────────────────────────────────

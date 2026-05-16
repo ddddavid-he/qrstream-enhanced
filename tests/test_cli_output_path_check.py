@@ -288,6 +288,20 @@ class TestCmdCalibrateDefaults:
         assert called["kw"]["display"] is True
         assert called["kw"]["preset_name"] == "standard"
 
+    def test_calibrate_analyze_accepts_target_size(self, tmp_path):
+        video = tmp_path / "capture.mov"
+        video.write_bytes(b"placeholder")
+
+        parser = build_parser()
+        args = parser.parse_args([
+            "calibrate", "-i", str(video),
+            "--target-size", "100M",
+            "--fountain-codec", "lt",
+        ])
+
+        assert args.target_size == 100_000_000
+        assert args.fountain_codec == "lt"
+
 
 class TestCmdDecodeGate:
     def test_decode_fails_fast_on_missing_parent(

@@ -16,6 +16,7 @@ Decoder side:
 from __future__ import annotations
 
 import hashlib
+import math
 import struct
 from dataclasses import dataclass, field
 
@@ -36,6 +37,7 @@ from .calibration_optimizer import (
 from .overhead_policy import MIN_OVERHEAD_RQ as _MIN_OVERHEAD_RQ
 from .protocol import (
     _alphanumeric_byte_capacity,
+    auto_blocksize,
     base45_decode,
 )
 from .qr_utils import generate_qr_image, generate_qr_module_image, try_decode_qr
@@ -444,6 +446,8 @@ class CalibrationResult:
     recommendations: list[TierRecommendation] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
     video_metadata: VideoMetadata | None = None
+    target_k: int = DEFAULT_TARGET_K
+    fountain_codec: str = "raptorq"
 
 
 def _estimate_throughput(qr_version: int, fps: int,
@@ -456,6 +460,19 @@ def _estimate_throughput(qr_version: int, fps: int,
     if capacity == 0 or overhead <= 0:
         return 0.0
     return capacity * fps / overhead
+
+
+def estimate_target_k(target_size_bytes: int | None) -> int:
+    """Estimate source-symbol count for probability-based calibration."""
+    if target_size_bytes is None or target_size_bytes <= 0:
+        return DEFAULT_TARGET_K
+    blocksize = auto_blocksize(
+        target_size_bytes,
+        ec_level=_CALIBRATION_EC_LEVEL,
+        qr_version=25,
+        alphanumeric_qr=True,
+    )
+    return max(1, math.ceil(target_size_bytes / blocksize))
 
 
 def _rate_in_tier(rate: float, tier_cfg: dict[str, float]) -> bool:
@@ -547,6 +564,10 @@ def compute_recommendations(
     metadata_text = _format_video_metadata(video_metadata)
     if metadata_text:
         messages.append(f"ℹ Capture video: {metadata_text}.")
+    messages.append(
+        f"ℹ Recommendations assume K≈{target_k} source symbols "
+        f"for {fountain_codec}."
+    )
 
     if version_detect_rates:
         sorted_versions = sorted(version_detect_rates.keys())
@@ -691,6 +712,8 @@ def compute_recommendations(
         recommendations=recommendations,
         messages=messages,
         video_metadata=video_metadata,
+        target_k=target_k,
+        fountain_codec=fountain_codec,
     )
 
 
@@ -1121,6 +1144,8 @@ def analyze_calibration(
     video_path: str,
     workers: int | None = None,
     reporter: ProgressReporter | None = None,
+    target_k: int = DEFAULT_TARGET_K,
+    fountain_codec: str = "raptorq",
 ) -> CalibrationResult:
     """Analyze a captured calibration video and produce recommendations.
 
@@ -1290,6 +1315,8 @@ def analyze_calibration(
         fps_data_reliable=fps_data_reliable,
         preset_name=preset_name,
         video_metadata=video_metadata,
+        target_k=target_k,
+        fountain_codec=fountain_codec,
     )
 
     return result
@@ -1323,17 +1350,24 @@ def format_results(result: CalibrationResult) -> str:
     if any(r.available for r in result.recommendations):
         lines.append(
             f"  {'Tier':<12} {'Version':>8} {'FPS':>6} "
-            f"{'Overhead':>9} {'Throughput':>12}"
+            f"{'Overhead':>9} {'Success':>9} {'Throughput':>12}"
         )
-        lines.append(f"  {'-'*12} {'-'*8} {'-'*6} {'-'*9} {'-'*12}")
+        lines.append(
+            f"  {'-'*12} {'-'*8} {'-'*6} {'-'*9} {'-'*9} {'-'*12}"
+        )
         for rec in result.recommendations:
             if rec.available:
                 tp = _format_throughput(rec.throughput_bps or 0)
+                success = (
+                    f"{rec.estimated_success:.1%}"
+                    if rec.estimated_success is not None else "--"
+                )
                 lines.append(
                     f"  {rec.tier.capitalize():<12} "
                     f"{'V' + str(rec.qr_version):>8} "
                     f"{rec.fps:>6} "
                     f"{rec.overhead:>9.2f} "
+                    f"{success:>9} "
                     f"{tp:>12}"
                 )
             else:
@@ -1431,23 +1465,29 @@ def render_results(result: CalibrationResult):
         table.add_column("Version", justify="right")
         table.add_column("FPS", justify="right")
         table.add_column("Overhead", justify="right")
+        table.add_column("Success", justify="right")
         table.add_column("Throughput", justify="right")
 
         for rec in result.recommendations:
             row_style = tier_styles.get(rec.tier, "white")
             if rec.available:
+                success = (
+                    f"{rec.estimated_success:.1%}"
+                    if rec.estimated_success is not None else "--"
+                )
                 table.add_row(
                     rec.tier.capitalize(),
                     f"V{rec.qr_version}",
                     str(rec.fps),
                     f"{rec.overhead:.2f}",
+                    success,
                     _format_throughput(rec.throughput_bps or 0),
                     style=row_style,
                 )
             else:
                 table.add_row(
                     rec.tier.capitalize(),
-                    "--", "--", "--", "-- unavailable --",
+                    "--", "--", "--", "--", "-- unavailable --",
                     style="dim",
                 )
         parts.extend([Text(""), table])
