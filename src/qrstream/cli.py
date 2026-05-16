@@ -23,6 +23,7 @@ for ``--output-mode verbose``.
 
 import sys
 import os
+import re
 import argparse
 
 from .__init__ import __version__
@@ -189,6 +190,43 @@ def _resolve_mode(args) -> OutputMode:
     if getattr(args, 'verbose', False) and mode is OutputMode.AUTO:
         return OutputMode.VERBOSE
     return mode
+
+
+_SIZE_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([kmgt]?i?b?|bytes?)?\s*$", re.I)
+_SIZE_UNITS = {
+    None: 1,
+    "": 1,
+    "b": 1,
+    "byte": 1,
+    "bytes": 1,
+    "k": 1000,
+    "kb": 1000,
+    "m": 1000 ** 2,
+    "mb": 1000 ** 2,
+    "g": 1000 ** 3,
+    "gb": 1000 ** 3,
+    "t": 1000 ** 4,
+    "tb": 1000 ** 4,
+    "kib": 1024,
+    "mib": 1024 ** 2,
+    "gib": 1024 ** 3,
+    "tib": 1024 ** 4,
+}
+
+
+def _parse_size_bytes(value: str) -> int:
+    match = _SIZE_RE.match(value)
+    if match is None:
+        raise argparse.ArgumentTypeError(
+            "size must look like 100M, 1.5GiB, or a byte count")
+    number = float(match.group(1))
+    unit = (match.group(2) or "").lower()
+    if unit not in _SIZE_UNITS:
+        raise argparse.ArgumentTypeError(f"unsupported size unit: {unit}")
+    size = int(number * _SIZE_UNITS[unit])
+    if size <= 0:
+        raise argparse.ArgumentTypeError("size must be positive")
+    return size
 
 
 def _check_output_path_writable(output: str) -> str | None:
@@ -437,6 +475,7 @@ def cmd_decode(args):
 def cmd_calibrate(args):
     """Handle the 'calibrate' subcommand."""
     from .calibrate import (
+        estimate_target_k,
         generate_calibration,
         analyze_calibration,
         format_results,
@@ -474,16 +513,32 @@ def cmd_calibrate(args):
                 print(f"Error: File not found: {args.input}",
                       file=sys.stderr)
                 sys.exit(1)
+            target_size = args.target_size
+            if args.target_file:
+                if not os.path.exists(args.target_file):
+                    print(f"Error: File not found: {args.target_file}",
+                          file=sys.stderr)
+                    sys.exit(1)
+                target_size = os.path.getsize(args.target_file)
+            confidence = getattr(args, 'confidence', None)
+            if confidence is not None and not 0.0 < confidence < 1.0:
+                print("Error: --confidence must be in (0, 1).",
+                      file=sys.stderr)
+                sys.exit(1)
             result = analyze_calibration(
                 video_path=args.input,
                 workers=args.workers,
                 reporter=reporter,
+                target_k=estimate_target_k(target_size),
+                fountain_codec=args.fountain_codec,
+                confidence=confidence,
             )
+            verbose = mode is OutputMode.VERBOSE
             console = getattr(reporter, '_console', None)
             if console is not None:
-                console.print(render_results(result))
+                console.print(render_results(result, verbose=verbose))
             else:
-                print(format_results(result))
+                print(format_results(result, verbose=verbose))
         else:
             print("Error: Specify --display, -o, or -i.",
                   file=sys.stderr)
@@ -640,6 +695,23 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
         '--codec', default='h264',
         choices=['h264', 'mp4v', 'mjpeg'],
         help='Video codec for calibration output (default: h264)')
+    target_group = cal.add_mutually_exclusive_group()
+    target_group.add_argument(
+        '--target-size', type=_parse_size_bytes, default=None,
+        help='Target payload size for file-specific overhead estimates '
+             '(analysis mode; e.g. 100M, 1.5GiB)')
+    target_group.add_argument(
+        '--target-file', metavar='PATH', default=None,
+        help='Target payload file for file-specific overhead estimates '
+             '(analysis mode)')
+    cal.add_argument(
+        '--fountain-codec', dest='fountain_codec',
+        choices=['raptorq', 'lt'], default='raptorq',
+        help='Fountain code model for overhead estimates (default: raptorq)')
+    cal.add_argument(
+        '--confidence', type=float, default=None, metavar='P',
+        help='Override decode-success target across all tiers '
+             '(analysis mode; e.g. 0.95). Higher values bump overhead.')
     cal.add_argument(
         '-w', '--workers', type=int, default=None,
         help='Parallel workers for analysis (default: auto)')

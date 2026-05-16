@@ -16,6 +16,7 @@ Decoder side:
 from __future__ import annotations
 
 import hashlib
+import math
 import struct
 from dataclasses import dataclass, field
 
@@ -26,9 +27,17 @@ with suppress_native_stderr():
     import numpy as np
     import av
 
+from .calibration_optimizer import (
+    DEFAULT_TARGET_K,
+    DetectionStats,
+    OptimizerConfig,
+    optimize_calibration,
+    stats_from_rate,
+)
 from .overhead_policy import MIN_OVERHEAD_RQ as _MIN_OVERHEAD_RQ
 from .protocol import (
     _alphanumeric_byte_capacity,
+    auto_blocksize,
     base45_decode,
 )
 from .qr_utils import generate_qr_image, generate_qr_module_image, try_decode_qr
@@ -44,12 +53,16 @@ CAL_VERSION = 1
 #:         step_index(B) total_steps(B) frame_seq(B)
 CAL_STRUCT = ">6sBBBBBB"
 CAL_STRUCT_SIZE = struct.calcsize(CAL_STRUCT)  # 12
+_PAIRWISE_META_MAGIC = b"QPW1"
+_PAIRWISE_META_STRUCT = ">4sBBB"
+_PAIRWISE_META_STRUCT_SIZE = struct.calcsize(_PAIRWISE_META_STRUCT)
 
 # Segment IDs
 SEG_META = 1
 SEG_VERSION = 2
 SEG_FPS = 3
 SEG_END = 4
+SEG_PAIRWISE = 5
 
 # Precision preset IDs (written into meta segment ``param`` field).
 # ``quick``/``thorough`` remain accepted aliases for older callers.
@@ -157,6 +170,7 @@ class PresetConfig:
     fps_anchor_version: int
     frames_per_version_step: int
     frames_per_fps_step: int
+    frames_per_pairwise_step: int
 
     @property
     def meta_frames(self) -> int:
@@ -200,13 +214,185 @@ def _cap_fps_ladder(fps_ladder: list[int], display_hz: int | None,
     return sorted(set(capped))
 
 
+def _pack_pairwise_param(version_idx: int, fps_idx: int) -> int:
+    """Pack pairwise plan indexes into one byte."""
+    if not 0 <= version_idx <= 15:
+        raise ValueError(f"version index out of range: {version_idx}")
+    if not 0 <= fps_idx <= 15:
+        raise ValueError(f"fps index out of range: {fps_idx}")
+    return (fps_idx << 4) | version_idx
+
+
+def _unpack_pairwise_param(param: int) -> tuple[int, int]:
+    """Unpack one-byte pairwise param into ``(version_idx, fps_idx)``."""
+    if not 0 <= param <= 255:
+        raise ValueError(f"pairwise param out of range: {param}")
+    return param & 0x0F, param >> 4
+
+
+def _select_pairwise_plan(
+    version_ladder: list[int],
+    fps_ladder: list[int],
+) -> list[tuple[int, int]]:
+    """Select a small strategic set of ``(version_idx, fps_idx)`` probes."""
+    if not version_ladder or not fps_ladder:
+        return []
+
+    max_ver_idx = min(len(version_ladder), 16) - 1
+    max_fps_idx = min(len(fps_ladder), 16) - 1
+    mid_ver_idx = max_ver_idx // 2
+    mid_fps_idx = max_fps_idx // 2
+
+    candidates = [
+        (0, 0),                         # stable baseline
+        (0, max_fps_idx),               # FPS frontier at reliable version
+        (mid_ver_idx, mid_fps_idx),     # balanced joint point
+        (max_ver_idx, 0),               # version frontier at stable FPS
+        (max_ver_idx, mid_fps_idx),     # high-V mid-F (likely-picked region)
+        (max_ver_idx, max_fps_idx),     # throughput frontier
+    ]
+
+    plan: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for version_idx, fps_idx in candidates:
+        pair = (version_idx, fps_idx)
+        if pair not in seen:
+            _pack_pairwise_param(version_idx, fps_idx)
+            seen.add(pair)
+            plan.append(pair)
+    return plan
+
+
+def _decode_pairwise_param(
+    param: int,
+    version_ladder: list[int],
+    fps_ladder: list[int],
+) -> tuple[int, int]:
+    version_idx, fps_idx = _unpack_pairwise_param(param)
+    if version_idx >= len(version_ladder):
+        raise ValueError(f"version index out of ladder: {version_idx}")
+    if fps_idx >= len(fps_ladder):
+        raise ValueError(f"fps index out of ladder: {fps_idx}")
+    return version_ladder[version_idx], fps_ladder[fps_idx]
+
+
+def _pack_pairwise_metadata(
+    cal_frame: CalibrationFrame,
+    qr_version: int,
+    target_fps: int,
+) -> bytes:
+    if not 1 <= qr_version <= 40:
+        raise ValueError(f"QR version out of range: {qr_version}")
+    if not 1 <= target_fps <= 255:
+        raise ValueError(f"target FPS out of range: {target_fps}")
+    return struct.pack(
+        _PAIRWISE_META_STRUCT,
+        _PAIRWISE_META_MAGIC,
+        qr_version,
+        target_fps,
+        cal_frame.param,
+    )
+
+
+def _decode_pairwise_metadata(
+    data: bytes,
+    cal_frame: CalibrationFrame,
+) -> tuple[int, int] | None:
+    start = CAL_STRUCT_SIZE
+    end = start + _PAIRWISE_META_STRUCT_SIZE
+    if cal_frame.segment_id != SEG_PAIRWISE or len(data) < end:
+        return None
+    try:
+        magic, qr_version, target_fps, param = struct.unpack(
+            _PAIRWISE_META_STRUCT, data[start:end])
+    except struct.error:
+        return None
+    if magic != _PAIRWISE_META_MAGIC or param != cal_frame.param:
+        return None
+    if not 1 <= qr_version <= 40 or target_fps <= 0:
+        return None
+    return qr_version, target_fps
+
+
+def _segment_ladder_from_frames(
+    frames: list[CalibrationFrame],
+    segment_id: int,
+) -> list[int] | None:
+    values_by_step: dict[int, int] = {}
+    total_steps: int | None = None
+    for cf in frames:
+        if cf.segment_id != segment_id:
+            continue
+        if cf.total_steps <= 0 or not 0 <= cf.step_index < cf.total_steps:
+            return None
+        if total_steps is None:
+            total_steps = cf.total_steps
+        elif total_steps != cf.total_steps:
+            return None
+        existing = values_by_step.get(cf.step_index)
+        if existing is None:
+            values_by_step[cf.step_index] = cf.param
+        elif existing != cf.param:
+            return None
+
+    if total_steps is None:
+        return None
+    if set(values_by_step) != set(range(total_steps)):
+        return None
+    return [values_by_step[i] for i in range(total_steps)]
+
+
+def _consistent_pairwise_metadata(
+    metadata_seen: dict[tuple[int, int], set[tuple[int, int]]],
+    frames: list[CalibrationFrame],
+    version_ladder: list[int] | None,
+    fps_ladder: list[int] | None,
+) -> dict[tuple[int, int], tuple[int, int]] | None:
+    if not metadata_seen:
+        return {}
+
+    metadata: dict[tuple[int, int], tuple[int, int]] = {}
+    pairs_by_step: dict[int, tuple[int, int]] = {}
+    for key, pairs in metadata_seen.items():
+        if len(pairs) != 1:
+            return None
+        pair = next(iter(pairs))
+        existing = pairs_by_step.get(key[0])
+        if existing is None:
+            pairs_by_step[key[0]] = pair
+        elif existing != pair:
+            return None
+        metadata[key] = pair
+
+    if version_ladder is None or fps_ladder is None:
+        return metadata
+
+    for cf in frames:
+        if cf.segment_id != SEG_PAIRWISE:
+            continue
+        key = (cf.step_index, cf.frame_seq)
+        pair = metadata.get(key)
+        if pair is None:
+            continue
+        try:
+            expected_pair = _decode_pairwise_param(
+                cf.param, version_ladder, fps_ladder)
+        except ValueError:
+            return None
+        if pair != expected_pair:
+            return None
+    return metadata
+
+
 def _frames_for_target_duration(version_ladder: list[int],
                                 fps_ladder: list[int],
-                                target_seconds: float) -> tuple[int, int]:
+                                target_seconds: float) -> tuple[int, int, int]:
     fixed_seconds = _META_SECONDS + _END_SECONDS
     remaining = max(1.0, target_seconds - fixed_seconds)
-    version_seconds = remaining * 0.5
-    fps_seconds = remaining - version_seconds
+    pairwise_plan = _select_pairwise_plan(version_ladder, fps_ladder)
+    version_seconds = remaining * 0.4
+    fps_seconds = remaining * 0.4
+    pairwise_seconds = remaining - version_seconds - fps_seconds
 
     frames_per_version_step = max(
         2,
@@ -214,7 +400,16 @@ def _frames_for_target_duration(version_ladder: list[int],
     )
     fps_weight = sum(1.0 / fps for fps in fps_ladder if fps > 0)
     frames_per_fps_step = max(2, round(fps_seconds / fps_weight))
-    return frames_per_version_step, frames_per_fps_step
+    pairwise_weight = sum(
+        1.0 / fps_ladder[fps_idx]
+        for _version_idx, fps_idx in pairwise_plan
+        if fps_ladder[fps_idx] > 0
+    )
+    frames_per_pairwise_step = (
+        max(2, round(pairwise_seconds / pairwise_weight))
+        if pairwise_weight > 0 else 0
+    )
+    return frames_per_version_step, frames_per_fps_step, frames_per_pairwise_step
 
 
 def _estimate_sequence_duration(config: PresetConfig) -> float:
@@ -226,7 +421,13 @@ def _estimate_sequence_duration(config: PresetConfig) -> float:
     fps_seconds = sum(
         config.frames_per_fps_step / fps for fps in config.fps_ladder
     )
-    return _META_SECONDS + version_seconds + fps_seconds + _END_SECONDS
+    pairwise_seconds = sum(
+        config.frames_per_pairwise_step / config.fps_ladder[fps_idx]
+        for _version_idx, fps_idx in _select_pairwise_plan(
+            config.version_ladder, config.fps_ladder)
+    )
+    return (_META_SECONDS + version_seconds + fps_seconds
+            + pairwise_seconds + _END_SECONDS)
 
 
 def _presentation_repeat_count(frame_seq: int, target_fps: int,
@@ -291,7 +492,7 @@ def resolve_preset(preset_name: str,
     else:
         raise ValueError(f"Unknown preset: {preset_name!r}")
 
-    fpv, fpf = _frames_for_target_duration(
+    fpv, fpf, fpp = _frames_for_target_duration(
         ver, fps, _PRESET_TARGET_SECONDS[pid])
 
     return PresetConfig(
@@ -302,6 +503,7 @@ def resolve_preset(preset_name: str,
         fps_anchor_version=anchor,
         frames_per_version_step=fpv,
         frames_per_fps_step=fpf,
+        frames_per_pairwise_step=fpp,
     )
 
 
@@ -314,11 +516,12 @@ class CalibrationFrame:
     Attributes
     ----------
     segment_id : int
-        ``SEG_META`` (1), ``SEG_VERSION`` (2), ``SEG_FPS`` (3), or
-        ``SEG_END`` (4).
+        ``SEG_META`` (1), ``SEG_VERSION`` (2), ``SEG_FPS`` (3),
+        ``SEG_END`` (4), or ``SEG_PAIRWISE`` (5).
     param : int
         Segment-dependent: preset ID for meta, QR version for version
-        ladder, target FPS for fps ladder, 0 for end.
+        ladder, target FPS for fps ladder, pairwise plan indexes for
+        pairwise probes, 0 for end.
     step_index : int
         0-based step number within the current segment.
     total_steps : int
@@ -409,6 +612,9 @@ class TierRecommendation:
     fps: int | None = None
     overhead: float | None = None
     throughput_bps: float | None = None  # bytes/sec estimate
+    estimated_success: float | None = None
+    frame_detect_probability: float | None = None
+    source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -431,9 +637,12 @@ class CalibrationResult:
     version_detect_rates: dict[int, float]  # qr_version -> rate
     fps_detect_rates: dict[int, float]      # target_fps -> rate
     fps_data_reliable: bool
+    pairwise_detect_rates: dict[tuple[int, int], float] = field(default_factory=dict)
     recommendations: list[TierRecommendation] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
     video_metadata: VideoMetadata | None = None
+    target_k: int = DEFAULT_TARGET_K
+    fountain_codec: str = "raptorq"
 
 
 def _estimate_throughput(qr_version: int, fps: int,
@@ -448,8 +657,70 @@ def _estimate_throughput(qr_version: int, fps: int,
     return capacity * fps / overhead
 
 
+def estimate_target_k(target_size_bytes: int | None) -> int:
+    """Estimate source-symbol count for probability-based calibration."""
+    if target_size_bytes is None or target_size_bytes <= 0:
+        return DEFAULT_TARGET_K
+    blocksize = auto_blocksize(
+        target_size_bytes,
+        ec_level=_CALIBRATION_EC_LEVEL,
+        qr_version=25,
+        alphanumeric_qr=True,
+    )
+    return max(1, math.ceil(target_size_bytes / blocksize))
+
+
 def _rate_in_tier(rate: float, tier_cfg: dict[str, float]) -> bool:
     return rate >= tier_cfg["min_rate"]
+
+
+def _stats_from_rates(
+    rates: dict[int, float],
+    expected_counts: dict[int, int],
+    default_total: int = 100,
+) -> dict[int, DetectionStats]:
+    stats: dict[int, DetectionStats] = {}
+    for key, rate in rates.items():
+        total = expected_counts.get(key, default_total)
+        stats[key] = stats_from_rate(rate, total)
+    return stats
+
+
+def _pair_stats_from_rates(
+    rates: dict[tuple[int, int], float],
+    expected_counts: dict[tuple[int, int], int],
+    default_total: int = 100,
+) -> dict[tuple[int, int], DetectionStats]:
+    stats: dict[tuple[int, int], DetectionStats] = {}
+    for key, rate in rates.items():
+        total = expected_counts.get(key, default_total)
+        stats[key] = stats_from_rate(rate, total)
+    return stats
+
+
+def _expected_counts_for_preset(
+    preset_name: str,
+    display_hz: int | None = 60,
+) -> tuple[dict[int, int], dict[int, int], dict[tuple[int, int], int], int | None]:
+    try:
+        config = resolve_preset(preset_name, display_hz=display_hz)
+    except ValueError:
+        return {}, {}, {}, None
+    version_expected = {
+        version: config.frames_per_version_step
+        for version in config.version_ladder
+    }
+    fps_expected = {
+        fps: config.frames_per_fps_step
+        for fps in config.fps_ladder
+    }
+    pairwise_expected = {
+        (config.version_ladder[version_idx], config.fps_ladder[fps_idx]):
+        config.frames_per_pairwise_step
+        for version_idx, fps_idx in _select_pairwise_plan(
+            config.version_ladder, config.fps_ladder)
+    }
+    return version_expected, fps_expected, pairwise_expected, config.fps_anchor_version
 
 
 def _capture_fps_ceiling(video_metadata: VideoMetadata | None) -> int | None:
@@ -477,12 +748,55 @@ def _format_video_metadata(video_metadata: VideoMetadata | None) -> str | None:
         f", {parts[2]}" if len(parts) > 2 else "")
 
 
+def _near_integer_cadence(base_fps: int, target_fps: int) -> bool:
+    if base_fps <= 0 or target_fps <= 0 or target_fps > base_fps:
+        return False
+    ratio = base_fps / target_fps
+    return abs(ratio - round(ratio)) <= 0.05
+
+
+def _fps_cadence_message(
+    fps_detect_rates: dict[int, float],
+    video_metadata: VideoMetadata | None,
+) -> str | None:
+    base_fps = _capture_fps_ceiling(video_metadata)
+    if base_fps is None or base_fps < 50:
+        return None
+
+    fps_values = sorted(fps_detect_rates)
+    best: tuple[float, int, int] | None = None
+    for lower, higher in zip(fps_values, fps_values[1:]):
+        lower_rate = fps_detect_rates[lower]
+        higher_rate = fps_detect_rates[higher]
+        gain = higher_rate - lower_rate
+        if gain < 0.10:
+            continue
+        if not _near_integer_cadence(base_fps, higher):
+            continue
+        candidate = (gain, lower, higher)
+        if best is None or candidate > best:
+            best = candidate
+
+    if best is None:
+        return None
+    _gain, lower, higher = best
+    return (
+        f"ℹ {higher}fps outperformed {lower}fps; this can be normal "
+        f"with ~{base_fps}fps capture/display cadence."
+    )
+
+
 def compute_recommendations(
     version_detect_rates: dict[int, float],
     fps_detect_rates: dict[int, float],
     fps_data_reliable: bool,
     preset_name: str,
     video_metadata: VideoMetadata | None = None,
+    target_k: int = DEFAULT_TARGET_K,
+    fountain_codec: str = "raptorq",
+    pairwise_detect_rates: dict[tuple[int, int], float] | None = None,
+    display_hz: int | None = 60,
+    confidence: float | None = None,
 ) -> CalibrationResult:
     """Compute three-tier recommendations from raw detect rates.
 
@@ -505,6 +819,15 @@ def compute_recommendations(
     metadata_text = _format_video_metadata(video_metadata)
     if metadata_text:
         messages.append(f"ℹ Capture video: {metadata_text}.")
+    messages.append(
+        f"ℹ Recommendations assume K≈{target_k} source symbols "
+        f"for {fountain_codec}."
+    )
+    if confidence is not None:
+        messages.append(
+            f"ℹ Decode-success target floor overridden to "
+            f"{confidence:.1%}."
+        )
 
     if version_detect_rates:
         sorted_versions = sorted(version_detect_rates.keys())
@@ -546,6 +869,9 @@ def compute_recommendations(
             messages.append(
                 f"ℹ Capture headroom: {highest_fps}fps is usable."
             )
+        cadence_message = _fps_cadence_message(fps_detect_rates, video_metadata)
+        if cadence_message:
+            messages.append(cadence_message)
 
     if not fps_data_reliable:
         messages.append(
@@ -588,41 +914,49 @@ def compute_recommendations(
     if not fps_data_reliable:
         effective_fps_detect_rates = {10: 0.90}
 
+    pairwise_detect_rates = pairwise_detect_rates or {}
+    version_expected, fps_expected, pairwise_expected, anchor_version = (
+        _expected_counts_for_preset(preset_name, display_hz=display_hz))
+    version_stats = _stats_from_rates(version_detect_rates, version_expected)
+    fps_stats = _stats_from_rates(effective_fps_detect_rates, fps_expected)
+    pair_stats = _pair_stats_from_rates(pairwise_detect_rates, pairwise_expected)
+
+    candidates = optimize_calibration(
+        version_stats=version_stats,
+        fps_stats=fps_stats,
+        pair_stats=pair_stats,
+        config=OptimizerConfig(
+            codec=fountain_codec,
+            target_k=target_k,
+            capture_fps_ceiling=fps_ceiling if fps_data_reliable else None,
+            fps_anchor_version=anchor_version,
+            success_target_override=confidence,
+        ),
+    )
+
     best_pair_rate = 0.0
-    for tier_name, cfg in _TIERS.items():
-        safety = cfg["safety_margin"]
-        best: tuple[float, float, int, int, float, float, float] | None = None
+    for ver_dr in version_detect_rates.values():
+        for fps_dr in effective_fps_detect_rates.values():
+            best_pair_rate = max(best_pair_rate, min(ver_dr, fps_dr))
 
-        for ver, ver_dr in version_detect_rates.items():
-            for fps, fps_dr in effective_fps_detect_rates.items():
-                pair_rate = min(ver_dr, fps_dr)
-                best_pair_rate = max(best_pair_rate, pair_rate)
-                if not _rate_in_tier(pair_rate, cfg):
-                    continue
-
-                combined_dr = ver_dr * fps_dr
-                raw_overhead = 1.0 / combined_dr if combined_dr > 0 else 10.0
-                overhead = round(max(raw_overhead * safety, _MIN_OVERHEAD_RQ), 2)
-                throughput = _estimate_throughput(ver, fps, overhead)
-                candidate = (throughput, pair_rate, ver, fps, overhead,
-                             ver_dr, fps_dr)
-                if best is None or candidate > best:
-                    best = candidate
-
-        if best is None:
+    for tier_name in _TIERS:
+        candidate = candidates.get(tier_name)
+        if candidate is None:
             recommendations.append(TierRecommendation(
                 tier=tier_name, available=False,
             ))
             continue
 
-        throughput, _pair_rate, max_ver, max_fps, overhead, _ver_dr, _fps_dr = best
         recommendations.append(TierRecommendation(
             tier=tier_name,
             available=True,
-            qr_version=max_ver,
-            fps=max_fps,
-            overhead=overhead,
-            throughput_bps=throughput,
+            qr_version=candidate.qr_version,
+            fps=candidate.fps,
+            overhead=candidate.overhead,
+            throughput_bps=candidate.estimated_throughput_bps,
+            estimated_success=candidate.estimated_success,
+            frame_detect_probability=candidate.frame_detect_probability,
+            source=candidate.source,
         ))
 
     if recommendations and all(not r.available for r in recommendations):
@@ -642,9 +976,12 @@ def compute_recommendations(
         version_detect_rates=version_detect_rates,
         fps_detect_rates=fps_detect_rates,
         fps_data_reliable=fps_data_reliable,
+        pairwise_detect_rates=pairwise_detect_rates,
         recommendations=recommendations,
         messages=messages,
         video_metadata=video_metadata,
+        target_k=target_k,
+        fountain_codec=fountain_codec,
     )
 
 
@@ -656,9 +993,8 @@ def _build_frame_sequence(
     """Build the complete ordered list of calibration frames.
 
     Returns a list of ``(CalibrationFrame, qr_version_for_encoding,
-    target_fps)`` tuples.  ``target_fps`` is only meaningful for
-    SEG_FPS frames (determines inter-frame timing); for other segments
-    the caller should use the segment's fixed fps.
+    target_fps)`` tuples.  ``target_fps`` determines inter-frame timing
+    for FPS and pairwise probes; other segments use their fixed fps.
     """
     frames: list[tuple[CalibrationFrame, int, int]] = []
     meta_version = min(config.version_ladder)  # lowest version = most reliable
@@ -701,6 +1037,24 @@ def _build_frame_sequence(
                 frame_seq=fseq,
             )
             frames.append((cf, anchor, target_fps))
+
+    # Seg 5: Pairwise probes
+    pairwise_plan = _select_pairwise_plan(
+        config.version_ladder, config.fps_ladder)
+    n_pairwise_steps = len(pairwise_plan)
+    for step_idx, (version_idx, fps_idx) in enumerate(pairwise_plan):
+        qr_version = config.version_ladder[version_idx]
+        target_fps = config.fps_ladder[fps_idx]
+        param = _pack_pairwise_param(version_idx, fps_idx)
+        for fseq in range(config.frames_per_pairwise_step):
+            cf = CalibrationFrame(
+                segment_id=SEG_PAIRWISE,
+                param=param,
+                step_index=step_idx,
+                total_steps=n_pairwise_steps,
+                frame_seq=fseq,
+            )
+            frames.append((cf, qr_version, target_fps))
 
     # Seg 4: End
     n_end = config.end_frames
@@ -773,39 +1127,45 @@ def generate_calibration(
     frame_seq = _build_frame_sequence(config)
     total_logical = len(frame_seq)
 
-    duration = _estimate_sequence_duration(config)
-    reporter.info(
-        f"Calibration: preset={config.preset_name}, "
-        f"version_steps={len(config.version_ladder)}, "
-        f"fps_steps={len(config.fps_ladder)}, "
-        f"duration≈{duration:.1f}s, "
-        f"logical_frames={total_logical}"
-    )
+    if not display and not output_path:
+        raise ValueError("Either output_path or display must be specified")
 
+    reporter.calibrate_generate_start(
+        preset=config.preset_name,
+        total_frames=total_logical,
+    )
     if display:
         _generate_display(config, frame_seq, reporter)
-    elif output_path:
-        _generate_video(config, frame_seq, output_path, codec, reporter)
     else:
-        raise ValueError("Either output_path or display must be specified")
+        assert output_path is not None
+        _generate_video(config, frame_seq, output_path, codec, reporter)
+    reporter.calibrate_generate_done(
+        output_path=output_path if output_path else None)
 
     return config
 
 
-def _calibration_payload(cal_frame: CalibrationFrame,
-                         qr_version: int) -> bytes:
+def _calibration_payload(
+    cal_frame: CalibrationFrame,
+    qr_version: int,
+    target_fps: int | None = None,
+) -> bytes:
     """Return a dense, deterministic calibration payload for one QR."""
     header = cal_frame.pack()
+    extension = b""
+    if cal_frame.segment_id == SEG_PAIRWISE and target_fps is not None:
+        extension = _pack_pairwise_metadata(cal_frame, qr_version, target_fps)
+    prefix = header + extension
     capacity = _alphanumeric_byte_capacity(qr_version, _CALIBRATION_EC_LEVEL)
     target_size = max(
-        len(header),
+        len(prefix),
         capacity - _CALIBRATION_PAYLOAD_SAFETY_BYTES,
     )
-    if target_size <= len(header):
-        return header
+    if target_size <= len(prefix):
+        return prefix
 
-    seed = header + bytes([qr_version])
-    payload = bytearray(header)
+    seed = prefix + bytes([qr_version])
+    payload = bytearray(prefix)
     counter = 0
     while len(payload) < target_size:
         payload.extend(hashlib.blake2s(
@@ -898,11 +1258,9 @@ def _generate_video(
     if stream_opts:
         out_stream.options = stream_opts
 
-    written = 0
-
     try:
         for idx, (cf, qr_ver, target_fps) in enumerate(frame_seq):
-            payload_bytes = _calibration_payload(cf, qr_ver)
+            payload_bytes = _calibration_payload(cf, qr_ver, target_fps)
             mod_img = generate_qr_module_image(
                 payload_bytes,
                 ec_level=_CALIBRATION_EC_LEVEL,
@@ -918,25 +1276,16 @@ def _generate_video(
                 frame_av = av.VideoFrame.from_ndarray(qr_img, format="bgr24")
                 for packet in out_stream.encode(frame_av):
                     output.mux(packet)
-                written += 1
 
             if idx % 50 == 0 or idx == len(frame_seq) - 1:
                 pct = (idx + 1) / len(frame_seq) * 100
-                reporter.info(
-                    f"Generating calibration video: {pct:.0f}% "
-                    f"({idx + 1}/{len(frame_seq)} logical frames)"
-                )
+                reporter.calibrate_generate_update(progress_pct=pct)
 
         # Flush
         for packet in out_stream.encode():
             output.mux(packet)
     finally:
         output.close()
-
-    reporter.info(
-        f"Calibration video written: {output_path} "
-        f"({written} container frames @ {container_rate}fps)"
-    )
 
 
 class _CalibrationDisplayCache:
@@ -1018,7 +1367,7 @@ def _generate_display(
     # version's native module grid.  Qt scales to the current display area.
     out_idx = 0
     for cf, qr_ver, target_fps in frame_seq:
-        payload_bytes = _calibration_payload(cf, qr_ver)
+        payload_bytes = _calibration_payload(cf, qr_ver, target_fps)
         mod_img = generate_qr_module_image(
             payload_bytes,
             ec_level=_CALIBRATION_EC_LEVEL,
@@ -1042,7 +1391,6 @@ def _generate_display(
         ignore_saved_geometry=True,
     )
     play_display_qt(cache, state, display_fps, config=player_config)
-    reporter.info("Calibration display complete.")
 
 
 # ── Calibration video analysis (decoder side) ───────────────────────
@@ -1075,6 +1423,9 @@ def analyze_calibration(
     video_path: str,
     workers: int | None = None,
     reporter: ProgressReporter | None = None,
+    target_k: int = DEFAULT_TARGET_K,
+    fountain_codec: str = "raptorq",
+    confidence: float | None = None,
 ) -> CalibrationResult:
     """Analyze a captured calibration video and produce recommendations.
 
@@ -1101,6 +1452,7 @@ def analyze_calibration(
     reporter.calibrate_analyze_start(total_frames=total_frames)
 
     decoded_frames: list[CalibrationFrame] = []
+    pairwise_metadata_seen: dict[tuple[int, int], set[tuple[int, int]]] = {}
     frame_count = 0
     preset_name = "standard"  # default, may be overridden by meta segment
 
@@ -1117,6 +1469,10 @@ def analyze_calibration(
                 raw = base45_decode(text)
                 cf = CalibrationFrame.unpack(raw)
                 decoded_frames.append(cf)
+                pair = _decode_pairwise_metadata(raw, cf)
+                if pair is not None:
+                    pairwise_metadata_seen.setdefault(
+                        (cf.step_index, cf.frame_seq), set()).add(pair)
 
                 # Extract preset from meta segment
                 if cf.segment_id == SEG_META:
@@ -1182,6 +1538,12 @@ def analyze_calibration(
     fps_seen: dict[int, set[tuple[int, int]]] = {}
     fps_expected: dict[int, int] = {}
 
+    # Pairwise segment: group by decoded (qr_version, target_fps).
+    pairwise_seen: dict[tuple[int, int], set[tuple[int, int]]] = {}
+    pairwise_expected: dict[tuple[int, int], int] = {}
+    has_pairwise_segment = any(
+        cf.segment_id == SEG_PAIRWISE for cf in decoded_frames)
+
     for cf in decoded_frames:
         key = (cf.step_index, cf.frame_seq)
         if cf.segment_id == SEG_VERSION:
@@ -1189,25 +1551,63 @@ def analyze_calibration(
         elif cf.segment_id == SEG_FPS:
             fps_seen.setdefault(cf.param, set()).add(key)
 
-    # To determine expected counts, we resolve the preset config and
-    # use its frames_per_step values.  However, the decode side may not
-    # know the exact config.  We derive it from the decoded frames:
-    # for each step, total_steps and the largest frame_seq seen give us
-    # the expected count.
+    inferred_version_ladder = _segment_ladder_from_frames(
+        decoded_frames, SEG_VERSION)
+    inferred_fps_ladder = _segment_ladder_from_frames(decoded_frames, SEG_FPS)
+    pairwise_metadata = _consistent_pairwise_metadata(
+        pairwise_metadata_seen,
+        decoded_frames,
+        inferred_version_ladder,
+        inferred_fps_ladder,
+    )
+    pairwise_metadata_invalid = pairwise_metadata is None
+    if pairwise_metadata is None:
+        pairwise_metadata = {}
+    metadata_fps_values = [fps for _ver, fps in pairwise_metadata.values()]
+    analysis_display_hz = (
+        max(inferred_fps_ladder)
+        if inferred_fps_ladder else
+        (max(metadata_fps_values) if metadata_fps_values else 60)
+    )
 
-    # Rebuild expected counts from decoded frames' metadata.
-    # For version: group by step_index, take max frame_seq + 1 or
-    # use total_steps and the known frames-per-step.
-    # Simpler approach: use the preset config.
     try:
-        config = resolve_preset(preset_name, display_hz=60)
+        config = resolve_preset(preset_name, display_hz=analysis_display_hz)
     except ValueError:
-        config = resolve_preset("standard", display_hz=60)
+        config = resolve_preset("standard", display_hz=analysis_display_hz)
 
-    for ver in config.version_ladder:
+    analysis_version_ladder = inferred_version_ladder or config.version_ladder
+    analysis_fps_ladder = inferred_fps_ladder or config.fps_ladder
+
+    for ver in analysis_version_ladder:
         version_expected[ver] = config.frames_per_version_step
-    for fps in config.fps_ladder:
+    for fps in analysis_fps_ladder:
         fps_expected[fps] = config.frames_per_fps_step
+    if has_pairwise_segment and not pairwise_metadata_invalid:
+        has_exact_pairwise_ladders = (
+            inferred_version_ladder is not None and inferred_fps_ladder is not None)
+        if has_exact_pairwise_ladders:
+            for version_idx, fps_idx in _select_pairwise_plan(
+                    inferred_version_ladder, inferred_fps_ladder):
+                pair = (inferred_version_ladder[version_idx],
+                        inferred_fps_ladder[fps_idx])
+                pairwise_expected[pair] = config.frames_per_pairwise_step
+        for pair in pairwise_metadata.values():
+            pairwise_expected.setdefault(pair, config.frames_per_pairwise_step)
+        for cf in decoded_frames:
+            if cf.segment_id != SEG_PAIRWISE:
+                continue
+            key = (cf.step_index, cf.frame_seq)
+            pair = pairwise_metadata.get(key)
+            if pair is None:
+                if not has_exact_pairwise_ladders:
+                    continue
+                try:
+                    pair = _decode_pairwise_param(
+                        cf.param, inferred_version_ladder, inferred_fps_ladder)
+                except ValueError:
+                    continue
+            pairwise_expected.setdefault(pair, config.frames_per_pairwise_step)
+            pairwise_seen.setdefault(pair, set()).add(key)
 
     # Compute detect rates
     version_detect_rates: dict[int, float] = {}
@@ -1221,6 +1621,13 @@ def analyze_calibration(
         expected = fps_expected[fps]
         detected = len(fps_seen.get(fps, set()))
         fps_detect_rates[fps] = min(detected / expected, 1.0) if expected > 0 else 0.0
+
+    pairwise_detect_rates: dict[tuple[int, int], float] = {}
+    for pair in sorted(pairwise_expected.keys()):
+        expected = pairwise_expected[pair]
+        detected = len(pairwise_seen.get(pair, set()))
+        pairwise_detect_rates[pair] = (
+            min(detected / expected, 1.0) if expected > 0 else 0.0)
 
     # ── Phase 3: Check FPS anchor reliability ───────────────────────
 
@@ -1244,6 +1651,11 @@ def analyze_calibration(
         fps_data_reliable=fps_data_reliable,
         preset_name=preset_name,
         video_metadata=video_metadata,
+        target_k=target_k,
+        fountain_codec=fountain_codec,
+        pairwise_detect_rates=pairwise_detect_rates,
+        display_hz=analysis_display_hz,
+        confidence=confidence,
     )
 
     return result
@@ -1251,11 +1663,22 @@ def analyze_calibration(
 
 # ── Pretty-printing results (Rich) ─────────────────────────────────
 
-def format_results(result: CalibrationResult) -> str:
+def _format_percent(value: float | None) -> str:
+    if value is None:
+        return "--"
+    return f"{value:.1%}"
+
+
+def format_results(result: CalibrationResult, verbose: bool = False) -> str:
     """Format calibration results as a human-readable string.
 
     Uses plain text formatting (no Rich markup) for maximum
     compatibility.  The CLI layer may further wrap this in Rich panels.
+
+    When ``verbose`` is False (default), diagnostic columns
+    (``Success`` / ``p_frame`` / ``Source``) are hidden — they are
+    internal model outputs that don't directly inform the user's
+    encode decision.
     """
     lines: list[str] = []
     lines.append("QRStream Calibration Results")
@@ -1275,26 +1698,63 @@ def format_results(result: CalibrationResult) -> str:
 
     # Recommendations table
     if any(r.available for r in result.recommendations):
-        lines.append(
-            f"  {'Tier':<12} {'Version':>8} {'FPS':>6} "
-            f"{'Overhead':>9} {'Throughput':>12}"
-        )
-        lines.append(f"  {'-'*12} {'-'*8} {'-'*6} {'-'*9} {'-'*12}")
+        if verbose:
+            lines.append(
+                f"  {'Tier':<12} {'Version':>8} {'FPS':>6} "
+                f"{'Overhead':>9} {'Success':>9} {'p_frame':>8} "
+                f"{'Source':>16} {'Throughput':>12}"
+            )
+            lines.append(
+                f"  {'-'*12} {'-'*8} {'-'*6} {'-'*9} {'-'*9} "
+                f"{'-'*8} {'-'*16} {'-'*12}"
+            )
+        else:
+            lines.append(
+                f"  {'Tier':<12} {'Version':>8} {'FPS':>6} "
+                f"{'Overhead':>9} {'Throughput':>12}"
+            )
+            lines.append(
+                f"  {'-'*12} {'-'*8} {'-'*6} {'-'*9} {'-'*12}"
+            )
         for rec in result.recommendations:
             if rec.available:
                 tp = _format_throughput(rec.throughput_bps or 0)
-                lines.append(
-                    f"  {rec.tier.capitalize():<12} "
-                    f"{'V' + str(rec.qr_version):>8} "
-                    f"{rec.fps:>6} "
-                    f"{rec.overhead:>9.2f} "
-                    f"{tp:>12}"
-                )
+                if verbose:
+                    success = _format_percent(rec.estimated_success)
+                    p_frame = _format_percent(rec.frame_detect_probability)
+                    source = rec.source or "--"
+                    lines.append(
+                        f"  {rec.tier.capitalize():<12} "
+                        f"{'V' + str(rec.qr_version):>8} "
+                        f"{rec.fps:>6} "
+                        f"{rec.overhead:>9.2f} "
+                        f"{success:>9} "
+                        f"{p_frame:>8} "
+                        f"{source:>16} "
+                        f"{tp:>12}"
+                    )
+                else:
+                    lines.append(
+                        f"  {rec.tier.capitalize():<12} "
+                        f"{'V' + str(rec.qr_version):>8} "
+                        f"{rec.fps:>6} "
+                        f"{rec.overhead:>9.2f} "
+                        f"{tp:>12}"
+                    )
             else:
-                lines.append(
-                    f"  {rec.tier.capitalize():<12}    "
-                    f"{'-- unavailable --':>38}"
-                )
+                if verbose:
+                    lines.append(
+                        f"  {rec.tier.capitalize():<12} "
+                        f"{'--':>8} {'--':>6} {'--':>9} "
+                        f"{'--':>9} {'--':>8} {'--':>16} "
+                        f"{'-- unavailable --':>12}"
+                    )
+                else:
+                    lines.append(
+                        f"  {rec.tier.capitalize():<12} "
+                        f"{'--':>8} {'--':>6} {'--':>9} "
+                        f"{'-- unavailable --':>12}"
+                    )
         lines.append("")
 
         # Recommended command
@@ -1322,10 +1782,13 @@ def format_results(result: CalibrationResult) -> str:
     return "\n".join(lines)
 
 
-def render_results(result: CalibrationResult):
+def render_results(result: CalibrationResult, verbose: bool = False):
     """Return a Rich renderable for calibration results.
 
     Falls back to the plain-text formatter if Rich is unavailable.
+
+    When ``verbose`` is False (default), diagnostic columns
+    (``Success`` / ``p_frame`` / ``Source``) are hidden.
     """
     try:
         from rich import box
@@ -1334,7 +1797,7 @@ def render_results(result: CalibrationResult):
         from rich.table import Table
         from rich.text import Text
     except Exception:  # pragma: no cover — Rich is normally installed
-        return format_results(result)
+        return format_results(result, verbose=verbose)
 
     quality_styles = {
         "excellent": "bold green",
@@ -1385,25 +1848,35 @@ def render_results(result: CalibrationResult):
         table.add_column("Version", justify="right")
         table.add_column("FPS", justify="right")
         table.add_column("Overhead", justify="right")
+        if verbose:
+            table.add_column("Success", justify="right")
+            table.add_column("p_frame", justify="right")
+            table.add_column("Source", justify="right")
         table.add_column("Throughput", justify="right")
 
+        unavailable_placeholder_count = 4 if not verbose else 7
         for rec in result.recommendations:
             row_style = tier_styles.get(rec.tier, "white")
             if rec.available:
-                table.add_row(
+                row = [
                     rec.tier.capitalize(),
                     f"V{rec.qr_version}",
                     str(rec.fps),
                     f"{rec.overhead:.2f}",
-                    _format_throughput(rec.throughput_bps or 0),
-                    style=row_style,
-                )
+                ]
+                if verbose:
+                    row.extend([
+                        _format_percent(rec.estimated_success),
+                        _format_percent(rec.frame_detect_probability),
+                        rec.source or "--",
+                    ])
+                row.append(_format_throughput(rec.throughput_bps or 0))
+                table.add_row(*row, style=row_style)
             else:
-                table.add_row(
-                    rec.tier.capitalize(),
-                    "--", "--", "--", "-- unavailable --",
-                    style="dim",
-                )
+                row = [rec.tier.capitalize()]
+                row.extend(["--"] * (unavailable_placeholder_count - 1))
+                row.append("-- unavailable --")
+                table.add_row(*row, style="dim")
         parts.extend([Text(""), table])
 
         recommended = next(
