@@ -230,6 +230,10 @@ def _estimate_frame_probability(
     if pair is not None:
         return pair.lower_bound(z), "pairwise"
 
+    interp = _interpolate_pair_probability(version, fps, pair_stats, z)
+    if interp is not None:
+        return interp, "pairwise-interp"
+
     version_stat = version_stats.get(version)
     fps_stat = fps_stats.get(fps)
     if version_stat is None or fps_stat is None:
@@ -260,6 +264,95 @@ def _estimate_throughput(qr_version: int, fps: int, overhead: float,
         return 0.0
     capacity = _alphanumeric_byte_capacity(qr_version, ec_level)
     return capacity * fps / overhead
+
+
+def _interpolate_pair_probability(
+    version: int,
+    fps: int,
+    pair_stats: Mapping[tuple[int, int], DetectionStats],
+    z: float,
+) -> float | None:
+    """Bilinear-ish interpolation of Wilson lower bounds on the (V, F) grid.
+
+    Returns ``None`` when the measurement set cannot support an
+    interpolation (e.g. only one distinct version and one distinct fps
+    measured) so callers can fall through to the separable model.
+
+    Queries outside the measured grid are clamped to the nearest edge —
+    we never extrapolate. When only a single axis varies, this collapses
+    to a 1D linear interpolation along the other axis.
+    """
+    if not pair_stats:
+        return None
+
+    measured_versions = sorted({v for v, _ in pair_stats})
+    measured_fps = sorted({f for _, f in pair_stats})
+    if len(measured_versions) < 2 and len(measured_fps) < 2:
+        return None
+
+    v_q = _clamp_to_range(version, measured_versions)
+    f_q = _clamp_to_range(fps, measured_fps)
+
+    v_lo, v_hi = _bracket(v_q, measured_versions)
+    f_lo, f_hi = _bracket(f_q, measured_fps)
+
+    if v_hi == v_lo:
+        wv_pairs = [(1.0, v_lo)]
+    else:
+        wv_pairs = [
+            ((v_hi - v_q) / (v_hi - v_lo), v_lo),
+            ((v_q - v_lo) / (v_hi - v_lo), v_hi),
+        ]
+    if f_hi == f_lo:
+        wf_pairs = [(1.0, f_lo)]
+    else:
+        wf_pairs = [
+            ((f_hi - f_q) / (f_hi - f_lo), f_lo),
+            ((f_q - f_lo) / (f_hi - f_lo), f_hi),
+        ]
+
+    corners: list[tuple[float, float]] = []  # (weight, p_value)
+    for wv, vv in wv_pairs:
+        for wf, ff in wf_pairs:
+            stat = pair_stats.get((vv, ff))
+            if stat is None:
+                continue
+            corners.append((wv * wf, stat.lower_bound(z)))
+
+    if not corners:
+        return None
+
+    total_weight = sum(w for w, _ in corners)
+    if total_weight <= 0:
+        return None
+    p = sum(w * value for w, value in corners) / total_weight
+    return max(0.0, min(1.0, p))
+
+
+def _clamp_to_range(value: int, sorted_values: list[int]) -> int:
+    if not sorted_values:
+        return value
+    if value < sorted_values[0]:
+        return sorted_values[0]
+    if value > sorted_values[-1]:
+        return sorted_values[-1]
+    return value
+
+
+def _bracket(value: int, sorted_values: list[int]) -> tuple[int, int]:
+    """Return the largest measured ≤ value and smallest measured ≥ value.
+
+    Caller must ensure ``value`` is already clamped into ``[min, max]``.
+    """
+    lo = sorted_values[0]
+    hi = sorted_values[-1]
+    for v in sorted_values:
+        if v <= value:
+            lo = v
+        if v >= value:
+            hi = v
+            break
+    return lo, hi
 
 
 def _binomial_sf(k: int, n: int, p: float) -> float:

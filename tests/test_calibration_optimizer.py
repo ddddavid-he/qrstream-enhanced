@@ -140,3 +140,92 @@ def test_optimizer_does_not_monotonically_suppress_fps_cadence_gain():
     assert balanced is not None
     assert balanced.fps == 30
     assert balanced.overhead < 2.0
+
+
+def test_optimizer_uses_pairwise_interpolation_when_exact_pair_missing():
+    """When the picked (V,F) is bracketed by measured pairs, interpolate."""
+    version_stats = {
+        25: stats_from_rate(0.99, 200),
+        40: stats_from_rate(0.99, 200),
+    }
+    fps_stats = {
+        30: stats_from_rate(0.99, 200),
+    }
+    # Only off-axis corner pairs measured. The optimizer's only feasible
+    # FPS is 30 and only versions are 25 and 40, so neither (25,30) nor
+    # (40,30) is in pair_stats → must interpolate.
+    pair_stats = {
+        (25, 10): stats_from_rate(0.97, 200),
+        (40, 10): stats_from_rate(0.95, 200),
+        (25, 60): stats_from_rate(0.95, 200),
+        (40, 60): stats_from_rate(0.93, 200),
+    }
+
+    result = optimize_calibration(
+        version_stats,
+        fps_stats,
+        pair_stats=pair_stats,
+        config=OptimizerConfig(fps_anchor_version=25),
+    )
+
+    aggressive = result["aggressive"]
+    assert aggressive is not None
+    assert aggressive.source == "pairwise-interp"
+
+
+def test_optimizer_clamps_interpolation_at_grid_edges():
+    """Queries outside the measurement grid clamp; no extrapolation."""
+    pair_stats = {
+        (25, 10): stats_from_rate(0.99, 200),
+        (40, 10): stats_from_rate(0.99, 200),
+    }
+    # Only one fps measured (10), two versions. Query at fps=60 must clamp
+    # to fps=10 (its only measurement axis) and interpolate over V.
+    version_stats = {
+        25: stats_from_rate(0.99, 200),
+        40: stats_from_rate(0.99, 200),
+    }
+    fps_stats = {
+        10: stats_from_rate(0.99, 200),
+        60: stats_from_rate(0.99, 200),
+    }
+
+    result = optimize_calibration(
+        version_stats,
+        fps_stats,
+        pair_stats=pair_stats,
+        config=OptimizerConfig(fps_anchor_version=25),
+    )
+
+    # Some tier must surface interpolation as the source.
+    sources = {tier: cand.source for tier, cand in result.items()
+               if cand is not None}
+    assert "pairwise-interp" in sources.values()
+
+
+def test_optimizer_falls_back_to_separable_with_insufficient_pairs():
+    """A single (V, F) measurement is not enough to interpolate."""
+    pair_stats = {
+        (25, 10): stats_from_rate(0.99, 200),
+    }
+    version_stats = {
+        25: stats_from_rate(0.99, 200),
+        40: stats_from_rate(0.99, 200),
+    }
+    fps_stats = {
+        10: stats_from_rate(0.99, 200),
+        30: stats_from_rate(0.99, 200),
+    }
+
+    result = optimize_calibration(
+        version_stats,
+        fps_stats,
+        pair_stats=pair_stats,
+        config=OptimizerConfig(fps_anchor_version=25),
+    )
+
+    # Pick will be (V40, 30fps); no interpolation possible (only 1 V and 1
+    # F measured in pair_stats) → must fall back to separable.
+    aggressive = result["aggressive"]
+    assert aggressive is not None
+    assert aggressive.source in {"separable", "fallback"}
