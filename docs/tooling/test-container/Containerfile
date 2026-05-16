@@ -5,7 +5,7 @@
 # the full test suite (fast + slow / real-phone fixtures) on their own
 # machine in a reproducible fedora:latest environment.
 #
-# Usage: see dev/test-container/run.sh
+# Usage: see docs/tooling/test-container/run.sh
 
 FROM fedora:latest
 

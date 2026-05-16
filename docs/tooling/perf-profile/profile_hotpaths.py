@@ -25,7 +25,7 @@ from math import ceil
 from pathlib import Path
 from statistics import mean, median
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "src"))
 
 import cv2  # noqa: E402

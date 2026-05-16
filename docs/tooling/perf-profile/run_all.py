@@ -7,9 +7,9 @@ Single-process cProfile is capped at 1MB by default because it's slow.
 Override via environment or flags on the individual scripts.
 
 Usage:
-    python dev/perf-profile/run_all.py
-    python dev/perf-profile/run_all.py --sizes 10,100,1024
-    python dev/perf-profile/run_all.py --quick         # skip 5MB+10MB
+    python docs/tooling/perf-profile/run_all.py
+    python docs/tooling/perf-profile/run_all.py --sizes 10,100,1024
+    python docs/tooling/perf-profile/run_all.py --quick         # skip 5MB+10MB
 """
 
 import argparse
@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 HERE = Path(__file__).parent
 RESULTS = HERE / "results"
 RESULTS.mkdir(exist_ok=True)

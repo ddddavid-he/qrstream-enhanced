@@ -25,7 +25,7 @@ implementing now that:
 
 ## Current Pipeline Summary
 
-The current decode path in [`src/qrstream/decoder.py`](../src/qrstream/decoder.py)
+The current decode path in [`src/qrstream/decoder.py`](../../src/qrstream/decoder.py)
 works like this:
 
 1. **Probe**
@@ -45,13 +45,13 @@ works like this:
 
 Relevant code points:
 
-- [`src/qrstream/decoder.py`](../src/qrstream/decoder.py#L386) `_downscale_frame()`
-- [`src/qrstream/decoder.py`](../src/qrstream/decoder.py#L421) `_crop_frame()`
-- [`src/qrstream/decoder.py`](../src/qrstream/decoder.py#L437) `_prepare_frame()`
-- [`src/qrstream/decoder.py`](../src/qrstream/decoder.py#L913) `_read_frames()`
-- [`src/qrstream/decoder.py`](../src/qrstream/decoder.py#L948) `_read_frame_ranges()`
-- [`src/qrstream/decoder.py`](../src/qrstream/decoder.py#L1116) `_probe_sample_rate()`
-- [`src/qrstream/decoder.py`](../src/qrstream/decoder.py#L2112) `_stream_scan()`
+- [`src/qrstream/decoder.py`](../../src/qrstream/decoder.py#L386) `_downscale_frame()`
+- [`src/qrstream/decoder.py`](../../src/qrstream/decoder.py#L421) `_crop_frame()`
+- [`src/qrstream/decoder.py`](../../src/qrstream/decoder.py#L437) `_prepare_frame()`
+- [`src/qrstream/decoder.py`](../../src/qrstream/decoder.py#L913) `_read_frames()`
+- [`src/qrstream/decoder.py`](../../src/qrstream/decoder.py#L948) `_read_frame_ranges()`
+- [`src/qrstream/decoder.py`](../../src/qrstream/decoder.py#L1116) `_probe_sample_rate()`
+- [`src/qrstream/decoder.py`](../../src/qrstream/decoder.py#L2112) `_stream_scan()`
 
 Important implementation detail:
 
@@ -136,7 +136,7 @@ Interpretation:
 
 ### 2. Legacy profile data is now only directional
 
-[`dev/perf-profile/results/decode_report.txt`](./perf-profile/results/decode_report.txt)
+[`docs/tooling/perf-profile/results/decode_report.txt`](../tooling/perf-profile/results/decode_report.txt)
 was collected before the zxing-cpp migration and still contains JPEG IPC /
 ProcessPool-era costs.
 
@@ -358,8 +358,8 @@ The original priority labels should be updated as follows:
 
 Target files:
 
-- [`src/qrstream/decoder.py`](../src/qrstream/decoder.py)
-- [`pyproject.toml`](../pyproject.toml)
+- [`src/qrstream/decoder.py`](../../src/qrstream/decoder.py)
+- [`pyproject.toml`](../../pyproject.toml)
 - tests under [`tests/`](../tests)
 
 Suggested shape:

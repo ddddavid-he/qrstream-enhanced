@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Local test harness for the PyAV backend migration.
 #
-# Builds dev/test-container/Containerfile (fedora:latest + uv + Tsinghua
+# Builds docs/tooling/test-container/Containerfile (fedora:latest + uv + Tsinghua
 # mirror) on each target arch and runs the chosen mode inside it.
 #
 # Architectures are selected via podman system connections:
@@ -22,9 +22,9 @@
 #   both  (default)   — arm64 first, then amd64
 #
 # Examples:
-#   ./dev/test-container/run.sh                 # fast, both arches
-#   ./dev/test-container/run.sh all arm64       # full gate, arm64 only
-#   ./dev/test-container/run.sh e2e amd64       # e2e on amd64 only
+#   ./docs/tooling/test-container/run.sh                 # fast, both arches
+#   ./docs/tooling/test-container/run.sh all arm64       # full gate, arm64 only
+#   ./docs/tooling/test-container/run.sh e2e amd64       # e2e on amd64 only
 #
 # CI does NOT invoke this script — it is for local verification only.
 
@@ -63,7 +63,7 @@ _run_on() {
     echo "[run.sh] ${arch}: building ${IMG} ..."
     "${prefix[@]}" build \
         -t "${IMG}" \
-        -f "${REPO_ROOT}/dev/test-container/Containerfile" \
+        -f "${REPO_ROOT}/docs/tooling/test-container/Containerfile" \
         "${REPO_ROOT}"
 
     echo "[run.sh] ${arch}: smoke — import av + cv2 + zxing-cpp"

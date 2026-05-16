@@ -11,9 +11,9 @@ Staged timing breaks decode wall time into:
   - probe phase (separate)
 
 Usage:
-    python dev/perf-profile/profile_decode.py
-    python dev/perf-profile/profile_decode.py --sizes 10,100,1000
-    python dev/perf-profile/profile_decode.py --skip-cprofile
+    python docs/tooling/perf-profile/profile_decode.py
+    python docs/tooling/perf-profile/profile_decode.py --sizes 10,100,1000
+    python docs/tooling/perf-profile/profile_decode.py --skip-cprofile
 """
 
 import argparse
@@ -27,7 +27,7 @@ import tempfile
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "src"))
 
 import cv2  # noqa: E402

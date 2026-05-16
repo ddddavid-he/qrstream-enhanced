@@ -12,7 +12,7 @@ import tempfile
 from math import ceil
 
 # Add project to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'src'))
 
 from qrstream.encoder import encode_to_video, LTEncoder
 from qrstream.decoder import decode_blocks, LTDecoder

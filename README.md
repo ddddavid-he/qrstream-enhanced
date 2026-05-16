@@ -213,11 +213,11 @@ project-root/
 │   ├── test_e2e_encode_decode.py  # End-to-end encode→video→decode SHA256 tests
 │   ├── test_display_*.py      # Optional display-mode cache/player tests
 │   └── test_optimizations.py  # Perf optimizations + zxing-cpp + legacy-fallback tests
-└── dev/
-    ├── benchmark.py           # Performance benchmarks
-    ├── perf-profile/          # cProfile hotspot analysis scripts
-    ├── test-container/        # Podman test container
-    └── DESIGN-*.md / DISCOVERY-*.md  # Design notes and investigation write-ups
+└── docs/
+    ├── design/                # Long-lived design specs
+    ├── discovery/             # Investigation notes and findings
+    ├── archive/               # Superseded planning/history docs
+    └── tooling/               # Benchmark, profiling, and local container helpers
 ```
 
 ## Technical Details

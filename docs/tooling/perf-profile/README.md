@@ -1,10 +1,10 @@
-# Performance Profiling — `dev/perf-profile`
+# Performance Profiling — `docs/tooling/perf-profile`
 
 针对 ≤10MB 文件场景的详细性能分析脚本。
 
 ## 设计目标
 
-当前 benchmark（`dev/benchmark.py`）只测总 wall time，无法定位真实瓶颈。
+当前 benchmark（`docs/tooling/benchmark.py`）只测总 wall time，无法定位真实瓶颈。
 本目录下的脚本用来回答以下问题：
 
 1. **CPU 时间花在哪里**：`cProfile` 细粒度函数级热点（单 worker 模式下才能看清）。
@@ -25,14 +25,14 @@
 
 ```bash
 # 本地直接跑：
-uv run python dev/perf-profile/run_all.py
+uv run python docs/tooling/perf-profile/run_all.py
 
 # 单独跑某一项（例如只测编码）：
-uv run python dev/perf-profile/profile_encode.py --sizes 10,100,1000
+uv run python docs/tooling/perf-profile/profile_encode.py --sizes 10,100,1000
 
 # 可视化 .prof 文件：
 uv tool install snakeviz
-snakeviz dev/perf-profile/results/encode_single_100kb.prof
+snakeviz docs/tooling/perf-profile/results/encode_single_100kb.prof
 ```
 
 ## 目标场景

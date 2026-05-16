@@ -1,5 +1,5 @@
 [project]
-name = "qrstream-headless"
+name = "qrstream"
 dynamic = ["version"]
 description = "Encode and decode files via QR code video streams using LT fountain codes and RaptorQ"
 readme = "README.md"
@@ -38,6 +38,7 @@ dependencies = [
     "rich>=13.7.0",
     "zxing-cpp>=3.0.0",
     "av>=17.0.0",
+    "PySide6-Essentials>=6.7.0",
     "raptorq>=2.0.0",
 ]
 

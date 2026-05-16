@@ -1,10 +1,10 @@
 # Containerfile for QRStream performance profiling
 # Build from project root:
-#   podman build -t qrstream-profile -f dev/perf-profile/Containerfile .
+#   podman build -t qrstream-profile -f docs/tooling/perf-profile/Containerfile .
 #
 # Run the full suite:
-#   podman run --rm -v $(pwd)/dev/perf-profile/results:/app/dev/perf-profile/results:Z \
-#     qrstream-profile python dev/perf-profile/run_all.py --quick
+#   podman run --rm -v $(pwd)/docs/tooling/perf-profile/results:/app/docs/tooling/perf-profile/results:Z \
+#     qrstream-profile python docs/tooling/perf-profile/run_all.py --quick
 
 FROM python:3.12-slim
 
@@ -29,9 +29,8 @@ RUN pip install --no-cache-dir \
         "qrcode[pil]>=7.0"
 
 COPY src /app/src
-COPY dev /app/dev
-COPY benchmarks /app/benchmarks
+COPY docs /app/docs
 
 ENV PYTHONPATH=/app/src
 
-CMD ["python", "dev/perf-profile/run_all.py", "--quick"]
+CMD ["python", "docs/tooling/perf-profile/run_all.py", "--quick"]

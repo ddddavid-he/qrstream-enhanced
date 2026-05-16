@@ -46,8 +46,8 @@ PRNG_WARMUP_ROUNDS = 5
 #
 # ``splitmix64_mix`` replaces the warmup loop with a single-shot
 # non-linear scrambler (Steele/Lea 2014, used in JDK
-# ``SplittableRandom``).  Benchmarked in dev/bench_mixing.py
-# against Knuth / Murmur3 / wyhash variants; SplitMix64 matches or
+# ``SplittableRandom``).  Benchmarked against Knuth / Murmur3 /
+# wyhash variants in historical mixing experiments; SplitMix64 matches or
 # beats all of them on LT convergence across K ∈ {328, 1024, 1827,
 # 2048, 4096} while costing only 3 multiplies + 3 xor-shifts.
 _SPLITMIX_MASK = (1 << 64) - 1

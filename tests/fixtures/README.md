@@ -82,7 +82,7 @@ its decoded byte stream by size plus SHA-256.
 ### v4 cases (qrstream 0.7.3+ default path)
 
 1. Generate a random input with a small human-readable header
-   (see `dev/make_test_fixtures.py` history) so the file is
+   (see the historical `make_test_fixtures.py` helper) so the file is
    auditable in a hex viewer.
 2. Encode:
 

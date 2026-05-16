@@ -210,11 +210,11 @@ project-root/
 │   ├── test_e2e_encode_decode.py  # 完整编码→视频→解码 SHA256 验证
 │   ├── test_display_*.py      # 可选显示模式缓存/播放器测试
 │   └── test_optimizations.py  # 性能优化 + zxing-cpp + legacy fallback 测试
-└── dev/
-    ├── benchmark.py           # 性能基准测试
-    ├── perf-profile/          # cProfile 热点分析脚本
-    ├── test-container/        # Podman 测试容器
-    └── DESIGN-*.md / DISCOVERY-*.md  # 设计记录与调研文档
+└── docs/
+    ├── design/                # 长期设计文档
+    ├── discovery/             # 调研记录与发现
+    ├── archive/               # 历史规划 / 归档文档
+    └── tooling/               # benchmark、profiling 与本地容器辅助工具
 ```
 
 ## 技术细节

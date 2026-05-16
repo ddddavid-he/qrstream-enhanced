@@ -12,9 +12,9 @@ Two complementary measurements:
    - Scheduling / contention overhead (difference)
 
 Usage:
-    python dev/perf-profile/profile_encode.py
-    python dev/perf-profile/profile_encode.py --sizes 10,100,1000
-    python dev/perf-profile/profile_encode.py --skip-cprofile
+    python docs/tooling/perf-profile/profile_encode.py
+    python docs/tooling/perf-profile/profile_encode.py --sizes 10,100,1000
+    python docs/tooling/perf-profile/profile_encode.py --skip-cprofile
 """
 
 import argparse
@@ -30,7 +30,7 @@ from math import ceil
 from pathlib import Path
 
 # Add src/ to path
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "src"))
 
 import cv2  # noqa: E402
