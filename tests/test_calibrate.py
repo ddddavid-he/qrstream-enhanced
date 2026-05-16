@@ -16,6 +16,7 @@ from qrstream.calibrate import (
     SEG_END,
     SEG_FPS,
     SEG_META,
+    SEG_PAIRWISE,
     SEG_VERSION,
     TierRecommendation,
     VideoMetadata,
@@ -28,15 +29,19 @@ from qrstream.calibrate import (
     _build_frame_sequence,
     _calibration_payload,
     _container_fps,
+    _decode_pairwise_param,
     _estimate_sequence_duration,
     _estimate_throughput,
+    _pack_pairwise_param,
+    _select_pairwise_plan,
+    _unpack_pairwise_param,
     compute_recommendations,
     estimate_target_k,
     format_results,
     resolve_preset,
 )
 from qrstream.overhead_policy import MIN_OVERHEAD_RQ
-from qrstream.protocol import _alphanumeric_byte_capacity
+from qrstream.protocol import _alphanumeric_byte_capacity, base45_encode
 
 
 CANONICAL_PRESETS = ["low", "fast", "standard", "full", "high"]
@@ -122,6 +127,40 @@ class TestCalibrationFrame:
         cf1 = CalibrationFrame(SEG_VERSION, 30, 5, 12, 0)
         cf2 = CalibrationFrame(SEG_VERSION, 30, 5, 12, 1)
         assert _calibration_payload(cf1, 30) != _calibration_payload(cf2, 30)
+
+
+# ── Pairwise probe encoding ─────────────────────────────────────────
+
+class TestPairwiseProbeEncoding:
+    """Unit tests for one-byte pairwise probe params."""
+
+    @pytest.mark.parametrize("version_idx,fps_idx,param", [
+        (0, 0, 0x00),
+        (5, 10, 0xA5),
+        (15, 15, 0xFF),
+    ])
+    def test_pack_unpack_pairwise_param(self, version_idx, fps_idx, param):
+        assert _pack_pairwise_param(version_idx, fps_idx) == param
+        assert _unpack_pairwise_param(param) == (version_idx, fps_idx)
+
+    @pytest.mark.parametrize("version_idx,fps_idx", [
+        (-1, 0),
+        (16, 0),
+        (0, -1),
+        (0, 16),
+    ])
+    def test_pack_pairwise_param_validates_nibbles(self, version_idx, fps_idx):
+        with pytest.raises(ValueError, match="out of range"):
+            _pack_pairwise_param(version_idx, fps_idx)
+
+    @pytest.mark.parametrize("param", [-1, 256])
+    def test_unpack_pairwise_param_validates_byte(self, param):
+        with pytest.raises(ValueError, match="out of range"):
+            _unpack_pairwise_param(param)
+
+    def test_decode_pairwise_param_validates_ladder_bounds(self):
+        with pytest.raises(ValueError, match="out of ladder"):
+            _decode_pairwise_param(0x02, [25], [10])
 
 
 # ── Preset configuration ────────────────────────────────────────────
@@ -214,10 +253,13 @@ class TestFrameSequence:
     def test_standard_frame_count(self):
         cfg = resolve_preset("standard", display_hz=60)
         frames = _build_frame_sequence(cfg)
-        # meta + version + fps + end
+        # meta + version + fps + pairwise + end
         expected = (cfg.meta_frames
                     + len(cfg.version_ladder) * cfg.frames_per_version_step
                     + len(cfg.fps_ladder) * cfg.frames_per_fps_step
+                    + len(_select_pairwise_plan(cfg.version_ladder,
+                                                cfg.fps_ladder))
+                    * cfg.frames_per_pairwise_step
                     + cfg.end_frames)
         assert len(frames) == expected
 
@@ -225,12 +267,13 @@ class TestFrameSequence:
     def test_frame_sequence_segment_order(self, name):
         cfg = resolve_preset(name, display_hz=60)
         frames = _build_frame_sequence(cfg)
-        # Verify segments appear in order: META -> VERSION -> FPS -> END
+        # Verify segments appear in order: META -> VERSION -> FPS -> PAIRWISE -> END
         seen_segments = []
         for cf, _ver, _fps in frames:
             if not seen_segments or seen_segments[-1] != cf.segment_id:
                 seen_segments.append(cf.segment_id)
-        assert seen_segments == [SEG_META, SEG_VERSION, SEG_FPS, SEG_END]
+        assert seen_segments == [
+            SEG_META, SEG_VERSION, SEG_FPS, SEG_PAIRWISE, SEG_END]
 
     def test_version_segment_params_match_ladder(self):
         cfg = resolve_preset("standard", display_hz=60)
@@ -249,6 +292,27 @@ class TestFrameSequence:
             if cf.segment_id == SEG_FPS and cf.frame_seq == 0:
                 fps_params.append(cf.param)
         assert fps_params == cfg.fps_ladder
+
+    def test_pairwise_frames_encode_expected_pairs(self):
+        cfg = resolve_preset("standard", display_hz=60)
+        frames = _build_frame_sequence(cfg)
+        expected_pairs = [
+            (cfg.version_ladder[version_idx], cfg.fps_ladder[fps_idx])
+            for version_idx, fps_idx in _select_pairwise_plan(
+                cfg.version_ladder, cfg.fps_ladder)
+        ]
+        observed_pairs = []
+        for cf, qr_ver, target_fps in frames:
+            if cf.segment_id == SEG_PAIRWISE and cf.frame_seq == 0:
+                observed_pairs.append(
+                    _decode_pairwise_param(
+                        cf.param, cfg.version_ladder, cfg.fps_ladder))
+                assert (qr_ver, target_fps) == observed_pairs[-1]
+                assert cf.total_steps == len(expected_pairs)
+
+        assert observed_pairs == expected_pairs
+        assert all(0 <= cf.param <= 255 for cf, _ver, _fps in frames
+                   if cf.segment_id == SEG_PAIRWISE)
 
 
 # ── Recommendation algorithm ────────────────────────────────────────
@@ -506,6 +570,85 @@ class TestRecommendations:
         assert "87.3%" in text
         assert "Source" in text
         assert "separable" in text
+
+    def test_compute_recommendations_uses_pairwise_source(self):
+        result = compute_recommendations(
+            {25: 1.0, 40: 1.0},
+            {10: 1.0, 60: 1.0},
+            True,
+            "standard",
+            target_k=20,
+            pairwise_detect_rates={(40, 60): 1.0},
+        )
+
+        best = next(r for r in result.recommendations if r.available)
+        assert best.qr_version == 40
+        assert best.fps == 60
+        assert best.source == "pairwise"
+        assert result.pairwise_detect_rates == {(40, 60): 1.0}
+
+    def test_analyze_calibration_uses_pairwise_source(self, monkeypatch):
+        import qrstream.calibrate as cal_mod
+
+        cfg = resolve_preset("standard", display_hz=60)
+        payload_frames = [
+            CalibrationFrame(SEG_META, PRESET_IDS["standard"], 0, 1, 0),
+        ]
+        payload_frames.extend(
+            CalibrationFrame(SEG_VERSION, cfg.fps_anchor_version, 0,
+                             len(cfg.version_ladder), fseq)
+            for fseq in range(cfg.frames_per_version_step)
+        )
+        pairwise_step = _select_pairwise_plan(
+            cfg.version_ladder, cfg.fps_ladder).index((8, 8))
+        pairwise_param = _pack_pairwise_param(8, 8)
+        payload_frames.extend(
+            CalibrationFrame(SEG_PAIRWISE, pairwise_param, pairwise_step, 5, fseq)
+            for fseq in range(cfg.frames_per_pairwise_step)
+        )
+        payloads = [
+            base45_encode(frame.pack()).decode("ascii")
+            for frame in payload_frames
+        ]
+
+        class FakeAvFrame:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def to_ndarray(self, format):
+                return self.payload
+
+        class FakeVideoStream:
+            average_rate = 60
+            duration = None
+            time_base = None
+            width = 1920
+            height = 1080
+            frames = len(payloads)
+
+        class FakeStreams:
+            video = [FakeVideoStream()]
+
+        class FakeContainer:
+            streams = FakeStreams()
+
+            def decode(self, video):
+                for payload in payloads:
+                    yield FakeAvFrame(payload)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(cal_mod.av, "open", lambda _path: FakeContainer())
+        monkeypatch.setattr(cal_mod, "try_decode_qr", lambda img: img)
+
+        result = cal_mod.analyze_calibration("fake.mp4", target_k=20)
+
+        best = next(r for r in result.recommendations if r.available)
+        assert best.qr_version == 40
+        assert best.fps == 60
+        assert best.source == "pairwise"
+        assert result.pairwise_detect_rates[(40, 60)] == 1.0
 
     def test_compute_recommendations_records_target_k(self):
         result = compute_recommendations(
