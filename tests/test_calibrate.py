@@ -29,6 +29,7 @@ from qrstream.calibrate import (
     _build_frame_sequence,
     _calibration_payload,
     _container_fps,
+    _decode_pairwise_metadata,
     _decode_pairwise_param,
     _estimate_sequence_duration,
     _estimate_throughput,
@@ -45,6 +46,41 @@ from qrstream.protocol import _alphanumeric_byte_capacity, base45_encode
 
 
 CANONICAL_PRESETS = ["low", "fast", "standard", "full", "high"]
+
+
+def _patch_fake_calibration_video(monkeypatch, cal_mod, payloads, average_rate=60):
+    class FakeAvFrame:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def to_ndarray(self, format):
+            return self.payload
+
+    class FakeVideoStream:
+        duration = None
+        time_base = None
+        width = 1920
+        height = 1080
+        frames = len(payloads)
+
+        def __init__(self):
+            self.average_rate = average_rate
+
+    class FakeStreams:
+        video = [FakeVideoStream()]
+
+    class FakeContainer:
+        streams = FakeStreams()
+
+        def decode(self, video):
+            for payload in payloads:
+                yield FakeAvFrame(payload)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(cal_mod.av, "open", lambda _path: FakeContainer())
+    monkeypatch.setattr(cal_mod, "try_decode_qr", lambda img: img)
 
 
 # ── CalibrationFrame pack/unpack ────────────────────────────────────
@@ -157,6 +193,19 @@ class TestPairwiseProbeEncoding:
     def test_unpack_pairwise_param_validates_byte(self, param):
         with pytest.raises(ValueError, match="out of range"):
             _unpack_pairwise_param(param)
+
+    def test_pairwise_payload_carries_version_and_fps_metadata(self):
+        cf = CalibrationFrame(
+            SEG_PAIRWISE,
+            _pack_pairwise_param(0, 1),
+            0,
+            5,
+            0,
+        )
+        payload = _calibration_payload(cf, 25, target_fps=120)
+
+        assert CalibrationFrame.unpack(payload) == cf
+        assert _decode_pairwise_metadata(payload, cf) == (25, 120)
 
     def test_decode_pairwise_param_validates_ladder_bounds(self):
         with pytest.raises(ValueError, match="out of ladder"):
@@ -594,10 +643,17 @@ class TestRecommendations:
         payload_frames = [
             CalibrationFrame(SEG_META, PRESET_IDS["standard"], 0, 1, 0),
         ]
+        for step_idx, version in enumerate(cfg.version_ladder):
+            frame_count = (cfg.frames_per_version_step if version ==
+                           cfg.fps_anchor_version else 1)
+            payload_frames.extend(
+                CalibrationFrame(SEG_VERSION, version, step_idx,
+                                 len(cfg.version_ladder), fseq)
+                for fseq in range(frame_count)
+            )
         payload_frames.extend(
-            CalibrationFrame(SEG_VERSION, cfg.fps_anchor_version, 0,
-                             len(cfg.version_ladder), fseq)
-            for fseq in range(cfg.frames_per_version_step)
+            CalibrationFrame(SEG_FPS, fps, step_idx, len(cfg.fps_ladder), 0)
+            for step_idx, fps in enumerate(cfg.fps_ladder)
         )
         pairwise_step = _select_pairwise_plan(
             cfg.version_ladder, cfg.fps_ladder).index((8, 8))
@@ -649,6 +705,167 @@ class TestRecommendations:
         assert best.fps == 60
         assert best.source == "pairwise"
         assert result.pairwise_detect_rates[(40, 60)] == 1.0
+
+    def test_analyze_calibration_reconstructs_non_60hz_pairwise_plan(
+            self, monkeypatch):
+        import qrstream.calibrate as cal_mod
+
+        cfg = resolve_preset("high", display_hz=120)
+        fallback_cfg = resolve_preset("high", display_hz=60)
+        generated_pairs = [
+            (cfg.version_ladder[version_idx], cfg.fps_ladder[fps_idx])
+            for version_idx, fps_idx in _select_pairwise_plan(
+                cfg.version_ladder, cfg.fps_ladder)
+        ]
+        fallback_pairs = [
+            (fallback_cfg.version_ladder[version_idx],
+             fallback_cfg.fps_ladder[fps_idx])
+            for version_idx, fps_idx in _select_pairwise_plan(
+                fallback_cfg.version_ladder, fallback_cfg.fps_ladder)
+        ]
+        assert generated_pairs != fallback_pairs
+
+        payload_frames = [
+            CalibrationFrame(SEG_META, PRESET_IDS["high"], 0, 1, 0),
+        ]
+        for step_idx, version in enumerate(cfg.version_ladder):
+            payload_frames.extend(
+                CalibrationFrame(SEG_VERSION, version, step_idx,
+                                 len(cfg.version_ladder), fseq)
+                for fseq in range(cfg.frames_per_version_step)
+            )
+        payload_frames.extend(
+            CalibrationFrame(SEG_FPS, fps, step_idx, len(cfg.fps_ladder), 0)
+            for step_idx, fps in enumerate(cfg.fps_ladder)
+        )
+        for step_idx, (version_idx, fps_idx) in enumerate(
+                _select_pairwise_plan(cfg.version_ladder, cfg.fps_ladder)):
+            param = _pack_pairwise_param(version_idx, fps_idx)
+            payload_frames.extend(
+                CalibrationFrame(SEG_PAIRWISE, param, step_idx,
+                                 len(generated_pairs), fseq)
+                for fseq in range(cfg.frames_per_pairwise_step)
+            )
+        payloads = [
+            base45_encode(frame.pack()).decode("ascii")
+            for frame in payload_frames
+        ]
+
+        class FakeAvFrame:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def to_ndarray(self, format):
+                return self.payload
+
+        class FakeVideoStream:
+            average_rate = 240
+            duration = None
+            time_base = None
+            width = 1920
+            height = 1080
+            frames = len(payloads)
+
+        class FakeStreams:
+            video = [FakeVideoStream()]
+
+        class FakeContainer:
+            streams = FakeStreams()
+
+            def decode(self, video):
+                for payload in payloads:
+                    yield FakeAvFrame(payload)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(cal_mod.av, "open", lambda _path: FakeContainer())
+        monkeypatch.setattr(cal_mod, "try_decode_qr", lambda img: img)
+
+        result = cal_mod.analyze_calibration("fake.mp4", target_k=20)
+
+        assert set(result.pairwise_detect_rates) == set(generated_pairs)
+        assert (25, 120) in result.pairwise_detect_rates
+        assert (40, 120) in result.pairwise_detect_rates
+        assert (25, 60) not in result.pairwise_detect_rates
+        assert (40, 60) not in result.pairwise_detect_rates
+        assert all(rate == 1.0 for rate in result.pairwise_detect_rates.values())
+
+    def test_analyze_calibration_uses_pairwise_metadata_without_ladders(
+            self, monkeypatch):
+        import qrstream.calibrate as cal_mod
+
+        cfg = resolve_preset("high", display_hz=120)
+        generated_pairs = [
+            (cfg.version_ladder[version_idx], cfg.fps_ladder[fps_idx])
+            for version_idx, fps_idx in _select_pairwise_plan(
+                cfg.version_ladder, cfg.fps_ladder)
+        ]
+        payloads = [
+            base45_encode(
+                CalibrationFrame(SEG_META, PRESET_IDS["high"], 0, 1, 0).pack()
+            ).decode("ascii")
+        ]
+        for step_idx, (version_idx, fps_idx) in enumerate(
+                _select_pairwise_plan(cfg.version_ladder, cfg.fps_ladder)):
+            version = cfg.version_ladder[version_idx]
+            fps = cfg.fps_ladder[fps_idx]
+            param = _pack_pairwise_param(version_idx, fps_idx)
+            for fseq in range(cfg.frames_per_pairwise_step):
+                frame = CalibrationFrame(
+                    SEG_PAIRWISE, param, step_idx, len(generated_pairs), fseq)
+                payloads.append(
+                    base45_encode(
+                        _calibration_payload(frame, version, fps)
+                    ).decode("ascii")
+                )
+
+        _patch_fake_calibration_video(
+            monkeypatch, cal_mod, payloads, average_rate=240)
+
+        result = cal_mod.analyze_calibration("fake.mp4", target_k=20)
+
+        assert set(result.pairwise_detect_rates) == set(generated_pairs)
+        assert all(rate == 1.0 for rate in result.pairwise_detect_rates.values())
+
+    def test_analyze_calibration_ignores_inconsistent_pairwise_metadata(
+            self, monkeypatch):
+        import qrstream.calibrate as cal_mod
+
+        cfg = resolve_preset("high", display_hz=120)
+        payload_frames = [
+            CalibrationFrame(SEG_META, PRESET_IDS["high"], 0, 1, 0),
+        ]
+        payload_frames.extend(
+            CalibrationFrame(SEG_VERSION, version, step_idx,
+                             len(cfg.version_ladder), 0)
+            for step_idx, version in enumerate(cfg.version_ladder)
+        )
+        payload_frames.extend(
+            CalibrationFrame(SEG_FPS, fps, step_idx, len(cfg.fps_ladder), 0)
+            for step_idx, fps in enumerate(cfg.fps_ladder)
+        )
+        param = _pack_pairwise_param(0, 0)
+        frame_a = CalibrationFrame(SEG_PAIRWISE, param, 0, 1, 0)
+        frame_b = CalibrationFrame(SEG_PAIRWISE, param, 0, 1, 1)
+        payloads = [
+            base45_encode(frame.pack()).decode("ascii")
+            for frame in payload_frames
+        ]
+        payloads.extend([
+            base45_encode(
+                _calibration_payload(frame_a, 25, 120)
+            ).decode("ascii"),
+            base45_encode(
+                _calibration_payload(frame_b, 40, 120)
+            ).decode("ascii"),
+        ])
+        _patch_fake_calibration_video(
+            monkeypatch, cal_mod, payloads, average_rate=240)
+
+        result = cal_mod.analyze_calibration("fake.mp4", target_k=20)
+
+        assert result.pairwise_detect_rates == {}
 
     def test_compute_recommendations_records_target_k(self):
         result = compute_recommendations(

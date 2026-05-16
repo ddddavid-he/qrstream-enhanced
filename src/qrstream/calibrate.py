@@ -53,6 +53,9 @@ CAL_VERSION = 1
 #:         step_index(B) total_steps(B) frame_seq(B)
 CAL_STRUCT = ">6sBBBBBB"
 CAL_STRUCT_SIZE = struct.calcsize(CAL_STRUCT)  # 12
+_PAIRWISE_META_MAGIC = b"QPW1"
+_PAIRWISE_META_STRUCT = ">4sBBB"
+_PAIRWISE_META_STRUCT_SIZE = struct.calcsize(_PAIRWISE_META_STRUCT)
 
 # Segment IDs
 SEG_META = 1
@@ -270,6 +273,114 @@ def _decode_pairwise_param(
     if fps_idx >= len(fps_ladder):
         raise ValueError(f"fps index out of ladder: {fps_idx}")
     return version_ladder[version_idx], fps_ladder[fps_idx]
+
+
+def _pack_pairwise_metadata(
+    cal_frame: CalibrationFrame,
+    qr_version: int,
+    target_fps: int,
+) -> bytes:
+    if not 1 <= qr_version <= 40:
+        raise ValueError(f"QR version out of range: {qr_version}")
+    if not 1 <= target_fps <= 255:
+        raise ValueError(f"target FPS out of range: {target_fps}")
+    return struct.pack(
+        _PAIRWISE_META_STRUCT,
+        _PAIRWISE_META_MAGIC,
+        qr_version,
+        target_fps,
+        cal_frame.param,
+    )
+
+
+def _decode_pairwise_metadata(
+    data: bytes,
+    cal_frame: CalibrationFrame,
+) -> tuple[int, int] | None:
+    start = CAL_STRUCT_SIZE
+    end = start + _PAIRWISE_META_STRUCT_SIZE
+    if cal_frame.segment_id != SEG_PAIRWISE or len(data) < end:
+        return None
+    try:
+        magic, qr_version, target_fps, param = struct.unpack(
+            _PAIRWISE_META_STRUCT, data[start:end])
+    except struct.error:
+        return None
+    if magic != _PAIRWISE_META_MAGIC or param != cal_frame.param:
+        return None
+    if not 1 <= qr_version <= 40 or target_fps <= 0:
+        return None
+    return qr_version, target_fps
+
+
+def _segment_ladder_from_frames(
+    frames: list[CalibrationFrame],
+    segment_id: int,
+) -> list[int] | None:
+    values_by_step: dict[int, int] = {}
+    total_steps: int | None = None
+    for cf in frames:
+        if cf.segment_id != segment_id:
+            continue
+        if cf.total_steps <= 0 or not 0 <= cf.step_index < cf.total_steps:
+            return None
+        if total_steps is None:
+            total_steps = cf.total_steps
+        elif total_steps != cf.total_steps:
+            return None
+        existing = values_by_step.get(cf.step_index)
+        if existing is None:
+            values_by_step[cf.step_index] = cf.param
+        elif existing != cf.param:
+            return None
+
+    if total_steps is None:
+        return None
+    if set(values_by_step) != set(range(total_steps)):
+        return None
+    return [values_by_step[i] for i in range(total_steps)]
+
+
+def _consistent_pairwise_metadata(
+    metadata_seen: dict[tuple[int, int], set[tuple[int, int]]],
+    frames: list[CalibrationFrame],
+    version_ladder: list[int] | None,
+    fps_ladder: list[int] | None,
+) -> dict[tuple[int, int], tuple[int, int]] | None:
+    if not metadata_seen:
+        return {}
+
+    metadata: dict[tuple[int, int], tuple[int, int]] = {}
+    pairs_by_step: dict[int, tuple[int, int]] = {}
+    for key, pairs in metadata_seen.items():
+        if len(pairs) != 1:
+            return None
+        pair = next(iter(pairs))
+        existing = pairs_by_step.get(key[0])
+        if existing is None:
+            pairs_by_step[key[0]] = pair
+        elif existing != pair:
+            return None
+        metadata[key] = pair
+
+    if version_ladder is None or fps_ladder is None:
+        return metadata
+
+    for cf in frames:
+        if cf.segment_id != SEG_PAIRWISE:
+            continue
+        key = (cf.step_index, cf.frame_seq)
+        pair = metadata.get(key)
+        if pair is None:
+            continue
+        try:
+            expected_pair = _decode_pairwise_param(
+                cf.param, version_ladder, fps_ladder)
+        except ValueError:
+            return None
+        if pair != expected_pair:
+            return None
+    return metadata
 
 
 def _frames_for_target_duration(version_ladder: list[int],
@@ -588,9 +699,10 @@ def _pair_stats_from_rates(
 
 def _expected_counts_for_preset(
     preset_name: str,
+    display_hz: int | None = 60,
 ) -> tuple[dict[int, int], dict[int, int], dict[tuple[int, int], int], int | None]:
     try:
-        config = resolve_preset(preset_name, display_hz=60)
+        config = resolve_preset(preset_name, display_hz=display_hz)
     except ValueError:
         return {}, {}, {}, None
     version_expected = {
@@ -682,6 +794,7 @@ def compute_recommendations(
     target_k: int = DEFAULT_TARGET_K,
     fountain_codec: str = "raptorq",
     pairwise_detect_rates: dict[tuple[int, int], float] | None = None,
+    display_hz: int | None = 60,
 ) -> CalibrationResult:
     """Compute three-tier recommendations from raw detect rates.
 
@@ -796,7 +909,7 @@ def compute_recommendations(
 
     pairwise_detect_rates = pairwise_detect_rates or {}
     version_expected, fps_expected, pairwise_expected, anchor_version = (
-        _expected_counts_for_preset(preset_name))
+        _expected_counts_for_preset(preset_name, display_hz=display_hz))
     version_stats = _stats_from_rates(version_detect_rates, version_expected)
     fps_stats = _stats_from_rates(effective_fps_detect_rates, fps_expected)
     pair_stats = _pair_stats_from_rates(pairwise_detect_rates, pairwise_expected)
@@ -1024,20 +1137,27 @@ def generate_calibration(
     return config
 
 
-def _calibration_payload(cal_frame: CalibrationFrame,
-                         qr_version: int) -> bytes:
+def _calibration_payload(
+    cal_frame: CalibrationFrame,
+    qr_version: int,
+    target_fps: int | None = None,
+) -> bytes:
     """Return a dense, deterministic calibration payload for one QR."""
     header = cal_frame.pack()
+    extension = b""
+    if cal_frame.segment_id == SEG_PAIRWISE and target_fps is not None:
+        extension = _pack_pairwise_metadata(cal_frame, qr_version, target_fps)
+    prefix = header + extension
     capacity = _alphanumeric_byte_capacity(qr_version, _CALIBRATION_EC_LEVEL)
     target_size = max(
-        len(header),
+        len(prefix),
         capacity - _CALIBRATION_PAYLOAD_SAFETY_BYTES,
     )
-    if target_size <= len(header):
-        return header
+    if target_size <= len(prefix):
+        return prefix
 
-    seed = header + bytes([qr_version])
-    payload = bytearray(header)
+    seed = prefix + bytes([qr_version])
+    payload = bytearray(prefix)
     counter = 0
     while len(payload) < target_size:
         payload.extend(hashlib.blake2s(
@@ -1132,7 +1252,7 @@ def _generate_video(
 
     try:
         for idx, (cf, qr_ver, target_fps) in enumerate(frame_seq):
-            payload_bytes = _calibration_payload(cf, qr_ver)
+            payload_bytes = _calibration_payload(cf, qr_ver, target_fps)
             mod_img = generate_qr_module_image(
                 payload_bytes,
                 ec_level=_CALIBRATION_EC_LEVEL,
@@ -1239,7 +1359,7 @@ def _generate_display(
     # version's native module grid.  Qt scales to the current display area.
     out_idx = 0
     for cf, qr_ver, target_fps in frame_seq:
-        payload_bytes = _calibration_payload(cf, qr_ver)
+        payload_bytes = _calibration_payload(cf, qr_ver, target_fps)
         mod_img = generate_qr_module_image(
             payload_bytes,
             ec_level=_CALIBRATION_EC_LEVEL,
@@ -1323,6 +1443,7 @@ def analyze_calibration(
     reporter.calibrate_analyze_start(total_frames=total_frames)
 
     decoded_frames: list[CalibrationFrame] = []
+    pairwise_metadata_seen: dict[tuple[int, int], set[tuple[int, int]]] = {}
     frame_count = 0
     preset_name = "standard"  # default, may be overridden by meta segment
 
@@ -1339,6 +1460,10 @@ def analyze_calibration(
                 raw = base45_decode(text)
                 cf = CalibrationFrame.unpack(raw)
                 decoded_frames.append(cf)
+                pair = _decode_pairwise_metadata(raw, cf)
+                if pair is not None:
+                    pairwise_metadata_seen.setdefault(
+                        (cf.step_index, cf.frame_seq), set()).add(pair)
 
                 # Extract preset from meta segment
                 if cf.segment_id == SEG_META:
@@ -1417,39 +1542,62 @@ def analyze_calibration(
         elif cf.segment_id == SEG_FPS:
             fps_seen.setdefault(cf.param, set()).add(key)
 
-    # To determine expected counts, we resolve the preset config and
-    # use its frames_per_step values.  However, the decode side may not
-    # know the exact config.  We derive it from the decoded frames:
-    # for each step, total_steps and the largest frame_seq seen give us
-    # the expected count.
+    inferred_version_ladder = _segment_ladder_from_frames(
+        decoded_frames, SEG_VERSION)
+    inferred_fps_ladder = _segment_ladder_from_frames(decoded_frames, SEG_FPS)
+    pairwise_metadata = _consistent_pairwise_metadata(
+        pairwise_metadata_seen,
+        decoded_frames,
+        inferred_version_ladder,
+        inferred_fps_ladder,
+    )
+    pairwise_metadata_invalid = pairwise_metadata is None
+    if pairwise_metadata is None:
+        pairwise_metadata = {}
+    metadata_fps_values = [fps for _ver, fps in pairwise_metadata.values()]
+    analysis_display_hz = (
+        max(inferred_fps_ladder)
+        if inferred_fps_ladder else
+        (max(metadata_fps_values) if metadata_fps_values else 60)
+    )
 
-    # Rebuild expected counts from decoded frames' metadata.
-    # For version: group by step_index, take max frame_seq + 1 or
-    # use total_steps and the known frames-per-step.
-    # Simpler approach: use the preset config.
     try:
-        config = resolve_preset(preset_name, display_hz=60)
+        config = resolve_preset(preset_name, display_hz=analysis_display_hz)
     except ValueError:
-        config = resolve_preset("standard", display_hz=60)
+        config = resolve_preset("standard", display_hz=analysis_display_hz)
 
-    for ver in config.version_ladder:
+    analysis_version_ladder = inferred_version_ladder or config.version_ladder
+    analysis_fps_ladder = inferred_fps_ladder or config.fps_ladder
+
+    for ver in analysis_version_ladder:
         version_expected[ver] = config.frames_per_version_step
-    for fps in config.fps_ladder:
+    for fps in analysis_fps_ladder:
         fps_expected[fps] = config.frames_per_fps_step
-    if has_pairwise_segment:
-        for version_idx, fps_idx in _select_pairwise_plan(
-                config.version_ladder, config.fps_ladder):
-            pair = (config.version_ladder[version_idx], config.fps_ladder[fps_idx])
-            pairwise_expected[pair] = config.frames_per_pairwise_step
+    if has_pairwise_segment and not pairwise_metadata_invalid:
+        has_exact_pairwise_ladders = (
+            inferred_version_ladder is not None and inferred_fps_ladder is not None)
+        if has_exact_pairwise_ladders:
+            for version_idx, fps_idx in _select_pairwise_plan(
+                    inferred_version_ladder, inferred_fps_ladder):
+                pair = (inferred_version_ladder[version_idx],
+                        inferred_fps_ladder[fps_idx])
+                pairwise_expected[pair] = config.frames_per_pairwise_step
+        for pair in pairwise_metadata.values():
+            pairwise_expected.setdefault(pair, config.frames_per_pairwise_step)
         for cf in decoded_frames:
             if cf.segment_id != SEG_PAIRWISE:
                 continue
-            try:
-                pair = _decode_pairwise_param(
-                    cf.param, config.version_ladder, config.fps_ladder)
-            except ValueError:
-                continue
             key = (cf.step_index, cf.frame_seq)
+            pair = pairwise_metadata.get(key)
+            if pair is None:
+                if not has_exact_pairwise_ladders:
+                    continue
+                try:
+                    pair = _decode_pairwise_param(
+                        cf.param, inferred_version_ladder, inferred_fps_ladder)
+                except ValueError:
+                    continue
+            pairwise_expected.setdefault(pair, config.frames_per_pairwise_step)
             pairwise_seen.setdefault(pair, set()).add(key)
 
     # Compute detect rates
@@ -1497,6 +1645,7 @@ def analyze_calibration(
         target_k=target_k,
         fountain_codec=fountain_codec,
         pairwise_detect_rates=pairwise_detect_rates,
+        display_hz=analysis_display_hz,
     )
 
     return result
