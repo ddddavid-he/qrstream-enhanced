@@ -534,6 +534,44 @@ def _format_video_metadata(video_metadata: VideoMetadata | None) -> str | None:
         f", {parts[2]}" if len(parts) > 2 else "")
 
 
+def _near_integer_cadence(base_fps: int, target_fps: int) -> bool:
+    if base_fps <= 0 or target_fps <= 0 or target_fps > base_fps:
+        return False
+    ratio = base_fps / target_fps
+    return abs(ratio - round(ratio)) <= 0.05
+
+
+def _fps_cadence_message(
+    fps_detect_rates: dict[int, float],
+    video_metadata: VideoMetadata | None,
+) -> str | None:
+    base_fps = _capture_fps_ceiling(video_metadata)
+    if base_fps is None or base_fps < 50:
+        return None
+
+    fps_values = sorted(fps_detect_rates)
+    best: tuple[float, int, int] | None = None
+    for lower, higher in zip(fps_values, fps_values[1:]):
+        lower_rate = fps_detect_rates[lower]
+        higher_rate = fps_detect_rates[higher]
+        gain = higher_rate - lower_rate
+        if gain < 0.10:
+            continue
+        if not _near_integer_cadence(base_fps, higher):
+            continue
+        candidate = (gain, lower, higher)
+        if best is None or candidate > best:
+            best = candidate
+
+    if best is None:
+        return None
+    _gain, lower, higher = best
+    return (
+        f"ℹ {higher}fps outperformed {lower}fps; this can be normal "
+        f"with ~{base_fps}fps capture/display cadence."
+    )
+
+
 def compute_recommendations(
     version_detect_rates: dict[int, float],
     fps_detect_rates: dict[int, float],
@@ -609,6 +647,9 @@ def compute_recommendations(
             messages.append(
                 f"ℹ Capture headroom: {highest_fps}fps is usable."
             )
+        cadence_message = _fps_cadence_message(fps_detect_rates, video_metadata)
+        if cadence_message:
+            messages.append(cadence_message)
 
     if not fps_data_reliable:
         messages.append(

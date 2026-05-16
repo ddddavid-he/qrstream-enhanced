@@ -449,6 +449,23 @@ class TestRecommendations:
         assert any("ignoring calibration FPS above 30fps" in m
                    for m in result.messages)
 
+    def test_cadence_gain_message_and_balanced_overhead(self):
+        ver_rates = {40: 1.0}
+        fps_rates = {25: 0.65, 30: 0.83}
+
+        result = compute_recommendations(
+            ver_rates, fps_rates,
+            fps_data_reliable=True,
+            preset_name="standard",
+            video_metadata=VideoMetadata(width=3840, height=2160, fps=59.96),
+        )
+        balanced = next(r for r in result.recommendations
+                        if r.tier == "balanced")
+        assert balanced.available
+        assert balanced.fps == 30
+        assert balanced.overhead < 2.0
+        assert any("30fps outperformed 25fps" in m for m in result.messages)
+
     def test_format_includes_video_metadata(self):
         result = CalibrationResult(
             preset="standard",

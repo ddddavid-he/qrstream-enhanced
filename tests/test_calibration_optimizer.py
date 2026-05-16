@@ -121,3 +121,22 @@ def test_optimizer_honors_capture_fps_ceiling():
     safe = result["safe"]
     assert safe is not None
     assert safe.fps == 30
+
+
+def test_optimizer_does_not_monotonically_suppress_fps_cadence_gain():
+    version_stats = {40: stats_from_rate(1.0, 200)}
+    fps_stats = {
+        25: stats_from_rate(0.65, 200),
+        30: stats_from_rate(0.83, 200),
+    }
+
+    result = optimize_calibration(
+        version_stats,
+        fps_stats,
+        config=OptimizerConfig(fps_anchor_version=40),
+    )
+
+    balanced = result["balanced"]
+    assert balanced is not None
+    assert balanced.fps == 30
+    assert balanced.overhead < 2.0

@@ -176,7 +176,7 @@ def optimize_calibration(
         fps_values = [fps for fps in fps_values if fps <= config.capture_fps_ceiling]
 
     version_env = monotonic_envelope(version_stats)
-    fps_env = monotonic_envelope(fps_stats)
+    fps_observed = dict(fps_stats)
 
     results: dict[str, CalibrationCandidate | None] = {}
     for tier, target_success in TIER_SUCCESS_TARGETS.items():
@@ -186,7 +186,7 @@ def optimize_calibration(
         for version in versions:
             for fps in fps_values:
                 p_frame, source = _estimate_frame_probability(
-                    version, fps, version_env, fps_env, pair_stats, config, z)
+                    version, fps, version_env, fps_observed, pair_stats, config, z)
                 if p_frame <= 0.0:
                     continue
 
