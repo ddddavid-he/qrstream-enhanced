@@ -527,9 +527,13 @@ else:
                         self._play_btn.setText("▶")
                 elif self._cache.has_frame(nxt):
                     self._frame_index = nxt
-                    self._next_frame_ts += self._frame_interval
-                    if self._next_frame_ts < now - self._frame_interval:
-                        self._next_frame_ts = now + self._frame_interval
+                    # Always schedule next frame relative to *now*, never
+                    # accumulate (_next += interval).  If a tick was late
+                    # we accept the delay and present every frame — no
+                    # skipping allowed because each QR code carries unique
+                    # data.  The effective playback speed may briefly dip
+                    # below the target fps, but zero frames are lost.
+                    self._next_frame_ts = now + self._frame_interval
                 else:
                     self._playing = False
                     self._play_btn.setText("▶")
