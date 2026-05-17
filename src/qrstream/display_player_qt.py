@@ -533,13 +533,18 @@ else:
                         self._play_btn.setText("▶")
                 elif self._cache.has_frame(nxt):
                     self._frame_index = nxt
-                    # Always schedule next frame relative to *now*, never
-                    # accumulate (_next += interval).  If a tick was late
-                    # we accept the delay and present every frame — no
-                    # skipping allowed because each QR code carries unique
-                    # data.  The effective playback speed may briefly dip
-                    # below the target fps, but zero frames are lost.
-                    self._next_frame_ts = now + self._frame_interval
+                    # Accumulative scheduling keeps long-term pace
+                    # accurate.  If a single tick was late the next
+                    # deadline catches up automatically.
+                    self._next_frame_ts += self._frame_interval
+                    # Guard: if we fell behind by more than one full
+                    # interval (e.g. GC pause) do NOT skip frames —
+                    # instead clamp so the *next* tick will advance
+                    # again immediately, one frame at a time.  This
+                    # guarantees every QR frame is displayed at least
+                    # once while recovering pace as fast as possible.
+                    if self._next_frame_ts < now:
+                        self._next_frame_ts = now
                     # ── Effective-fps tracking ──
                     self._fps_sample_count += 1
                     if self._fps_sample_count == 1:
@@ -548,10 +553,17 @@ else:
                         elapsed = now - self._fps_sample_start
                         effective = self._fps_sample_count / elapsed
                         if effective < self._fps * self._fps_warning_threshold:
+                            self._status.setStyleSheet(
+                                "QStatusBar { background-color: #3a1a00;"
+                                " color: #ff9944; font-size: 11px;"
+                                " border-top: 1px solid #663300;"
+                                " padding: 1px 8px; }")
                             self._status.showMessage(
                                 f"⚠ Effective {effective:.1f} fps "
                                 f"< target {self._fps} fps — playback "
                                 f"slowed to guarantee zero frame loss")
+                        else:
+                            self._status.setStyleSheet("")
                         self._fps_sample_count = 0
                         self._fps_sample_start = now
                 else:
@@ -670,9 +682,9 @@ else:
             can = _can_play(self._cache, self._state, self._frame_index,
                             self._fps, self._config)
             if can:
-                # Pre-render ~1 second of upcoming frames to warm the
-                # pixmap cache before the playback timer starts ticking.
-                self._prebuffer_pixmaps(self._fps)
+                # Pre-render a small number of frames to warm the
+                # cache without noticeably blocking the GUI.
+                self._prebuffer_pixmaps(min(8, self._fps))
                 self._playing = True
                 self._play_btn.setText("⏸")
                 self._next_frame_ts = (time.monotonic()

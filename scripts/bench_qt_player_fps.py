@@ -138,8 +138,10 @@ class BenchWindow(qt_player._QRStreamWindow):
                 self._frame_index = nxt
                 self._advance_ts.append(time.perf_counter())
                 self._frame_sequence.append(nxt)
-                # Zero-skip strategy: always now + interval
-                self._next_frame_ts = now + self._frame_interval
+                # Accumulative + clamp (no skip, fast recovery)
+                self._next_frame_ts += self._frame_interval
+                if self._next_frame_ts < now:
+                    self._next_frame_ts = now
             else:
                 self._playing = False
                 self._play_btn.setText("▶")

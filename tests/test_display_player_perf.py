@@ -158,6 +158,8 @@ def test_zero_skip_frame_advance_logic():
 
     Simulates the _tick() frame-advance path manually to prove that
     even when ticks are delayed, frames are advanced one at a time.
+    Uses the accumulative+clamp strategy: _next += interval, clamped
+    to now when falling behind.
     """
     fps = 60
     frame_interval = 1.0 / fps
@@ -167,7 +169,7 @@ def test_zero_skip_frame_advance_logic():
     next_frame_ts = 0.0
     presented: list[int] = [0]
 
-    # Simulate 120 ticks at irregular intervals
+    # Simulate 200 ticks at irregular intervals
     tick_time = 0.0
     for i in range(200):
         # Vary tick intervals: some normal, some late
@@ -182,8 +184,10 @@ def test_zero_skip_frame_advance_logic():
             if nxt >= total_frames:
                 break
             frame_index = nxt
-            # Zero-skip strategy: always now + interval
-            next_frame_ts = now + frame_interval
+            # Accumulative + clamp (matches actual _tick code)
+            next_frame_ts += frame_interval
+            if next_frame_ts < now:
+                next_frame_ts = now
             presented.append(frame_index)
 
     # Verify: every presented frame is exactly +1 from the previous
@@ -194,13 +198,13 @@ def test_zero_skip_frame_advance_logic():
         )
 
 
-def test_zero_skip_no_late_reset():
-    """The new timing strategy should never need a late-reset.
+def test_zero_skip_no_frame_loss_under_jitter():
+    """Under heavy jitter the strategy still presents every frame.
 
-    Under the old code, _next_frame_ts could fall far behind and
-    trigger a late-reset (jumping the deadline forward, which loses
-    frames).  With the new strategy (always now + interval), the
-    deadline never accumulates drift.
+    The accumulative+clamp strategy (_next += interval, clamp to now)
+    recovers pace quickly without ever skipping a frame — unlike the
+    old late-reset code which would jump _next_frame_ts forward and
+    silently drop frames.
     """
     fps = 30
     frame_interval = 1.0 / fps
@@ -208,7 +212,7 @@ def test_zero_skip_no_late_reset():
 
     frame_index = 0
     next_frame_ts = 0.0
-    late_resets = 0
+    presented: list[int] = [0]
 
     tick_time = 0.0
     for _ in range(200):
@@ -220,16 +224,19 @@ def test_zero_skip_no_late_reset():
             if nxt >= total_frames:
                 break
             frame_index = nxt
-            next_frame_ts = now + frame_interval
+            next_frame_ts += frame_interval
+            if next_frame_ts < now:
+                next_frame_ts = now
+            presented.append(frame_index)
 
-            # Check if old late-reset would have triggered
-            if next_frame_ts < now - frame_interval:
-                late_resets += 1
-
-    assert late_resets == 0, (
-        f"Late-reset would have triggered {late_resets} times "
-        f"under the new strategy (should be 0)"
-    )
+    # Still no gaps in the sequence
+    for i in range(1, len(presented)):
+        assert presented[i] == presented[i - 1] + 1, (
+            f"Frame skip at index {i}: "
+            f"{presented[i - 1]} -> {presented[i]}"
+        )
+    # Should have presented all frames
+    assert presented[-1] == total_frames - 1
 
 
 # ── Controls throttle logic test ─────────────────────────────────
