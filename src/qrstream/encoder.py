@@ -801,7 +801,7 @@ def encode_to_display(input_path: str,
     """
     # Lazy imports — avoid pulling PySide6 when only encode_to_video is used
     # (allows qrstream-headless to work without GUI dependencies).
-    from .display_player import DisplayProducerState  # noqa: F811
+    from .display_cache import DisplayProducerState  # noqa: F811
     from .display_player_qt import (  # noqa: F811
         DisplayMetadata,
         DisplayPlayerQtConfig,

@@ -1345,7 +1345,7 @@ def _generate_display(
     Frames are expanded to the display refresh rate by holding each QR
     update for the appropriate number of refresh ticks.
     """
-    from .display_player import DisplayProducerState
+    from .display_cache import DisplayProducerState
     from .display_player_qt import (
         DisplayPlayerQtConfig,
         play_display_qt,

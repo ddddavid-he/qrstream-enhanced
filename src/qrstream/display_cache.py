@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass
-from math import ceil
-from threading import Condition, RLock
+from threading import Condition, Event, RLock
+import time
 
 import numpy as np
 
 
 DEFAULT_MODULE_CACHE_SOFT_LIMIT = 128 * 1024 * 1024
 DEFAULT_MODULE_CACHE_ONE_HOUR_LIMIT = 192 * 1024 * 1024
-DEFAULT_PRESENTATION_CACHE_BUDGET = 64 * 1024 * 1024
 DEFAULT_CACHE_ONE_HOUR_SECONDS = 3600
 
 
@@ -79,6 +78,69 @@ def unpack_module_frame(packed: np.ndarray, module_side: int) -> np.ndarray:
         )
     bits = np.unpackbits(arr, axis=1, count=module_side, bitorder="big")
     return np.where(bits, 0, 255).astype(np.uint8)
+
+
+class DisplayProducerState:
+    """Thread-safe producer progress shared with display players."""
+
+    def __init__(self, total_frames: int):
+        self.total_frames = total_frames
+        self._lock = RLock()
+        self._done = Event()
+        self._cancel = Event()
+        self._started = time.monotonic()
+        self._produced = 0
+        self._samples: deque[tuple[float, int]] = deque()
+
+    def mark_produced(self, count: int = 1) -> None:
+        now = time.monotonic()
+        with self._lock:
+            self._produced += count
+            self._samples.append((now, self._produced))
+            self._trim_samples(now, 10.0)
+
+    def mark_done(self) -> None:
+        self._done.set()
+
+    def request_cancel(self) -> None:
+        self._cancel.set()
+
+    def cancel_requested(self) -> bool:
+        return self._cancel.is_set()
+
+    def is_done(self) -> bool:
+        return self._done.is_set()
+
+    def wait_done(self, timeout: float | None = None) -> bool:
+        return self._done.wait(timeout)
+
+    @property
+    def produced(self) -> int:
+        with self._lock:
+            return self._produced
+
+    @property
+    def progress_pct(self) -> float:
+        if self.total_frames <= 0:
+            return 100.0
+        return min(100.0, self.produced / self.total_frames * 100.0)
+
+    def producer_fps(self, window_seconds: float = 3.0) -> float:
+        now = time.monotonic()
+        with self._lock:
+            self._trim_samples(now, max(window_seconds, 0.1))
+            if len(self._samples) >= 2:
+                first_ts, first_count = self._samples[0]
+                last_ts, last_count = self._samples[-1]
+                elapsed = max(1e-6, last_ts - first_ts)
+                return max(0.0, (last_count - first_count) / elapsed)
+            elapsed = max(1e-6, now - self._started)
+            return self._produced / elapsed
+
+    def _trim_samples(self, now: float, window_seconds: float) -> None:
+        cutoff = now - window_seconds
+        while len(self._samples) > 2 and self._samples[0][0] < cutoff:
+            self._samples.popleft()
 
 
 class ModuleFrameCache:
@@ -245,43 +307,3 @@ class ModuleFrameCache:
     def is_done(self) -> bool:
         with self._lock:
             return self._done
-
-
-class PresentationFrameCache:
-    """Small LRU cache for playback-sized display frames."""
-
-    def __init__(self, budget_bytes: int = DEFAULT_PRESENTATION_CACHE_BUDGET):
-        if budget_bytes < 0:
-            raise ValueError("budget_bytes must be non-negative")
-        self.budget_bytes = int(budget_bytes)
-        self._frames: OrderedDict[tuple[int, int], np.ndarray] = OrderedDict()
-        self._bytes = 0
-
-    @property
-    def current_bytes(self) -> int:
-        return self._bytes
-
-    def clear(self) -> None:
-        self._frames.clear()
-        self._bytes = 0
-
-    def get(self, key: tuple[int, int]) -> np.ndarray | None:
-        frame = self._frames.get(key)
-        if frame is None:
-            return None
-        self._frames.move_to_end(key)
-        return frame.copy()
-
-    def put(self, key: tuple[int, int], frame: np.ndarray) -> None:
-        arr = np.ascontiguousarray(frame)
-        size = int(arr.nbytes)
-        if self.budget_bytes <= 0 or size > self.budget_bytes:
-            return
-        old = self._frames.pop(key, None)
-        if old is not None:
-            self._bytes -= int(old.nbytes)
-        self._frames[key] = arr.copy()
-        self._bytes += size
-        while self._bytes > self.budget_bytes and self._frames:
-            _, evicted = self._frames.popitem(last=False)
-            self._bytes -= int(evicted.nbytes)

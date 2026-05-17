@@ -3,8 +3,8 @@
 import numpy as np
 
 from qrstream.display_cache import (
+    DisplayProducerState,
     ModuleFrameCache,
-    PresentationFrameCache,
     estimate_module_cache_bytes,
     pack_module_image,
     plan_module_cache,
@@ -56,13 +56,22 @@ def test_module_cache_plan_uses_window_above_thresholds():
     assert plan.memory_budget_bytes < plan.total_bytes
 
 
-def test_presentation_cache_enforces_budget():
-    cache = PresentationFrameCache(budget_bytes=100)
-    frame = np.zeros((5, 5, 3), dtype=np.uint8)  # 75 bytes
+def test_display_producer_state_tracks_progress_and_completion():
+    state = DisplayProducerState(total_frames=10)
 
-    cache.put((0, 5), frame)
-    cache.put((1, 5), frame)
+    state.mark_produced(3)
+    assert state.produced == 3
+    assert state.progress_pct == 30.0
+    assert state.producer_fps() >= 0.0
+    assert not state.is_done()
 
-    assert cache.current_bytes <= 100
-    assert cache.get((0, 5)) is None
-    assert np.array_equal(cache.get((1, 5)), frame)
+    state.mark_done()
+    assert state.is_done()
+    assert state.wait_done(timeout=0.01)
+
+
+def test_display_producer_state_cancel_flag_roundtrip():
+    state = DisplayProducerState(total_frames=1)
+    assert not state.cancel_requested()
+    state.request_cancel()
+    assert state.cancel_requested()
