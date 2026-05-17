@@ -1194,6 +1194,34 @@ def encode_to_display(input_path: str,
                 daemon=True,
             )
             proc.start()
+
+            # Lightweight progress-polling thread: reads shared_state
+            # counters and drives the terminal progress bar.  Runs in
+            # the main process so it has access to the reporter, and
+            # the cost is negligible (one poll per 100 ms).
+            _poll_stop = Event()
+
+            def _poll_progress() -> None:
+                start_ts = time.monotonic()
+                while not _poll_stop.is_set():
+                    produced = shared_state.produced
+                    elapsed = max(1e-6, time.monotonic() - start_ts)
+                    speed = produced / elapsed
+                    remaining = max(0, total_frames - produced)
+                    eta = remaining / speed if speed > 1e-6 else 0.0
+                    pct = (produced / total_frames * 100) if total_frames else 100.0
+                    reporter.encode_update(
+                        progress_pct=pct,
+                        speed_fps=speed,
+                        eta_sec=eta,
+                    )
+                    if shared_state.is_done():
+                        break
+                    _poll_stop.wait(0.1)
+
+            poll_thread = Thread(target=_poll_progress, daemon=True)
+            poll_thread.start()
+
             try:
                 player_meta = DisplayMetadata(
                     file_name=os.path.basename(input_path),
@@ -1217,7 +1245,9 @@ def encode_to_display(input_path: str,
                 play_display_qt(
                     cache_adapter, shared_state, fps, config=player_config)
             finally:
+                _poll_stop.set()
                 shared_state.request_cancel()
+                poll_thread.join(timeout=2)
                 proc.join(timeout=10)
                 if proc.is_alive():
                     proc.terminate()
