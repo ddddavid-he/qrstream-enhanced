@@ -28,7 +28,10 @@ from qrstream.calibrate import (
     _CALIBRATION_EC_LEVEL,
     _build_frame_sequence,
     _calibration_payload,
+    _capture_fps_ceiling,
+    _capture_fps_nominal,
     _container_fps,
+    _tier_fps_ceiling,
     _decode_pairwise_metadata,
     _decode_pairwise_param,
     _estimate_sequence_duration,
@@ -546,9 +549,15 @@ class TestRecommendations:
         assert safe.qr_version <= balanced.qr_version <= aggressive.qr_version
 
     def test_video_fps_caps_recommended_fps(self):
-        """Captured video FPS limits recommendable calibration FPS."""
+        """Captured video FPS limits recommendable calibration FPS.
+
+        With a 29.97 fps camera the strict ceiling is 29, so fps=30 and
+        above must be rejected.  The aggressive tier ceiling is 28
+        (= floor(29.97 * 0.95)), so the highest usable ladder value
+        from the ``standard`` preset is 25.
+        """
         ver_rates = {40: 1.0}
-        fps_rates = {30: 0.95, 45: 0.95, 60: 0.95}
+        fps_rates = {20: 0.95, 25: 0.95, 30: 0.95, 45: 0.95, 60: 0.95}
 
         result = compute_recommendations(
             ver_rates, fps_rates,
@@ -556,10 +565,15 @@ class TestRecommendations:
             preset_name="standard",
             video_metadata=VideoMetadata(width=1920, height=1080, fps=29.97),
         )
-        safe = next(r for r in result.recommendations if r.tier == "safe")
-        assert safe.available
-        assert safe.fps == 30
-        assert any("ignoring calibration FPS above 30fps" in m
+        for rec in result.recommendations:
+            if rec.available:
+                assert rec.fps <= 25, (
+                    f"{rec.tier} tier recommended fps={rec.fps}, "
+                    f"expected ≤25 for 29.97fps capture"
+                )
+        # Informational message uses nominal (~30fps) but filters at
+        # strict ceiling (29fps).
+        assert any("ignoring calibration FPS above 29fps" in m
                    for m in result.messages)
 
     def test_cadence_gain_message_and_balanced_overhead(self):
@@ -578,6 +592,92 @@ class TestRecommendations:
         assert balanced.fps == 30
         assert balanced.overhead < 2.0
         assert any("30fps outperformed 25fps" in m for m in result.messages)
+
+    # ── FPS ceiling / phase-drift margin tests ─────────────────────
+
+    def test_capture_fps_ceiling_strict_less_than(self):
+        """_capture_fps_ceiling returns largest int strictly < raw fps."""
+        assert _capture_fps_ceiling(
+            VideoMetadata(fps=59.94)) == 59
+        assert _capture_fps_ceiling(
+            VideoMetadata(fps=60.00)) == 59
+        assert _capture_fps_ceiling(
+            VideoMetadata(fps=29.97)) == 29
+        assert _capture_fps_ceiling(
+            VideoMetadata(fps=30.00)) == 29
+        assert _capture_fps_ceiling(
+            VideoMetadata(fps=120.00)) == 119
+        assert _capture_fps_ceiling(
+            VideoMetadata(fps=1.5)) == 1
+        assert _capture_fps_ceiling(
+            VideoMetadata(fps=0.5)) == 1  # clamped to min 1
+        assert _capture_fps_ceiling(None) is None
+        assert _capture_fps_ceiling(
+            VideoMetadata(fps=0)) is None
+
+    def test_capture_fps_nominal_rounds(self):
+        """_capture_fps_nominal rounds to nearest integer for display."""
+        assert _capture_fps_nominal(
+            VideoMetadata(fps=59.94)) == 60
+        assert _capture_fps_nominal(
+            VideoMetadata(fps=29.97)) == 30
+        assert _capture_fps_nominal(
+            VideoMetadata(fps=60.00)) == 60
+        assert _capture_fps_nominal(None) is None
+
+    def test_tier_fps_ceiling_margins(self):
+        """Per-tier ceilings apply the configured fps_margin."""
+        # 59.94 fps camera
+        assert _tier_fps_ceiling(59.94, 0.05) == 56   # aggressive
+        assert _tier_fps_ceiling(59.94, 0.10) == 53   # balanced
+        assert _tier_fps_ceiling(59.94, 0.15) == 50   # safe
+        # 29.97 fps camera
+        assert _tier_fps_ceiling(29.97, 0.05) == 28   # aggressive
+        assert _tier_fps_ceiling(29.97, 0.10) == 26   # balanced
+        assert _tier_fps_ceiling(29.97, 0.15) == 25   # safe
+        # 120 fps camera
+        assert _tier_fps_ceiling(120.0, 0.05) == 114
+        assert _tier_fps_ceiling(120.0, 0.10) == 108
+        assert _tier_fps_ceiling(120.0, 0.15) == 102
+
+    def test_strict_ceiling_rejects_equal_fps(self):
+        """A 59.94 fps camera must never recommend fps >= 60."""
+        ver_rates = {40: 1.0}
+        fps_rates = {25: 0.95, 30: 0.95, 45: 0.95, 60: 0.95}
+
+        result = compute_recommendations(
+            ver_rates, fps_rates,
+            fps_data_reliable=True,
+            preset_name="standard",
+            video_metadata=VideoMetadata(width=1920, height=1080, fps=59.94),
+        )
+        for rec in result.recommendations:
+            if rec.available:
+                assert rec.fps < 60, (
+                    f"{rec.tier} tier recommended fps={rec.fps}, "
+                    f"expected < 60 for 59.94fps capture"
+                )
+
+    def test_tier_margins_cap_fps(self):
+        """Each tier's recommendation respects its tier-specific ceiling."""
+        ver_rates = {40: 1.0}
+        fps_rates = {20: 0.95, 25: 0.95, 30: 0.95, 45: 0.95, 60: 0.95}
+
+        result = compute_recommendations(
+            ver_rates, fps_rates,
+            fps_data_reliable=True,
+            preset_name="standard",
+            video_metadata=VideoMetadata(width=1920, height=1080, fps=59.94),
+        )
+        # tier ceilings: aggressive=56, balanced=53, safe=50
+        # On standard ladder [10,12,15,18,20,25,30,45,60], all three
+        # tiers should cap at fps <= 45.
+        for rec in result.recommendations:
+            if rec.available:
+                assert rec.fps <= 45, (
+                    f"{rec.tier} tier recommended fps={rec.fps}, "
+                    f"expected ≤ 45 for 59.94fps capture on standard ladder"
+                )
 
     def test_format_includes_video_metadata(self):
         result = CalibrationResult(
@@ -704,7 +804,9 @@ class TestRecommendations:
                 return self.payload
 
         class FakeVideoStream:
-            average_rate = 60
+            # Use 64 fps so that even the aggressive tier ceiling
+            # (floor(64 * 0.95) = 60) still admits fps=60.
+            average_rate = 64
             duration = None
             time_base = None
             width = 1920

@@ -584,12 +584,13 @@ class CalibrationFrame:
 
 # ── Recommendation dataclasses ──────────────────────────────────────
 
-# Recommendation tier definitions.  Tiers use cumulative thresholds based on
-# the weakest link of a (QR version, FPS) candidate pair.
+# Recommendation tier definitions.  ``fps_margin`` is the fraction of the
+# capture frame-rate reserved as safety headroom against phase-drift between
+# unsynchronised camera / display clocks.
 _TIERS = {
-    "safe": {"min_rate": 0.90, "safety_margin": 1.30},
-    "balanced": {"min_rate": 0.80, "safety_margin": 1.15},
-    "aggressive": {"min_rate": 0.70, "safety_margin": 1.05},
+    "safe":       {"min_rate": 0.90, "fps_margin": 0.15},
+    "balanced":   {"min_rate": 0.80, "fps_margin": 0.10},
+    "aggressive": {"min_rate": 0.70, "fps_margin": 0.05},
 }
 
 #: Detect rate at or above which the boundary is considered excellent.
@@ -670,10 +671,6 @@ def estimate_target_k(target_size_bytes: int | None) -> int:
     return max(1, math.ceil(target_size_bytes / blocksize))
 
 
-def _rate_in_tier(rate: float, tier_cfg: dict[str, float]) -> bool:
-    return rate >= tier_cfg["min_rate"]
-
-
 def _stats_from_rates(
     rates: dict[int, float],
     expected_counts: dict[int, int],
@@ -724,12 +721,36 @@ def _expected_counts_for_preset(
 
 
 def _capture_fps_ceiling(video_metadata: VideoMetadata | None) -> int | None:
+    """Largest integer fps strictly below the capture device's frame rate.
+
+    The recommended encode FPS must be strictly below the capture device's
+    actual frame rate to avoid phase-drift artefacts when camera and display
+    clocks are not synchronised.  See DISCOVERY doc 2026-05-18.
+    """
     if video_metadata is None or video_metadata.fps is None:
         return None
     if video_metadata.fps <= 0:
         return None
-    # Phone videos often report 29.97/59.94; treat them as 30/60 ceilings.
-    return max(1, int(video_metadata.fps + 0.5))
+    return max(1, math.ceil(video_metadata.fps) - 1)
+
+
+def _capture_fps_nominal(video_metadata: VideoMetadata | None) -> int | None:
+    """Nearest integer fps for *informational* messages (not safety).
+
+    Unlike ``_capture_fps_ceiling`` this rounds to the nearest integer so
+    that cadence-detection heuristics and user-facing messages remain natural
+    (e.g. "~60 fps" for a 59.94 fps capture).
+    """
+    if video_metadata is None or video_metadata.fps is None:
+        return None
+    if video_metadata.fps <= 0:
+        return None
+    return max(1, round(video_metadata.fps))
+
+
+def _tier_fps_ceiling(raw_capture_fps: float, fps_margin: float) -> int:
+    """Per-tier ceiling: ``floor(raw_fps * (1 - margin))``, minimum 1."""
+    return max(1, int(raw_capture_fps * (1.0 - fps_margin)))
 
 
 def _format_video_metadata(video_metadata: VideoMetadata | None) -> str | None:
@@ -759,7 +780,7 @@ def _fps_cadence_message(
     fps_detect_rates: dict[int, float],
     video_metadata: VideoMetadata | None,
 ) -> str | None:
-    base_fps = _capture_fps_ceiling(video_metadata)
+    base_fps = _capture_fps_nominal(video_metadata)
     if base_fps is None or base_fps < 50:
         return None
 
@@ -897,18 +918,26 @@ def compute_recommendations(
     # ── Per-tier selection ──────────────────────────────────────────
 
     effective_fps_detect_rates = dict(fps_detect_rates)
-    fps_ceiling = _capture_fps_ceiling(video_metadata)
-    if fps_data_reliable and fps_ceiling is not None:
+    strict_ceiling = _capture_fps_ceiling(video_metadata)
+    raw_capture_fps = (
+        video_metadata.fps
+        if video_metadata is not None and video_metadata.fps and video_metadata.fps > 0
+        else None
+    )
+    nominal_fps = _capture_fps_nominal(video_metadata)
+
+    if fps_data_reliable and strict_ceiling is not None:
         filtered = {
             fps: rate for fps, rate in effective_fps_detect_rates.items()
-            if fps <= fps_ceiling
+            if fps <= strict_ceiling
         }
         ignored = sorted(
-            fps for fps in effective_fps_detect_rates if fps > fps_ceiling)
+            fps for fps in effective_fps_detect_rates if fps > strict_ceiling)
         if ignored and filtered:
+            display_fps = nominal_fps if nominal_fps is not None else strict_ceiling
             messages.append(
-                f"ℹ Capture video is ~{fps_ceiling}fps; ignoring "
-                f"calibration FPS above {fps_ceiling}fps."
+                f"ℹ Capture video is ~{display_fps}fps; ignoring "
+                f"calibration FPS above {strict_ceiling}fps."
             )
             effective_fps_detect_rates = filtered
     if not fps_data_reliable:
@@ -918,29 +947,51 @@ def compute_recommendations(
     version_expected, fps_expected, pairwise_expected, anchor_version = (
         _expected_counts_for_preset(preset_name, display_hz=display_hz))
     version_stats = _stats_from_rates(version_detect_rates, version_expected)
-    fps_stats = _stats_from_rates(effective_fps_detect_rates, fps_expected)
     pair_stats = _pair_stats_from_rates(pairwise_detect_rates, pairwise_expected)
 
-    candidates = optimize_calibration(
-        version_stats=version_stats,
-        fps_stats=fps_stats,
-        pair_stats=pair_stats,
-        config=OptimizerConfig(
-            codec=fountain_codec,
-            target_k=target_k,
-            capture_fps_ceiling=fps_ceiling if fps_data_reliable else None,
-            fps_anchor_version=anchor_version,
-            success_target_override=confidence,
-        ),
-    )
-
+    # Run the optimizer once per tier with a tier-specific FPS ceiling
+    # that incorporates the fps_margin headroom for phase-drift safety.
     best_pair_rate = 0.0
     for ver_dr in version_detect_rates.values():
         for fps_dr in effective_fps_detect_rates.values():
             best_pair_rate = max(best_pair_rate, min(ver_dr, fps_dr))
 
-    for tier_name in _TIERS:
-        candidate = candidates.get(tier_name)
+    for tier_name, tier_cfg in _TIERS.items():
+        # Derive the tier-specific ceiling from the raw capture fps.
+        if fps_data_reliable and raw_capture_fps is not None:
+            tier_ceiling: int | None = _tier_fps_ceiling(
+                raw_capture_fps, tier_cfg["fps_margin"])
+            if strict_ceiling is not None:
+                tier_ceiling = min(tier_ceiling, strict_ceiling)
+        else:
+            tier_ceiling = None
+
+        # Filter fps stats to this tier's ceiling.
+        tier_fps_rates = {
+            fps: rate for fps, rate in effective_fps_detect_rates.items()
+            if tier_ceiling is None or fps <= tier_ceiling
+        }
+        if not tier_fps_rates:
+            recommendations.append(TierRecommendation(
+                tier=tier_name, available=False,
+            ))
+            continue
+
+        tier_fps_stats = _stats_from_rates(tier_fps_rates, fps_expected)
+        tier_candidates = optimize_calibration(
+            version_stats=version_stats,
+            fps_stats=tier_fps_stats,
+            pair_stats=pair_stats,
+            config=OptimizerConfig(
+                codec=fountain_codec,
+                target_k=target_k,
+                capture_fps_ceiling=tier_ceiling,
+                fps_anchor_version=anchor_version,
+                success_target_override=confidence,
+            ),
+        )
+
+        candidate = tier_candidates.get(tier_name)
         if candidate is None:
             recommendations.append(TierRecommendation(
                 tier=tier_name, available=False,
