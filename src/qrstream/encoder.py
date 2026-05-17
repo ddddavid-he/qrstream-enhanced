@@ -37,6 +37,9 @@ from .display_cache import (
     pack_module_image,
     plan_module_cache,
     unpack_module_frame,
+    SharedFrameBuffer,
+    SharedProducerState,
+    SharedBufferCacheAdapter,
 )
 from .qr_utils import generate_qr_image, generate_qr_module_image
 from .ui import ProgressReporter, QuietReporter
@@ -768,6 +771,76 @@ def encode_to_video(input_path: str, output_path: str,
         )
 
 
+# ── Subprocess producer for display mode ────────────────────────
+
+
+def _display_producer_main(
+    shm_name: str, total_frames: int, module_side: int,
+    payload_data: bytes, blocksize: int,
+    num_blocks: int, lead_in_frames: int,
+    ec_level: int, border_modules: int, qr_version: int,
+    high_density: bool, auto_mask: bool,
+    fountain_codec: str, compress: bool,
+    produced_value, done_event, cancel_event, started_value,
+) -> None:
+    """Producer entry point running in a child process.
+
+    Writes packed QR frames into shared memory via *shm_name* and
+    signals progress through multiprocessing primitives.  This runs
+    in its own process so it has an independent GIL and cannot block
+    the Qt GUI thread.
+    """
+    import time as _time
+    buf = SharedFrameBuffer(total_frames, module_side, name=shm_name)
+    started_value.value = _time.monotonic()
+    try:
+        row_bytes = buf.row_bytes
+
+        if fountain_codec == 'raptorq':
+            encoder = RaptorQEncoder(
+                payload_data, blocksize,
+                compressed=compress, alphanumeric_qr=high_density)
+        else:
+            from .lt_codec import LTEncoder
+            encoder = LTEncoder(
+                payload_data, blocksize,
+                compressed=compress, alphanumeric_qr=high_density)
+
+        blank_module = np.full(
+            (module_side, module_side), 255, dtype=np.uint8)
+
+        if lead_in_frames:
+            packed_blank = pack_module_image(blank_module)
+            for frame_index in range(lead_in_frames):
+                if cancel_event.is_set():
+                    return
+                buf.put_packed(frame_index, packed_blank)
+                with produced_value.get_lock():
+                    produced_value.value += 1
+
+        encoder._seq = 0
+        for offset, (packed, _, _) in enumerate(
+                encoder.generate_blocks(num_blocks)):
+            if cancel_event.is_set():
+                return
+            module_img = generate_qr_module_image(
+                packed,
+                ec_level=ec_level,
+                border=border_modules,
+                version=qr_version,
+                alphanumeric=high_density,
+                auto_mask=auto_mask,
+            )
+            frame_index = lead_in_frames + offset
+            packed_frame = pack_module_image(module_img)
+            buf.put_packed(frame_index, packed_frame)
+            with produced_value.get_lock():
+                produced_value.value += 1
+    finally:
+        done_event.set()
+        buf.close()
+
+
 def encode_to_display(input_path: str,
                       overhead: float = 2.0,
                       fps: int = 10,
@@ -1071,6 +1144,95 @@ def encode_to_display(input_path: str,
             finally:
                 cache.mark_done()
                 state.mark_done()
+
+        # ── Choose subprocess vs thread producer ─────────────────
+        #
+        # Pure display mode (no video output, no test player):
+        #   Use a subprocess to avoid GIL contention between the
+        #   CPU-intensive QR generator and the Qt GUI thread.
+        #   Shared memory passes packed frames; mp primitives sync.
+        #
+        # Video+display mode or test player:
+        #   Use a thread because video_sink / _player cannot cross
+        #   the process boundary.
+
+        _use_subprocess = (
+            output_path is None
+            and _player is None
+            and video_sink is None
+        )
+
+        if _use_subprocess:
+            import multiprocessing as _mp
+
+            shm_buf = SharedFrameBuffer(total_frames, module_side)
+            shared_state = SharedProducerState(total_frames)
+            cache_adapter = SharedBufferCacheAdapter(shm_buf, shared_state)
+
+            proc = _mp.Process(
+                target=_display_producer_main,
+                kwargs=dict(
+                    shm_name=shm_buf.name,
+                    total_frames=total_frames,
+                    module_side=module_side,
+                    payload_data=bytes(payload),
+                    blocksize=blocksize,
+                    num_blocks=num_blocks,
+                    lead_in_frames=lead_in_frames,
+                    ec_level=ec_level,
+                    border_modules=border_modules,
+                    qr_version=qr_version,
+                    high_density=high_density,
+                    auto_mask=auto_mask,
+                    fountain_codec=fountain_codec,
+                    compress=compress,
+                    produced_value=shared_state._produced,
+                    done_event=shared_state._done,
+                    cancel_event=shared_state._cancel,
+                    started_value=shared_state._started,
+                ),
+                daemon=True,
+            )
+            proc.start()
+            try:
+                player_meta = DisplayMetadata(
+                    file_name=os.path.basename(input_path),
+                    file_size=raw_size,
+                    payload_size=payload_size,
+                    compressed=compress,
+                    data_blocks=int(K),
+                    total_blocks=num_blocks,
+                    block_size=blocksize,
+                    total_frames=total_frames,
+                    qr_version=qr_version,
+                    ec_level=ec_level,
+                    module_side=module_side,
+                    fps=fps,
+                    high_density=high_density,
+                )
+                player_config = DisplayPlayerQtConfig(
+                    title=f"QRStream — {os.path.basename(input_path)}",
+                    metadata=player_meta,
+                )
+                play_display_qt(
+                    cache_adapter, shared_state, fps, config=player_config)
+            finally:
+                shared_state.request_cancel()
+                proc.join(timeout=10)
+                if proc.is_alive():
+                    proc.terminate()
+                shm_buf.close()
+
+            if (report_display_done
+                    and not shared_state.cancel_requested()
+                    and shared_state.produced >= total_frames):
+                reporter.encode_done(output_path="(display)", size_bytes=0)
+            # Return a fully-populated in-process cache for callers that
+            # need it (e.g. video finalization).  For pure display mode
+            # the caller typically ignores the return value.
+            return cache_adapter  # type: ignore[return-value]
+
+        # ── Thread-based producer (video output / test player) ───
 
         producer_thread = Thread(target=_produce, daemon=True)
         producer_thread.start()

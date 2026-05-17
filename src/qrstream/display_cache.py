@@ -307,3 +307,185 @@ class ModuleFrameCache:
     def is_done(self) -> bool:
         with self._lock:
             return self._done
+
+
+# ── Shared-memory frame buffer for subprocess producer ──────────
+
+
+class SharedFrameBuffer:
+    """Process-safe flat frame buffer backed by shared memory.
+
+    Layout::
+
+        ┌──────────────────────────────────────┐
+        │ valid_flags: uint8[total_frames]     │
+        ├──────────────────────────────────────┤
+        │ frame_data: uint8[total_frames       │
+        │             × module_side × row_bytes]│
+        └──────────────────────────────────────┘
+
+    The producer subprocess writes packed frames and sets validity
+    flags.  The GUI process reads them without any locking — single-
+    byte flag writes are atomic on all supported platforms, and the
+    producer writes frame data *before* setting the flag to 1.
+    """
+
+    def __init__(self, total_frames: int, module_side: int,
+                 name: str | None = None):
+        from multiprocessing.shared_memory import SharedMemory
+
+        self.total_frames = total_frames
+        self.module_side = module_side
+        self.row_bytes = module_row_bytes(module_side)
+        self.frame_bytes = module_side * self.row_bytes
+        self._flags_size = total_frames
+        self._data_size = total_frames * self.frame_bytes
+        total_size = max(1, self._flags_size + self._data_size)
+
+        if name is None:
+            self._shm = SharedMemory(create=True, size=total_size)
+            self._owner = True
+            self._shm.buf[:self._flags_size] = b'\x00' * self._flags_size
+        else:
+            self._shm = SharedMemory(name=name, create=False)
+            self._owner = False
+
+    @property
+    def name(self) -> str:
+        return self._shm.name
+
+    def put_packed(self, index: int, packed: np.ndarray) -> None:
+        """Write a packed frame (called from producer subprocess)."""
+        flat = np.asarray(packed, dtype=np.uint8).ravel()
+        offset = self._flags_size + index * self.frame_bytes
+        self._shm.buf[offset:offset + self.frame_bytes] = flat.tobytes()
+        # Set flag *after* data is fully written.
+        self._shm.buf[index] = 1
+
+    def has_frame(self, index: int) -> bool:
+        if index < 0 or index >= self.total_frames:
+            return False
+        return bool(self._shm.buf[index])
+
+    def get_packed(self, index: int) -> np.ndarray | None:
+        if index < 0 or index >= self.total_frames:
+            return None
+        if not self._shm.buf[index]:
+            return None
+        offset = self._flags_size + index * self.frame_bytes
+        raw = bytes(self._shm.buf[offset:offset + self.frame_bytes])
+        return np.frombuffer(raw, dtype=np.uint8).reshape(
+            self.module_side, self.row_bytes)
+
+    def close(self) -> None:
+        self._shm.close()
+        if self._owner:
+            try:
+                self._shm.unlink()
+            except FileNotFoundError:
+                pass
+
+
+class SharedProducerState:
+    """Process-safe producer state using multiprocessing primitives.
+
+    Drop-in replacement for :class:`DisplayProducerState` when the
+    producer runs in a subprocess.
+    """
+
+    def __init__(self, total_frames: int):
+        import multiprocessing as _mp
+        self.total_frames = total_frames
+        self._produced = _mp.Value('i', 0)
+        self._done = _mp.Event()
+        self._cancel = _mp.Event()
+        self._started = _mp.Value('d', 0.0)
+
+    def mark_produced(self, count: int = 1) -> None:
+        with self._produced.get_lock():
+            self._produced.value += count
+
+    def mark_done(self) -> None:
+        self._done.set()
+
+    def request_cancel(self) -> None:
+        self._cancel.set()
+
+    def cancel_requested(self) -> bool:
+        return self._cancel.is_set()
+
+    def is_done(self) -> bool:
+        return self._done.is_set()
+
+    def wait_done(self, timeout: float | None = None) -> bool:
+        return self._done.wait(timeout)
+
+    @property
+    def produced(self) -> int:
+        return self._produced.value
+
+    @property
+    def progress_pct(self) -> float:
+        if self.total_frames <= 0:
+            return 100.0
+        return min(100.0, self.produced / self.total_frames * 100.0)
+
+    def producer_fps(self, window_seconds: float = 3.0) -> float:
+        """Approximate producer fps from total produced / elapsed."""
+        started = self._started.value
+        if started <= 0:
+            return 0.0
+        elapsed = max(1e-6, time.monotonic() - started)
+        return max(0.0, self.produced / elapsed)
+
+
+class SharedBufferCacheAdapter:
+    """Read-only cache interface over :class:`SharedFrameBuffer`.
+
+    Provides the same duck-typed interface that
+    :class:`_QRStreamWindow` expects from :class:`ModuleFrameCache`,
+    so the Qt player works unchanged regardless of whether the
+    producer is a thread or a subprocess.
+    """
+
+    def __init__(self, buf: SharedFrameBuffer,
+                 state: SharedProducerState):
+        self._buf = buf
+        self._state = state
+        self.total_frames = buf.total_frames
+        self.module_side = buf.module_side
+        self.row_bytes = buf.row_bytes
+        self.frame_bytes = buf.frame_bytes
+        self.mode = "full"
+
+    @property
+    def valid_count(self) -> int:
+        return self._state.produced
+
+    def has_frame(self, index: int) -> bool:
+        return self._buf.has_frame(index)
+
+    def get_packed(self, index: int) -> np.ndarray | None:
+        return self._buf.get_packed(index)
+
+    def get_module_image(self, index: int) -> np.ndarray | None:
+        packed = self.get_packed(index)
+        if packed is None:
+            return None
+        return unpack_module_frame(packed, self.module_side)
+
+    def contiguous_from(self, start_index: int) -> int:
+        if start_index < 0 or start_index >= self.total_frames:
+            return 0
+        count = 0
+        for i in range(start_index, self.total_frames):
+            if not self._buf.has_frame(i):
+                break
+            count += 1
+        return count
+
+    def is_done(self) -> bool:
+        return self._state.is_done()
+
+    def mark_done(self) -> None:
+        self._state.mark_done()
