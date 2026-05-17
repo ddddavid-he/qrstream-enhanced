@@ -360,6 +360,12 @@ else:
             self._last_displayed_frame = -1
             self._last_displayed_side = -1
 
+            # Effective-fps monitoring: warn when sustained rate < 95% target.
+            self._fps_sample_start = 0.0
+            self._fps_sample_count = 0
+            self._fps_check_interval = 2.0  # seconds between checks
+            self._fps_warning_threshold = 0.95
+
             self._settings = QSettings("QRStream", "DisplayPlayer")
 
             self.setWindowTitle(config.title)
@@ -534,6 +540,20 @@ else:
                     # data.  The effective playback speed may briefly dip
                     # below the target fps, but zero frames are lost.
                     self._next_frame_ts = now + self._frame_interval
+                    # ── Effective-fps tracking ──
+                    self._fps_sample_count += 1
+                    if self._fps_sample_count == 1:
+                        self._fps_sample_start = now
+                    elif now - self._fps_sample_start >= self._fps_check_interval:
+                        elapsed = now - self._fps_sample_start
+                        effective = self._fps_sample_count / elapsed
+                        if effective < self._fps * self._fps_warning_threshold:
+                            self._status.showMessage(
+                                f"⚠ Effective {effective:.1f} fps "
+                                f"< target {self._fps} fps — playback "
+                                f"slowed to guarantee zero frame loss")
+                        self._fps_sample_count = 0
+                        self._fps_sample_start = now
                 else:
                     self._playing = False
                     self._play_btn.setText("▶")
