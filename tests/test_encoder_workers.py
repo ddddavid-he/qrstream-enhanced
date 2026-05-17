@@ -8,6 +8,7 @@ class _CaptureReporter:
     def __init__(self):
         self.warnings = []
         self.debugs = []
+        self.starts = []
         self.done = []
 
     def info(self, message):
@@ -23,7 +24,7 @@ class _CaptureReporter:
         self.debugs.append(message)
 
     def encode_start(self, **kwargs):
-        pass
+        self.starts.append(kwargs)
 
     def encode_update(self, **kwargs):
         pass
@@ -109,6 +110,8 @@ def test_encode_defaults_to_one_worker_without_warning(monkeypatch, tmp_path):
 
     assert reporter.warnings == []
     assert any("workers: 1" in msg for msg in reporter.debugs)
+    assert reporter.starts[-1]["input_path"] == str(src)
+    assert reporter.starts[-1]["file_size"] == src.stat().st_size
     assert out.exists() and out.stat().st_size > 0
 
 

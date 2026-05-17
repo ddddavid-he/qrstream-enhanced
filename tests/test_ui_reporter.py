@@ -194,6 +194,18 @@ class TestLogReporter:
         # At least one scan line should carry map=...
         assert any("map=" in ln for ln in buf.getvalue().splitlines())
 
+    def test_log_encode_start_includes_input_name_and_size(self):
+        buf = io.StringIO()
+        r = LogReporter(stream=buf)
+        r.encode_start(duration_sec=12.3, fps=30, qr_version=25,
+                       mode="base45", overhead=1.2,
+                       input_path="/tmp/path with spaces/input.bin",
+                       file_size=4096)
+        line = self._last_line(buf)
+        assert 'input=input.bin' in line
+        assert 'size="4.0 KB"' in line
+        assert 'duration=12.3s' in line
+
     def test_log_reports_ge_checkpoint(self):
         buf = io.StringIO()
         r = LogReporter(stream=buf)

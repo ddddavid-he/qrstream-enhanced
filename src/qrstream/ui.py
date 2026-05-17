@@ -529,7 +529,8 @@ class ProgressReporter(Protocol):
     # Encode
     def encode_start(self, *, duration_sec: float, fps: int,
                      qr_version: int, mode: str,
-                     overhead: float) -> None: ...
+                     overhead: float, input_path: str = "",
+                     file_size: int = 0) -> None: ...
     def encode_update(self, *, progress_pct: float,
                       speed_fps: float,
                       eta_sec: float) -> None: ...
@@ -863,8 +864,11 @@ class LogReporter:
 
     # ── encode ────────────────────────────────────────────────
     def encode_start(self, *, duration_sec: float, fps: int,
-                     qr_version: int, mode: str, overhead: float) -> None:
+                     qr_version: int, mode: str, overhead: float,
+                     input_path: str = "", file_size: int = 0) -> None:
         self._write_line(phase="encode", status="start",
+                         input=os.path.basename(input_path) if input_path else "",
+                         size=_fmt_size(file_size),
                          duration=f"{duration_sec:.1f}s",
                          fps=fps, qr=f"v{qr_version}",
                          mode=mode, overhead=f"{overhead:.1f}x")
@@ -1926,10 +1930,14 @@ class RichReporter:
 
     # ── encode ────────────────────────────────────────────────
     def encode_start(self, *, duration_sec: float, fps: int,
-                     qr_version: int, mode: str, overhead: float) -> None:
+                     qr_version: int, mode: str, overhead: float,
+                     input_path: str = "", file_size: int = 0) -> None:
         self._stop_live()
+        input_name = os.path.basename(input_path) if input_path else "-"
         self._console.print(
             f"[bold green]Encode[/bold green]  "
+            f"input=[bold]{input_name}[/bold]  "
+            f"size=[bold]{_fmt_size(file_size)}[/bold]  "
             f"video=[bold]{_fmt_duration(duration_sec)}[/bold]  "
             f"fps=[bold]{fps}[/bold]  "
             f"qr=[bold]V{qr_version}[/bold]  "

@@ -573,6 +573,8 @@ def encode_to_video(input_path: str, output_path: str,
             qr_version=qr_version,
             mode=mode_str,
             overhead=overhead,
+            input_path=input_path,
+            file_size=raw_size,
         )
 
         codec_info = _PYAV_CODEC_MAP.get(codec)
@@ -928,6 +930,8 @@ def encode_to_display(input_path: str,
             qr_version=qr_version,
             mode=mode_str,
             overhead=overhead,
+            input_path=input_path,
+            file_size=raw_size,
         )
 
         def _report_progress(produced: int, start_ts: float,
