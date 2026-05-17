@@ -162,13 +162,15 @@ class BenchWindow(qt_player._QRStreamWindow):
 def _build_cache(total_frames: int, module_side: int) -> ModuleFrameCache:
     cache = ModuleFrameCache(total_frames=total_frames, module_side=module_side)
     rng = np.random.default_rng(0)
-    module_img = np.where(
-        rng.random((module_side, module_side)) > 0.5,
-        0,
-        255,
-    ).astype(np.uint8)
-    packed = pack_module_image(module_img)
     for index in range(total_frames):
+        # Each frame gets unique random data so the pixmap cache never
+        # hits — matching real playback where every QR code is different.
+        module_img = np.where(
+            rng.random((module_side, module_side)) > 0.5,
+            0,
+            255,
+        ).astype(np.uint8)
+        packed = pack_module_image(module_img)
         cache.put_packed(index, packed)
     cache.mark_done()
     return cache
