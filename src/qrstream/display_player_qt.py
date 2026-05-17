@@ -289,32 +289,28 @@ else:
             p.end()
 
     class _PixmapCache:
-        """Simple LRU cache for scaled QPixmap objects."""
+        """O(1) LRU cache for scaled QPixmap objects."""
 
         def __init__(self, max_entries: int = 128):
+            from collections import OrderedDict as _OD
             self._max = max(1, max_entries)
-            self._cache: dict[tuple[int, int], QPixmap] = {}
-            self._order: list[tuple[int, int]] = []
+            self._cache: _OD[tuple[int, int], QPixmap] = _OD()
 
         def get(self, key: tuple[int, int]) -> QPixmap | None:
-            px = self._cache.get(key)
-            if px is not None:
-                self._order.remove(key)
-                self._order.append(key)
-            return px
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                return self._cache[key]
+            return None
 
         def put(self, key: tuple[int, int], pixmap: QPixmap) -> None:
             if key in self._cache:
-                self._order.remove(key)
+                self._cache.move_to_end(key)
             elif len(self._cache) >= self._max:
-                evict = self._order.pop(0)
-                del self._cache[evict]
+                self._cache.popitem(last=False)
             self._cache[key] = pixmap
-            self._order.append(key)
 
         def clear(self) -> None:
             self._cache.clear()
-            self._order.clear()
 
     def _numpy_to_qimage(arr: np.ndarray) -> QImage:
         """Convert a 2-D 0/255 grayscale numpy array to QImage (zero copy)."""
