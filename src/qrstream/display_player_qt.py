@@ -220,7 +220,7 @@ else:
       td { padding: 3px 14px 3px 0; }
       td:first-child {
           color: #4c9eff; font-weight: 600; white-space: nowrap;
-          font-family: "SF Mono", "Menlo", "Consolas", monospace;
+          font-family: "Menlo", "Consolas", monospace;
           font-size: 12px;
       }
       td:last-child { color: #999999; font-size: 13px; }
@@ -783,7 +783,7 @@ else:
                   white-space: nowrap;
               }}
               td.val {{ color: #dddddd; font-size: 13px; }}
-              .mono {{ font-family: "SF Mono", "Menlo", monospace;
+              .mono {{ font-family: "Menlo", "Consolas", monospace;
                        color: #4c9eff; }}
             </style>
             <h2>File Information</h2>
