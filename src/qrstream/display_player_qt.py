@@ -356,6 +356,10 @@ else:
             self._controls_interval = 0.2
             self._next_controls_ts = 0.0
 
+            # Track last-displayed state to skip redundant _update_display.
+            self._last_displayed_frame = -1
+            self._last_displayed_side = -1
+
             self._settings = QSettings("QRStream", "DisplayPlayer")
 
             self.setWindowTitle(config.title)
@@ -539,7 +543,14 @@ else:
             if now >= self._next_controls_ts:
                 self._update_controls()
                 self._next_controls_ts = now + self._controls_interval
-            self._update_display()
+
+            label_size = self._qr_label.size()
+            side = min(label_size.width(), label_size.height())
+            if (self._frame_index != self._last_displayed_frame
+                    or side != self._last_displayed_side):
+                self._update_display()
+                self._last_displayed_frame = self._frame_index
+                self._last_displayed_side = side
 
         def _update_controls(self) -> None:
             total = max(1, self._cache.total_frames)
@@ -817,6 +828,7 @@ else:
         def resizeEvent(self, event) -> None:  # noqa: N802
             super().resizeEvent(event)
             self._presentation.clear()
+            self._last_displayed_side = -1
             self._update_display()
 
     # ── Public entry point ───────────────────────────────────────
