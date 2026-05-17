@@ -184,6 +184,12 @@ else:
         border-top: 1px solid #2a2a2a;
         padding: 1px 8px;
     }
+    QLabel#fpsIndicator {
+        font-family: "Menlo", "Consolas", monospace;
+        font-size: 11px;
+        padding: 0 6px;
+        min-width: 70px;
+    }
     QDialog {
         background-color: #1e1e1e;
         border: 1px solid #333333;
@@ -364,7 +370,6 @@ else:
             self._fps_sample_start = 0.0
             self._fps_sample_count = 0
             self._fps_check_interval = 2.0  # seconds between checks
-            self._fps_warning_threshold = 0.95
 
             self._settings = QSettings("QRStream", "DisplayPlayer")
 
@@ -436,6 +441,12 @@ else:
             self._status.showMessage(
                 "Space play/pause  ←→ frame  J/K ±1s  "
                 "+/- zoom  L loop  I info  F fullscreen  H help  Q quit")
+
+            # Permanent FPS indicator on the right side of the status bar.
+            # Colored: gray (ok), yellow (slight drop), red (severe drop).
+            self._fps_label = QLabel("")
+            self._fps_label.setObjectName("fpsIndicator")
+            self._status.addPermanentWidget(self._fps_label)
 
         def _apply_theme(self) -> None:
             self.setStyleSheet(_DARK_QSS)
@@ -552,18 +563,16 @@ else:
                     elif now - self._fps_sample_start >= self._fps_check_interval:
                         elapsed = now - self._fps_sample_start
                         effective = self._fps_sample_count / elapsed
-                        if effective < self._fps * self._fps_warning_threshold:
-                            self._status.setStyleSheet(
-                                "QStatusBar { background-color: #3a1a00;"
-                                " color: #ff9944; font-size: 11px;"
-                                " border-top: 1px solid #663300;"
-                                " padding: 1px 8px; }")
-                            self._status.showMessage(
-                                f"⚠ Effective {effective:.1f} fps "
-                                f"< target {self._fps} fps — playback "
-                                f"slowed to guarantee zero frame loss")
+                        self._fps_label.setText(f"{effective:.1f} fps")
+                        if effective >= self._fps * 0.95:
+                            self._fps_label.setStyleSheet(
+                                "color: #666666;")
+                        elif effective >= self._fps * 0.80:
+                            self._fps_label.setStyleSheet(
+                                "color: #ccaa00;")
                         else:
-                            self._status.setStyleSheet("")
+                            self._fps_label.setStyleSheet(
+                                "color: #cc4444;")
                         self._fps_sample_count = 0
                         self._fps_sample_start = now
                 else:
@@ -678,6 +687,7 @@ else:
             if self._playing:
                 self._playing = False
                 self._play_btn.setText("▶")
+                self._fps_label.setText("")
                 return
             can = _can_play(self._cache, self._state, self._frame_index,
                             self._fps, self._config)
