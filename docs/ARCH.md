@@ -1,7 +1,7 @@
 # QRStream Architecture
 
 > Auto-generated architecture reference for collaborators and AI agents.
-> Last updated: 2026-05-18 • qrstream v0.10.0b2+
+> Last updated: 2026-05-18 • qrstream v0.10.0b2+ • FPS ceiling & tier margins
 
 ## Overview
 
@@ -215,6 +215,33 @@ optimize_calibration()                              calibration_optimizer.py
   └─ Three-tier recommendations: safe / balanced / aggressive
   └─ Wilson score confidence intervals
 ```
+
+### FPS ceiling & phase-drift safety margins
+
+Camera and display clocks are never synchronised in the two-device,
+one-way-link workflow.  When the encode FPS equals (or is rounded up to)
+the capture FPS, phase drift causes systematic frame loss that grows with
+recording duration.
+
+Two layers enforce safety:
+
+1. **Strict ceiling** (`_capture_fps_ceiling`): largest integer strictly
+   below the raw capture fps.  59.94 → 59, 60.00 → 59.
+2. **Per-tier margin** (`_TIERS["fps_margin"]`): each tier reserves
+   additional headroom.
+
+| Tier         | `fps_margin` | 59.94 fps ceiling | 29.97 fps ceiling |
+|--------------|:------------:|:-----------------:|:-----------------:|
+| aggressive   | 5 %          | 56                | 28                |
+| balanced     | 10 %         | 53                | 26                |
+| safe         | 15 %         | 50                | 25                |
+
+`_capture_fps_nominal` (nearest-integer round) is used **only** for
+informational messages and cadence-gain heuristics — never for safety
+filtering.
+
+The optimizer runs once per tier with its own ceiling so that each tier
+sees only the FPS candidates it is allowed to recommend.
 
 ## UI Layer (`ui.py`)
 
