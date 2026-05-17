@@ -69,6 +69,7 @@ class BenchResult:
     late_reset_rate: float
     frames_advanced: int
     finished: bool
+    frames_skipped: int = 0
     error: str = ""
 
 
@@ -88,6 +89,7 @@ class BenchWindow(qt_player._QRStreamWindow):
         self._advance_ts: list[float] = []
         self._late_reset_count = 0
         self._finished = False
+        self._frame_sequence: list[int] = []  # track presented frames
         super().__init__(cache, state, fps, config)
         self._safety = qt_player.QTimer(self)
         self._safety.setSingleShot(True)
@@ -135,10 +137,9 @@ class BenchWindow(qt_player._QRStreamWindow):
             elif self._cache.has_frame(nxt):
                 self._frame_index = nxt
                 self._advance_ts.append(time.perf_counter())
-                self._next_frame_ts += self._frame_interval
-                if self._next_frame_ts < now - self._frame_interval:
-                    self._late_reset_count += 1
-                    self._next_frame_ts = now + self._frame_interval
+                self._frame_sequence.append(nxt)
+                # Zero-skip strategy: always now + interval
+                self._next_frame_ts = now + self._frame_interval
             else:
                 self._playing = False
                 self._play_btn.setText("▶")
@@ -214,6 +215,14 @@ def _run_single(args: argparse.Namespace) -> BenchResult:
         window._late_reset_count / max(1, frames_advanced)
     )
 
+    # Detect frame skips in the recorded sequence
+    seq = window._frame_sequence
+    frames_skipped = 0
+    for i in range(1, len(seq)):
+        gap = seq[i] - seq[i - 1]
+        if gap != 1:
+            frames_skipped += gap - 1
+
     return BenchResult(
         ok=True,
         target_fps=args.fps,
@@ -232,6 +241,7 @@ def _run_single(args: argparse.Namespace) -> BenchResult:
         late_reset_rate=late_reset_rate,
         frames_advanced=frames_advanced,
         finished=window._finished,
+        frames_skipped=frames_skipped,
     )
 
 
@@ -272,14 +282,15 @@ def _run_child_for_fps(script_path: Path, base_args: argparse.Namespace,
 
 def _print_summary(results: list[BenchResult], usable_threshold: float,
                    max_reset_rate: float) -> None:
-    print(f"{'target':>6} {'eff':>8} {'done':>5} {'drift':>8} {'tick95':>8} {'draw95':>8} {'resets':>8} {'usable':>7}")
-    print("-" * 70)
+    print(f"{'target':>6} {'eff':>8} {'done':>5} {'drift':>8} {'tick95':>8} {'draw95':>8} {'resets':>8} {'skips':>6} {'usable':>7}")
+    print("-" * 78)
     usable_max = None
     for result in results:
         usable = (
             result.finished
             and result.effective_fps >= result.target_fps * usable_threshold
             and result.late_reset_rate <= max_reset_rate
+            and result.frames_skipped == 0
         )
         if usable:
             usable_max = result.target_fps
@@ -291,6 +302,7 @@ def _print_summary(results: list[BenchResult], usable_threshold: float,
             f"{result.tick_p95_ms:>8.2f} "
             f"{result.display_p95_ms:>8.2f} "
             f"{result.late_reset_count:>8} "
+            f"{result.frames_skipped:>6} "
             f"{('yes' if usable else 'no'):>7}"
         )
     print()
