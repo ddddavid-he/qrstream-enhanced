@@ -351,6 +351,11 @@ else:
 
             self._presentation = _PixmapCache(max_entries=128)
 
+            # Throttle control-bar updates to ~5 Hz (200 ms interval).
+            # Human-readable time/slider don't need per-frame refresh.
+            self._controls_interval = 0.2
+            self._next_controls_ts = 0.0
+
             self._settings = QSettings("QRStream", "DisplayPlayer")
 
             self.setWindowTitle(config.title)
@@ -531,7 +536,9 @@ else:
                 self._playing = False
                 self._play_btn.setText("▶")
 
-            self._update_controls()
+            if now >= self._next_controls_ts:
+                self._update_controls()
+                self._next_controls_ts = now + self._controls_interval
             self._update_display()
 
         def _update_controls(self) -> None:
@@ -603,6 +610,7 @@ else:
             if target != self._frame_index and self._cache.has_frame(target):
                 self._frame_index = target
                 self._update_display()
+                self._update_controls()
             self._playing = False
             self._play_btn.setText("▶")
 
@@ -615,6 +623,7 @@ else:
                     if self._cache.has_frame(idx):
                         self._frame_index = idx
                         self._update_display()
+                        self._update_controls()
                         break
             self._playing = False
             self._play_btn.setText("▶")
@@ -790,6 +799,7 @@ else:
                     self._frame_index = idx
                     break
             self._update_display()
+            self._update_controls()
             if getattr(self, '_was_playing_before_drag', False):
                 self._toggle_play()
 
