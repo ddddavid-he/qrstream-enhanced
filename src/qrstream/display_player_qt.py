@@ -606,6 +606,42 @@ else:
 
         # ── Actions ─────────────────────────────────────────────
 
+        def _prebuffer_pixmaps(self, count: int) -> None:
+            """Pre-render up to *count* frames into the pixmap cache.
+
+            Called before playback starts so the first few seconds of
+            display ticks hit a warm cache instead of paying the full
+            unpack → QImage → QPixmap → scale cost on every frame.
+            """
+            label_size = self._qr_label.size()
+            side = min(label_size.width(), label_size.height())
+            if side < 1:
+                return
+            for i in range(count):
+                idx = self._frame_index + i
+                if idx >= self._cache.total_frames:
+                    break
+                key = (idx, side)
+                if self._presentation.get(key) is not None:
+                    continue
+                module_img = self._cache.get_module_image(idx)
+                if module_img is None:
+                    break
+                qimg = _numpy_to_qimage(module_img)
+                pixmap = QPixmap.fromImage(qimg)
+                if self._config.integer_scale:
+                    ms = max(module_img.shape[0], module_img.shape[1])
+                    sc = max(1, side // max(1, ms))
+                    target_side = min(side, ms * sc)
+                else:
+                    target_side = side
+                scaled = pixmap.scaled(
+                    target_side, target_side,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.FastTransformation,
+                )
+                self._presentation.put(key, scaled)
+
         def _toggle_play(self) -> None:
             if self._playing:
                 self._playing = False
@@ -614,6 +650,9 @@ else:
             can = _can_play(self._cache, self._state, self._frame_index,
                             self._fps, self._config)
             if can:
+                # Pre-render ~1 second of upcoming frames to warm the
+                # pixmap cache before the playback timer starts ticking.
+                self._prebuffer_pixmaps(self._fps)
                 self._playing = True
                 self._play_btn.setText("⏸")
                 self._next_frame_ts = (time.monotonic()
