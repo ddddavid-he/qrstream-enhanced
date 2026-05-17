@@ -23,7 +23,7 @@ Encoder                                     Decoder
 - **zxing-cpp Detector**: Native C++ QR detector — releases the GIL for true parallel detection, reentrant and crash-free on noisy inputs, faster than the historical OpenCV/WeChatQRCode path with equivalent detection rate
 - **Adaptive Sample Rate**: Automatically selects optimal sampling strategy based on detection rate and frame repetition
 - **Targeted Recovery + GE Rescue**: After the main scan, the LT decoder can run a GF(2) Gaussian-elimination checkpoint to finish stalled LT graphs early; if needed, it re-scans only video segments where missing seeds are expected. RaptorQ handles recovery internally without GE.
-- **Low-Memory Paths**: mmap-backed encoding and streaming decode-to-file for large inputs
+- **Low-Memory Paths**: mmap-backed RaptorQ/LT source-symbol encoding and streaming decode-to-file for large inputs
 - **Display Mode**: `qrstream encode` without `-o` streams generated QR frames directly to the built-in Qt player; `--display -o` prioritises smooth display while still completing the output video
 
 ## Installation
@@ -367,7 +367,7 @@ Base45 (RFC 9285) is the default because QR's alphanumeric mode is denser per ch
 
 ### Large Files & Low-Memory Paths
 
-- For large **V3/V4** inputs, the encoder uses `mmap` for random access, avoiding loading the entire file into memory.
+- For large **V3/V4** inputs, the shared loader uses `mmap` for random access. LT consumes the mapped input directly, and RaptorQ uses it for systematic source-symbol emission; repair-symbol generation materializes a contiguous buffer only when required by the upstream `raptorq` API.
 - When the input is large enough, encoding automatically disables `zlib` compression to preserve the low-memory path; use `--force-compress` to override.
 - The decoder supports streaming writes with incremental decompression, reducing memory overhead.
 - During decode, the interactive UI shows a two-row live block: a video-scan progress bar (percent, ETA, live detection rate) and a qBittorrent-style file-recovery block map (per-bucket colour density plus an `N/K blocks` counter).  Use `--output-mode log` for CI-friendly `key=value` lines or `--output-mode quiet` for scripted invocations.

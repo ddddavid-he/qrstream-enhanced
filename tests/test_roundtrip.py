@@ -7,6 +7,7 @@ from math import ceil
 from qrstream.protocol import V3Header, auto_blocksize, unpack
 from qrstream.encoder import LTEncoder, MmapDataSource, _load_payload
 from qrstream.decoder import LTDecoder
+from qrstream.raptorq_codec import RaptorQDecoder, RaptorQEncoder
 
 
 class TestDataRoundtrip:
@@ -143,5 +144,22 @@ class TestStreamingPaths:
             assert compressed is False
             assert used_mmap is True
             assert isinstance(payload, MmapDataSource)
+        finally:
+            payload.close()
+
+    def test_raptorq_encoder_consumes_mmap_source_symbols(self, tmp_path):
+        data = b'RaptorQ mmap source data' * 20
+        input_path = tmp_path / "input.bin"
+        input_path.write_bytes(data)
+        payload = MmapDataSource(str(input_path))
+        try:
+            encoder = RaptorQEncoder(payload, 64)
+            decoder = RaptorQDecoder()
+            for packed, _, _ in encoder.generate_blocks(encoder.K):
+                done, _ = decoder.decode_bytes(packed)
+                if done:
+                    break
+            assert decoder.done
+            assert decoder.bytes_dump() == data
         finally:
             payload.close()

@@ -170,39 +170,84 @@ class RaptorQEncoder:
                  compressed: bool = False,
                  binary_qr: bool = False,
                  alphanumeric_qr: bool | None = None):
-        if isinstance(data, (bytes, bytearray)):
+        if isinstance(data, bytes):
+            self.data = data
+        elif isinstance(data, bytearray):
             self.data = bytes(data)
         else:
-            # MmapDataSource or similar — materialise for raptorq which
-            # requires a contiguous bytes object.
-            self.data = bytes(data[:len(data)])
+            # MmapDataSource or similar random-access input.  Keep it
+            # file-backed so systematic source symbols can be emitted
+            # without eagerly copying the whole file into memory.
+            self.data = data
         self.filesize = len(self.data)
         self.compressed = compressed
         self.alphanumeric_qr = _resolve_alphanumeric_flag(
             binary_qr, alphanumeric_qr)
+        self._requested_blocksize = blocksize
+        self._encoder = None
 
         # The raptorq library may adjust the symbol size for internal
         # alignment (e.g. rounding to a multiple of its sub-symbol size
-        # Al).  We probe the actual symbol size from a test packet and
-        # use that as the effective blocksize.
-        padded = self.data
-        remainder = self.filesize % blocksize
-        if remainder != 0:
-            padded = self.data + b'\x00' * (blocksize - remainder)
-        self._encoder = _raptorq.Encoder.with_defaults(padded, blocksize)
-        # Probe actual symbol size from first packet.
-        probe_packets = self._encoder.get_encoded_packets(0)
+        # Al).  Probe with a tiny payload so mmap-backed inputs are not
+        # materialised during construction.
+        probe_encoder = _raptorq.Encoder.with_defaults(b'\x00', blocksize)
+        probe_packets = probe_encoder.get_encoded_packets(0)
         if probe_packets:
             actual_symbol_size = len(probe_packets[0]) - _RQ_ESI_HEADER_SIZE
         else:
             actual_symbol_size = blocksize
         self.blocksize = actual_symbol_size
-        self.K = len(probe_packets) if probe_packets else (
-            ceil(self.filesize / self.blocksize) if self.filesize > 0 else 0)
-        self.source_blocks = _rq_source_blocks_from_packets(probe_packets)
-        if self.K > 0 and self.source_blocks == 0:
-            self.source_blocks = _rq_num_source_blocks(self.K)
+
+        remainder = self.filesize % blocksize
+        self._padded_size = self.filesize
+        if remainder != 0:
+            self._padded_size += blocksize - remainder
+        self.K = (
+            ceil(self._padded_size / self.blocksize)
+            if self._padded_size > 0 else 0
+        )
+        self.source_blocks = _rq_num_source_blocks(self.K)
         self._seq = 0
+
+    def _materialize_padded_data(self) -> bytes:
+        if isinstance(self.data, bytes):
+            payload = self.data
+        else:
+            payload = bytes(self.data[:self.filesize])
+        padding = self._padded_size - len(payload)
+        if padding > 0:
+            payload += b'\x00' * padding
+        return payload
+
+    def _ensure_encoder(self):
+        if self._encoder is None:
+            self._encoder = _raptorq.Encoder.with_defaults(
+                self._materialize_padded_data(),
+                self._requested_blocksize,
+            )
+        return self._encoder
+
+    def _source_symbol(self, source_index: int) -> bytes:
+        start = source_index * self.blocksize
+        end = start + self.blocksize
+        if start >= self.filesize:
+            return b'\x00' * self.blocksize
+        block = self.data[start:min(end, self.filesize)]
+        if not isinstance(block, bytes):
+            block = bytes(block)
+        if len(block) < self.blocksize:
+            block += b'\x00' * (self.blocksize - len(block))
+        return block
+
+    def _iter_source_packets(self, source_blocks: int):
+        layout = _rq_source_block_layout(self.K, source_blocks)
+        max_symbols = max((count for _, count in layout), default=0)
+        for local_esi in range(max_symbols):
+            for sbn, (offset, count) in enumerate(layout):
+                if local_esi >= count:
+                    continue
+                payload_id = _rq_payload_id(sbn, local_esi)
+                yield payload_id, self._source_symbol(offset + local_esi)
 
     # Keep ``binary_qr`` as a read-only alias for symmetry with
     # LTEncoder.
@@ -223,20 +268,46 @@ class RaptorQEncoder:
         """
         source_blocks = self.source_blocks or _rq_num_source_blocks(self.K)
         repair_count = max(0, count - self.K)
-        repair_per_block = (
-            ceil(repair_count / source_blocks)
-            if source_blocks > 0 else 0
-        )
-        packets = self._encoder.get_encoded_packets(repair_per_block)
-        packet_source_blocks = _rq_source_blocks_from_packets(packets)
-        if packet_source_blocks > 0:
-            source_blocks = packet_source_blocks
-            self.source_blocks = source_blocks
+        repair_packets: list[bytes] = []
+        if repair_count > 0:
+            repair_per_block = (
+                ceil(repair_count / source_blocks)
+                if source_blocks > 0 else 0
+            )
+            packets = self._ensure_encoder().get_encoded_packets(repair_per_block)
+            packet_source_blocks = _rq_source_blocks_from_packets(packets)
+            if packet_source_blocks > 0:
+                source_blocks = packet_source_blocks
+                self.source_blocks = source_blocks
 
-        ordered_packets = _rq_order_packets(packets, self.K, source_blocks)
+            ordered_packets = _rq_order_packets(packets, self.K, source_blocks)
+            for pkt in ordered_packets:
+                payload_id = struct.unpack('>I', pkt[:_RQ_ESI_HEADER_SIZE])[0]
+                if _rq_source_index(payload_id, self.K, source_blocks) is None:
+                    repair_packets.append(pkt)
 
         self._seq = 0
-        for pkt in ordered_packets[:count]:
+        emitted = 0
+        for payload_id, symbol_data in self._iter_source_packets(source_blocks):
+            if emitted >= count:
+                return
+            seq = self._seq & 0xFFFF
+            packed = pack_v4(
+                filesize=self.filesize,
+                symbol_size=self.blocksize,
+                symbol_count=self.K,
+                esi=payload_id,
+                block_seq=seq,
+                data=symbol_data,
+                compressed=self.compressed,
+                alphanumeric_qr=self.alphanumeric_qr,
+                reserved=source_blocks,
+            )
+            yield packed, payload_id, seq
+            self._seq += 1
+            emitted += 1
+
+        for pkt in repair_packets[:max(0, count - emitted)]:
             payload_id = struct.unpack('>I', pkt[:_RQ_ESI_HEADER_SIZE])[0]
             symbol_data = pkt[_RQ_ESI_HEADER_SIZE:]
             seq = self._seq & 0xFFFF

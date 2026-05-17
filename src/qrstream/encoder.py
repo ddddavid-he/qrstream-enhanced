@@ -174,7 +174,7 @@ def _load_payload(input_path: str, compress: bool,
                   force_compress: bool = False,
                   verbose: bool = False,
                   reporter: ProgressReporter | None = None):
-    """Load the LT source payload with a low-memory path when possible.
+    """Load the source payload with a low-memory path when possible.
 
     Returns (payload, effective_compress, used_mmap, raw_size).
     """

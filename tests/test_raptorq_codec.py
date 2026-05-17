@@ -84,6 +84,33 @@ class TestRaptorQEncoder:
         # Repair symbols start at K
         assert all(e >= K for e in esis[K:])
 
+    def test_random_access_source_is_not_eagerly_materialized(self):
+        class TrackingData:
+            def __init__(self, data: bytes):
+                self._data = data
+                self.materialized = False
+
+            def __len__(self):
+                return len(self._data)
+
+            def __getitem__(self, key):
+                if (isinstance(key, slice)
+                        and key.start is None
+                        and key.stop == len(self._data)):
+                    self.materialized = True
+                return self._data[key]
+
+        data = b'ABCDEFGH' * 64
+        source = TrackingData(data)
+        encoder = RaptorQEncoder(source, 64)
+
+        assert source.materialized is False
+        blocks = list(encoder.generate_blocks(encoder.K))
+        assert source.materialized is False
+        for i, (packed, _, _) in enumerate(blocks):
+            _, block_data = unpack(packed, skip_crc=True)
+            assert block_data == data[i * 64:(i + 1) * 64]
+
     def test_systematic_source_symbols(self):
         """First K packets should carry the source data directly."""
         data = b'ABCDEFGH' * 32  # 256 bytes
@@ -154,6 +181,7 @@ class TestRaptorQEncoder:
                 ]
 
         encoder = RaptorQEncoder.__new__(RaptorQEncoder)
+        encoder.data = b'\x00' * 20
         encoder.filesize = 20
         encoder.blocksize = 4
         encoder.K = 5
