@@ -38,6 +38,7 @@ try:
         QHBoxLayout,
         QLabel,
         QMainWindow,
+        QMessageBox,
         QPushButton,
         QSlider,
         QStatusBar,
@@ -938,6 +939,47 @@ else:
         if app is None:
             app = QApplication([])
             app.setApplicationName("QRStream")
+
+        # ── Refresh-rate sanity check ───────────────────────────
+        # Warn (GUI + terminal) when target fps exceeds the display
+        # refresh rate — every QR frame must be presented at least
+        # once, but hardware cannot expose more than refresh_rate
+        # distinct frames per second to a camera.
+        screen = app.primaryScreen()
+        display_hz = screen.refreshRate() if screen else 0.0
+        if display_hz > 0 and fps > display_hz:
+            import sys
+            warn_msg = (
+                f"Target frame rate ({fps} fps) exceeds your display's "
+                f"refresh rate ({display_hz:.0f} Hz).\n\n"
+                f"The display can only show {display_hz:.0f} distinct "
+                f"frames per second. Frames beyond this rate will not "
+                f"receive unique screen exposures — a camera recording "
+                f"the display cannot capture them individually.\n\n"
+                f"Recommended: use --fps {int(display_hz)} or lower.\n\n"
+                f"Continue anyway?"
+            )
+            # Terminal warning (always printed regardless of dialog)
+            print(
+                f"\033[33mWarning:\033[0m target fps ({fps}) exceeds "
+                f"display refresh rate ({display_hz:.0f} Hz). "
+                f"Frames beyond {display_hz:.0f} fps won't receive "
+                f"unique screen exposures.",
+                file=sys.stderr,
+            )
+            dlg = QMessageBox()
+            dlg.setWindowTitle("QRStream — Frame Rate Warning")
+            dlg.setIcon(QMessageBox.Icon.Warning)
+            dlg.setText(warn_msg)
+            dlg.setStandardButtons(
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No)
+            dlg.setDefaultButton(QMessageBox.StandardButton.No)
+            dlg.setStyleSheet(_DARK_QSS)
+            result = dlg.exec()
+            if result != QMessageBox.StandardButton.Yes:
+                state.request_cancel()
+                return
 
         window = _QRStreamWindow(cache, state, fps, config)
         window.show()
