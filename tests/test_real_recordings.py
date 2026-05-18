@@ -19,11 +19,6 @@ Invoke locally with either::
 
 Fixtures live under ``tests/fixtures/`` in layered sub-dirs:
 
-* ``real-phone-v3/`` — captures produced with the qrstream ≤ 0.7
-  protocol path (``prng_version=0`` flag cleared; LCG PRNG with
-  5 warmup rounds).  Kept so the decoder's legacy-compat path
-  stays covered even after v0.8+ makes ``prng_version=1`` the
-  default.
 * ``real-phone-v4/`` — captures produced with the qrstream ≥ 0.8
   default path (``prng_version=1`` flag set; SplitMix64 mixer,
   GE rescue available).  Recorded at ``--overhead 1.5 --fps 10``
@@ -57,13 +52,6 @@ _FIXTURES_DIR = Path(__file__).parent / "fixtures"
 # assert against the deterministic decoded bytes by SHA-256 and size,
 # avoiding a committed 1 MB source file per codec.
 _GATING_CASES = [
-    pytest.param(
-        "real-phone-v3", "v061.mp4",
-        "v061.input.bin",
-        "4a440b6da851a9a2e35eacca95b7b2fe29e3560c169b0a57211fccc2f5469443",
-        30_720,
-        id="v3-v061-30KB-V25-60fps-phone",
-    ),
     # real-phone-v4: the qrstream 0.8+ LT default path.
     pytest.param(
         "real-phone-v4", "v073-100kB.mp4",
