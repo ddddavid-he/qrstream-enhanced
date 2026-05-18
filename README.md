@@ -145,11 +145,13 @@ qrstream decode <video> -o output_file [options]
 | `--output-mode` | `auto` | Progress/status rendering: `auto`, `log`, `quiet`, or `verbose` (same as encode) |
 | `-v, --verbose` | - | Alias for `--output-mode verbose` (kept for backward compatibility) |
 
-### Calibrate (Auto-calibrate Channel Parameters)
+### Calibrate (Auto-calibrate Channel Parameters) — *experimental*
 
 ```bash
 qrstream calibrate [--display | -o output.mp4 | -i video.mp4] [options]
 ```
+
+> **Note:** `calibrate` is experimental and may change in future releases.
 
 Without a mode argument, `calibrate` defaults to `--display` (play a calibration sequence on screen).
 

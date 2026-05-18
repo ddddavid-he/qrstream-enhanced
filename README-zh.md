@@ -143,11 +143,13 @@ qrstream decode <video> -o output_file [options]
 | `--output-mode` | `auto` | 进度/状态渲染方式：`auto`、`log`、`quiet`、`verbose`（与编码端同） |
 | `-v, --verbose` | - | `--output-mode verbose` 的别名（向后兼容保留） |
 
-### 校准（自动校准信道参数）
+### 校准（自动校准信道参数） — *实验性*
 
 ```bash
 qrstream calibrate [--display | -o output.mp4 | -i video.mp4] [options]
 ```
+
+> **注意：** `calibrate` 为实验性功能，后续版本中接口可能变更。
 
 不带模式参数时，`calibrate` 默认为 `--display`（在屏幕上播放校准序列）。
 
