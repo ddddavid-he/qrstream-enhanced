@@ -356,7 +356,17 @@ class SharedFrameBuffer:
 
     def put_packed(self, index: int, packed: np.ndarray) -> None:
         """Write a packed frame (called from producer subprocess)."""
+        if index < 0 or index >= self.total_frames:
+            raise IndexError(
+                f"frame index {index} out of range [0, {self.total_frames})"
+            )
         flat = np.asarray(packed, dtype=np.uint8).ravel()
+        if flat.nbytes != self.frame_bytes:
+            raise ValueError(
+                f"packed frame size {flat.nbytes} does not match "
+                f"expected {self.frame_bytes} bytes "
+                f"(module_side={self.module_side}, row_bytes={self.row_bytes})"
+            )
         offset = self._flags_size + index * self.frame_bytes
         self._shm.buf[offset:offset + self.frame_bytes] = flat.tobytes()
         # Set flag *after* data is fully written.
@@ -400,6 +410,25 @@ class SharedProducerState:
         self._done = _mp.Event()
         self._cancel = _mp.Event()
         self._started = _mp.Value('d', 0.0)
+        # Error flag: 0 = ok, 1 = producer failed.
+        self._error_flag = _mp.Value('i', 0)
+        # Truncated error message (up to 512 bytes).
+        self._error_msg = _mp.Array('c', 512)
+
+    def mark_error(self, message: str) -> None:
+        """Record an error from the producer subprocess."""
+        self._error_flag.value = 1
+        encoded = message.encode('utf-8', errors='replace')[:511]
+        self._error_msg[:len(encoded)] = encoded
+
+    def has_error(self) -> bool:
+        return bool(self._error_flag.value)
+
+    def get_error(self) -> str | None:
+        if not self._error_flag.value:
+            return None
+        raw = bytes(self._error_msg).split(b'\x00', 1)[0]
+        return raw.decode('utf-8', errors='replace')
 
     def mark_produced(self, count: int = 1) -> None:
         with self._produced.get_lock():

@@ -747,12 +747,15 @@ def encode_to_video(input_path: str, output_path: str,
 
 def _display_producer_main(
     shm_name: str, total_frames: int, module_side: int,
-    payload_data: bytes, blocksize: int,
+    blocksize: int,
     num_blocks: int, lead_in_frames: int,
     border_modules: int, qr_version: int,
     high_density: bool,
     fountain_codec: str, compress: bool,
     produced_value, done_event, cancel_event, started_value,
+    error_flag, error_msg,
+    payload_data: bytes | None = None,
+    input_path: str | None = None,
 ) -> None:
     """Producer entry point running in a child process.
 
@@ -760,20 +763,35 @@ def _display_producer_main(
     signals progress through multiprocessing primitives.  This runs
     in its own process so it has an independent GIL and cannot block
     the Qt GUI thread.
+
+    Payload is supplied either as *payload_data* (bytes, cheap to
+    pickle) or via *input_path* (for mmap-backed large files, so the
+    subprocess opens the file independently and avoids copying the
+    full payload through the process boundary).
     """
     import time as _time
     buf = SharedFrameBuffer(total_frames, module_side, name=shm_name)
     started_value.value = _time.monotonic()
+    _local_payload = None  # track for cleanup in finally
     try:
+        if payload_data is not None:
+            _local_payload = payload_data
+        elif input_path is not None:
+            _local_payload, _c, _m, _r = _load_payload(
+                input_path, compress=False, force_compress=False)
+        else:
+            raise ValueError(
+                "_display_producer_main requires payload_data or input_path"
+            )
         row_bytes = buf.row_bytes
 
         if fountain_codec == 'raptorq':
             encoder = RaptorQEncoder(
-                payload_data, blocksize,
+                _local_payload, blocksize,
                 compressed=compress, alphanumeric_qr=high_density)
         else:
             encoder = LTEncoder(
-                payload_data, blocksize,
+                _local_payload, blocksize,
                 compressed=compress, alphanumeric_qr=high_density)
 
         blank_module = np.full(
@@ -805,9 +823,20 @@ def _display_producer_main(
             buf.put_packed(frame_index, packed_frame)
             with produced_value.get_lock():
                 produced_value.value += 1
+    except BaseException as exc:
+        # Propagate error details to the main process via shared state.
+        error_flag.value = 1
+        msg = f"{type(exc).__name__}: {exc}"
+        encoded = msg.encode('utf-8', errors='replace')[:511]
+        error_msg[:len(encoded)] = encoded
     finally:
         done_event.set()
         buf.close()
+        # Close mmap-backed payload if applicable.
+        if _local_payload is not None:
+            _close = getattr(_local_payload, 'close', None)
+            if callable(_close):
+                _close()
 
 
 def encode_to_display(input_path: str,
@@ -990,27 +1019,48 @@ def encode_to_display(input_path: str,
 
         blank_module = np.full((module_side, module_side), 255, dtype=np.uint8)
 
-        # Pre-generate all packed frames for the ``_module_frame_at``
-        # fallback path.  LTEncoder can regenerate any block by seed,
-        # but RaptorQEncoder requires batch generation; caching the
-        # packed bytes unifies both codecs.
-        _packed_cache: dict[int, bytes] = {}
+        # Streaming fallback for the ``_module_frame_at`` callback used
+        # by ``_DisplayVideoSink.finalize``.  Instead of pre-caching
+        # *all* encoded packets (unbounded memory for large files), we
+        # first attempt to read the packed frame from the in-process
+        # ``ModuleFrameCache`` which the producer thread already
+        # populated.  Only when a frame has been evicted (window mode)
+        # do we fall back to a streaming regeneration that keeps only
+        # the current block in memory.
+        _packed_iter_state: dict = {}
 
-        def _ensure_packed_cache():
-            """Lazily populate the packed-frame cache if not yet built."""
-            if _packed_cache:
-                return
-            encoder._seq = 0
-            for offset, (packed, _, _) in enumerate(
-                    encoder.generate_blocks(num_blocks)):
-                _packed_cache[offset] = packed
+        def _packed_for_block(block_index: int) -> bytes | None:
+            """Return the encoded packet for *block_index* via streaming.
+
+            The generator is advanced lazily — each call yields packets
+            in order.  Packets are NOT retained after delivery, so peak
+            memory is O(1) instead of O(num_blocks).
+            """
+            state_d = _packed_iter_state
+            if 'iter' not in state_d:
+                encoder._seq = 0
+                state_d['iter'] = enumerate(encoder.generate_blocks(num_blocks))
+                state_d['next'] = 0
+            # Fast path: the iterator is already past this block.
+            if block_index < state_d['next']:
+                # Block was already consumed (window cache should have it).
+                return None
+            # Advance iterator to the requested block.
+            for idx, (packed, _, _) in state_d['iter']:
+                state_d['next'] = idx + 1
+                if idx == block_index:
+                    return packed
+            return None
 
         def _module_frame_at(frame_index: int):
             if frame_index < lead_in_frames:
                 return blank_module.copy()
+            # Prefer the in-process cache (populated by the producer).
+            module_img = cache.get_module_image(frame_index)
+            if module_img is not None:
+                return module_img
             block_index = frame_index - lead_in_frames
-            _ensure_packed_cache()
-            packed = _packed_cache.get(block_index)
+            packed = _packed_for_block(block_index)
             if packed is None:
                 return blank_module.copy()
             return generate_qr_module_image(
@@ -1114,110 +1164,152 @@ def encode_to_display(input_path: str,
         # Video+display mode or test player:
         #   Use a thread because video_sink / _player cannot cross
         #   the process boundary.
+        #
+        # Memory guard: SharedFrameBuffer allocates a flat region of
+        # (total_frames × frame_bytes + total_frames) bytes with no
+        # window/eviction.  Use subprocess only when that fits within
+        # the one-hour cache limit (192 MiB by default); otherwise
+        # fall back to the thread path which uses the windowed
+        # ModuleFrameCache to stay within budget.
 
+        from .display_cache import DEFAULT_MODULE_CACHE_ONE_HOUR_LIMIT
+        _shm_bytes = plan.total_bytes + total_frames  # data + flags
         _use_subprocess = (
             output_path is None
             and _player is None
             and video_sink is None
+            and _shm_bytes <= DEFAULT_MODULE_CACHE_ONE_HOUR_LIMIT
         )
 
         if _use_subprocess:
             import multiprocessing as _mp
 
             shm_buf = SharedFrameBuffer(total_frames, module_side)
-            shared_state = SharedProducerState(total_frames)
-            cache_adapter = SharedBufferCacheAdapter(shm_buf, shared_state)
-
-            proc = _mp.Process(
-                target=_display_producer_main,
-                kwargs=dict(
-                    shm_name=shm_buf.name,
-                    total_frames=total_frames,
-                    module_side=module_side,
-                    payload_data=bytes(payload),
-                    blocksize=blocksize,
-                    num_blocks=num_blocks,
-                    lead_in_frames=lead_in_frames,
-                    border_modules=border_modules,
-                    qr_version=qr_version,
-                    high_density=high_density,
-                    fountain_codec=fountain_codec,
-                    compress=compress,
-                    produced_value=shared_state._produced,
-                    done_event=shared_state._done,
-                    cancel_event=shared_state._cancel,
-                    started_value=shared_state._started,
-                ),
-                daemon=True,
-            )
-            proc.start()
-
-            # Lightweight progress-polling thread: reads shared_state
-            # counters and drives the terminal progress bar.  Runs in
-            # the main process so it has access to the reporter, and
-            # the cost is negligible (one poll per 100 ms).
-            _poll_stop = Event()
-
-            def _poll_progress() -> None:
-                start_ts = time.monotonic()
-                while not _poll_stop.is_set():
-                    produced = shared_state.produced
-                    elapsed = max(1e-6, time.monotonic() - start_ts)
-                    speed = produced / elapsed
-                    remaining = max(0, total_frames - produced)
-                    eta = remaining / speed if speed > 1e-6 else 0.0
-                    pct = (produced / total_frames * 100) if total_frames else 100.0
-                    reporter.encode_update(
-                        progress_pct=pct,
-                        speed_fps=speed,
-                        eta_sec=eta,
-                    )
-                    if shared_state.is_done():
-                        break
-                    _poll_stop.wait(0.1)
-
-            poll_thread = Thread(target=_poll_progress, daemon=True)
-            poll_thread.start()
-
             try:
-                player_meta = DisplayMetadata(
-                    file_name=os.path.basename(input_path),
-                    file_size=raw_size,
-                    payload_size=payload_size,
-                    compressed=compress,
-                    data_blocks=int(K),
-                    total_blocks=num_blocks,
-                    block_size=blocksize,
-                    total_frames=total_frames,
-                    qr_version=qr_version,
-                    ec_level=_DEFAULT_QR_EC_LEVEL,
-                    module_side=module_side,
-                    fps=fps,
-                    high_density=high_density,
-                )
-                player_config = DisplayPlayerQtConfig(
-                    title=f"QRStream — {os.path.basename(input_path)}",
-                    metadata=player_meta,
-                )
-                play_display_qt(
-                    cache_adapter, shared_state, fps, config=player_config)
-            finally:
-                _poll_stop.set()
-                shared_state.request_cancel()
-                poll_thread.join(timeout=2)
-                proc.join(timeout=10)
-                if proc.is_alive():
-                    proc.terminate()
-                shm_buf.close()
+                shared_state = SharedProducerState(total_frames)
+                cache_adapter = SharedBufferCacheAdapter(shm_buf, shared_state)
 
-            if (report_display_done
-                    and not shared_state.cancel_requested()
-                    and shared_state.produced >= total_frames):
-                reporter.encode_done(output_path="(display)", size_bytes=0)
-            # Return a fully-populated in-process cache for callers that
-            # need it (e.g. video finalization).  For pure display mode
-            # the caller typically ignores the return value.
-            return cache_adapter  # type: ignore[return-value]
+                # Choose how to pass payload to the subprocess:
+                # - bytes/compressed payload: pass directly (pickle is
+                #   cheap for bytes, no extra I/O, guarantees consistency).
+                # - mmap-backed large file: pass input_path so the
+                #   subprocess opens the file independently, avoiding a
+                #   full-file copy through the process boundary.
+                if used_mmap:
+                    _sub_payload_kw = dict(input_path=input_path)
+                else:
+                    _sub_payload_kw = dict(
+                        payload_data=bytes(payload))
+
+                proc = _mp.Process(
+                    target=_display_producer_main,
+                    kwargs=dict(
+                        shm_name=shm_buf.name,
+                        total_frames=total_frames,
+                        module_side=module_side,
+                        blocksize=blocksize,
+                        num_blocks=num_blocks,
+                        lead_in_frames=lead_in_frames,
+                        border_modules=border_modules,
+                        qr_version=qr_version,
+                        high_density=high_density,
+                        fountain_codec=fountain_codec,
+                        compress=compress,
+                        produced_value=shared_state._produced,
+                        done_event=shared_state._done,
+                        cancel_event=shared_state._cancel,
+                        started_value=shared_state._started,
+                        error_flag=shared_state._error_flag,
+                        error_msg=shared_state._error_msg,
+                        **_sub_payload_kw,
+                    ),
+                    daemon=True,
+                )
+                proc.start()
+
+                # Lightweight progress-polling thread: reads shared_state
+                # counters and drives the terminal progress bar.  Runs in
+                # the main process so it has access to the reporter, and
+                # the cost is negligible (one poll per 100 ms).
+                _poll_stop = Event()
+
+                def _poll_progress() -> None:
+                    start_ts = time.monotonic()
+                    while not _poll_stop.is_set():
+                        produced = shared_state.produced
+                        elapsed = max(1e-6, time.monotonic() - start_ts)
+                        speed = produced / elapsed
+                        remaining = max(0, total_frames - produced)
+                        eta = remaining / speed if speed > 1e-6 else 0.0
+                        pct = (produced / total_frames * 100) if total_frames else 100.0
+                        reporter.encode_update(
+                            progress_pct=pct,
+                            speed_fps=speed,
+                            eta_sec=eta,
+                        )
+                        if shared_state.is_done():
+                            break
+                        _poll_stop.wait(0.1)
+
+                poll_thread = Thread(target=_poll_progress, daemon=True)
+                poll_thread.start()
+
+                try:
+                    player_meta = DisplayMetadata(
+                        file_name=os.path.basename(input_path),
+                        file_size=raw_size,
+                        payload_size=payload_size,
+                        compressed=compress,
+                        data_blocks=int(K),
+                        total_blocks=num_blocks,
+                        block_size=blocksize,
+                        total_frames=total_frames,
+                        qr_version=qr_version,
+                        ec_level=_DEFAULT_QR_EC_LEVEL,
+                        module_side=module_side,
+                        fps=fps,
+                        high_density=high_density,
+                    )
+                    player_config = DisplayPlayerQtConfig(
+                        title=f"QRStream — {os.path.basename(input_path)}",
+                        metadata=player_meta,
+                    )
+                    play_display_qt(
+                        cache_adapter, shared_state, fps, config=player_config)
+                finally:
+                    _poll_stop.set()
+                    shared_state.request_cancel()
+                    poll_thread.join(timeout=2)
+                    proc.join(timeout=10)
+                    if proc.is_alive():
+                        proc.terminate()
+
+                if (report_display_done
+                        and not shared_state.cancel_requested()
+                        and shared_state.produced >= total_frames):
+                    reporter.encode_done(output_path="(display)", size_bytes=0)
+
+                # Check for subprocess errors after the player has closed.
+                if shared_state.has_error():
+                    err_detail = shared_state.get_error() or "unknown error"
+                    raise RuntimeError(
+                        f"Display producer subprocess failed: {err_detail}"
+                    )
+                if proc.exitcode and proc.exitcode != 0:
+                    raise RuntimeError(
+                        f"Display producer subprocess exited with code "
+                        f"{proc.exitcode}"
+                    )
+
+                # Pure display mode — the caller typically ignores the
+                # return value.  Return an empty but correctly-typed
+                # cache instead of copying all frames out of shared
+                # memory (which would double peak memory for no
+                # benefit).  The shm is released in the outer finally.
+                cache.mark_done()
+                return cache
+            finally:
+                shm_buf.close()
 
         # ── Thread-based producer (video output / test player) ───
 
