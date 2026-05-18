@@ -86,10 +86,19 @@ jobs:
         with:
           enable-cache: true
 
+      - name: Determine version from VCS
+        id: version
+        run: |
+          pip install --quiet setuptools-scm
+          VER=$(python -m setuptools_scm)
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+
       - name: Patch for headless build
         run: python scripts/patch_headless.py
 
       - name: Build headless distributions
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ steps.version.outputs.ver }}
         run: uv build
 
       - name: Publish to PyPI
