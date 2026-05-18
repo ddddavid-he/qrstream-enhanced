@@ -23,33 +23,12 @@ PRNG_A = 16807
 PRNG_M = (1 << 31) - 1
 PRNG_MAX_RAND = PRNG_M - 1
 
-# Number of LCG iterations to run before sampling the degree, for
-# the legacy ``prng_version=0`` code path.
-# Sequential seeds (1, 2, 3, ...) produce tiny PRNG outputs that all
-# map to the first CDF bucket. Warmup spreads the state across
-# [0, M).  See ``splitmix64_mix`` for the qrstream ≥ 0.8 replacement
-# that doesn't rely on warmup.
-PRNG_WARMUP_ROUNDS = 5
-
-
-# ── SplitMix64 seed mixer (prng_version=1, qrstream ≥ 0.8) ────────
+# ── SplitMix64 seed mixer (qrstream ≥ 0.8) ────────────────────────
 #
-# The legacy ``prng_version=0`` path feeds raw sequential seeds
-# 1, 2, 3, … into a 31-bit LCG with 5 warmup rounds.  LCG state is
-# linear in its input, so consecutive small seeds produce highly
-# correlated first outputs — which under the LT degree distribution
-# translates to a peeling graph with too few degree-1 check nodes
-# at the front of the block stream.  Empirically this makes K=1827
-# stall at ~12% recovery when fed ≤1.5×K sequential blocks (the
-# user-facing ``qrs encode --overhead 1.5`` failure this fix
-# targets).
-#
-# ``splitmix64_mix`` replaces the warmup loop with a single-shot
-# non-linear scrambler (Steele/Lea 2014, used in JDK
-# ``SplittableRandom``).  Benchmarked against Knuth / Murmur3 /
-# wyhash variants in historical mixing experiments; SplitMix64 matches or
-# beats all of them on LT convergence across K ∈ {328, 1024, 1827,
-# 2048, 4096} while costing only 3 multiplies + 3 xor-shifts.
+# Sequential seeds 1, 2, 3, … should first be run through a non-linear
+# scrambler before they seed the 31-bit LCG. Without that mixer the LT
+# graph is overly correlated near the start of the stream and recovery
+# quality drops sharply at low overhead.
 _SPLITMIX_MASK = (1 << 64) - 1
 _SPLITMIX_MUL0 = 0x9E3779B97F4A7C15  # golden-ratio odd constant
 _SPLITMIX_MUL1 = 0xBF58476D1CE4E5B9
@@ -107,29 +86,16 @@ def gen_rsd_cdf(k, delta, c):
 class PRNG:
     """Linear congruential PRNG for deterministic block selection.
 
-    ``prng_version`` selects how ``seed`` is mapped to the LCG initial
-    state:
-
-    * 0 (legacy, qrstream ≤ 0.7): set ``state = seed`` and run
-      :data:`PRNG_WARMUP_ROUNDS` LCG iterations before degree
-      sampling.  Kept so decoders can replay videos produced by
-      older encoders (flag bit 0x04 cleared).
-
-    * 1 (default, qrstream ≥ 0.8): apply :func:`splitmix64_mix` to
-      ``seed`` and use the result directly as the LCG state.  No
-      warmup — the mixer's avalanche already decorrelates
-      consecutive seeds.
+    The public ``seed`` is first mixed via :func:`splitmix64_mix`
+    before feeding the 31-bit LCG so consecutive seeds yield distinct
+    LT source-block schedules.
     """
 
-    def __init__(self, K, delta=DEFAULT_DELTA, c=DEFAULT_C,
-                 prng_version: int = 1):
+    def __init__(self, K, delta=DEFAULT_DELTA, c=DEFAULT_C):
         if K <= 0:
             raise ValueError(f"K must be positive, got {K}")
-        if prng_version not in (0, 1):
-            raise ValueError(f"Unsupported prng_version: {prng_version}")
         self.state = None
         self.K = K
-        self.prng_version = prng_version
         self.cdf = gen_rsd_cdf(K, delta, c)
 
     def _get_next(self):
@@ -151,20 +117,7 @@ class PRNG:
         if seed is not None:
             self.state = seed
         blockseed = self.state
-        if self.prng_version == 0:
-            # Legacy warmup: spread the LCG state across [0, M) so that
-            # sequential seeds don't all land in the same CDF bucket.
-            # Insufficient to fully decorrelate; see the module-level
-            # rationale for ``splitmix64_mix``.
-            #
-            # TODO(v0.10.0): drop this branch together with the
-            # prng_version=0 support. See ``protocol.py`` for the
-            # full removal checklist.
-            for _ in range(PRNG_WARMUP_ROUNDS):
-                self._get_next()
-        else:
-            # prng_version == 1: single-shot non-linear mix.
-            self.state = splitmix64_mix(blockseed)
+        self.state = splitmix64_mix(blockseed)
         d = self._sample_d()
         have = 0
         nums = set()

@@ -70,7 +70,9 @@ class TestV3PackUnpack:
             seed=7, block_seq=3, data=data,
         )
         corrupted = bytearray(packed)
-        corrupted[1] ^= 0xFF
+        # Corrupt a header byte that doesn't affect the version or flags
+        # fields — byte 2 is the start of the filesize field.
+        corrupted[2] ^= 0xFF
         with pytest.raises(ValueError, match="CRC32 mismatch"):
             unpack(bytes(corrupted))
 

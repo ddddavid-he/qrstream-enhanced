@@ -178,8 +178,7 @@ class LTDecoder:
             self.K = block_count
             self.compressed = compressed
             self.block_graph = BlockGraph(self.K)
-            self.prng = PRNG(self.K, delta=self.delta, c=self.c,
-                             prng_version=self.prng_version)
+            self.prng = PRNG(self.K, delta=self.delta, c=self.c)
             self.initialized = True
         else:
             if header.version != self.protocol_version:
@@ -914,17 +913,15 @@ def _try_decode_qr_payload(
     Strategies (tried in order):
       1) base45 (current default for high-density / alphanumeric mode)
       2) base64 (standard byte mode)
-      3) COBS/latin-1 (legacy pre-0.6 high-density mode)
 
     Returns ``(block_bytes, seed, is_alphanumeric)`` on success, or
     ``None`` when no strategy produces a valid protocol block.
     """
-    from .protocol import base45_decode, cobs_decode
+    from .protocol import base45_decode
 
     strategies = (
         (True,  lambda d: _try_base45(d, base45_decode)),
         (False, _try_base64),
-        (False, lambda d: _try_cobs(d, cobs_decode)),
     )
     for is_alpha, decode_fn in strategies:
         candidate = decode_fn(qr_data)
@@ -951,19 +948,6 @@ def _try_base64(qr_data: str) -> bytes | None:
     try:
         return base64.b64decode(qr_data)
     except (ValueError, base64.binascii.Error):
-        return None
-
-
-def _try_cobs(qr_data: str, cobs_decode_fn) -> bytes | None:
-    """Try to decode QR payload as COBS-encoded binary (latin-1 → COBS decode).
-
-    Retained for backward compatibility with videos produced by
-    pre-0.6 qrstream releases.
-    """
-    try:
-        raw = qr_data.encode('latin-1')
-        return cobs_decode_fn(raw)
-    except (ValueError, UnicodeEncodeError):
         return None
 
 
@@ -2490,12 +2474,9 @@ def _decode_into_decoder(blocks, verbose=False,
     # internally by the raptorq library and there is no peeling graph
     # to rescue.
     #
-    # TODO(v0.10.0): the main reason peeling fails on a post-0.8
-    # stream is legacy prng_version=0 encoding. Once v0 support is
-    # dropped (see ``protocol.py``), revisit whether the rescue is
-    # still worth carrying — native v1 streams converge above the
-    # CLI's ``_MIN_OVERHEAD`` floor, so GE would only help
-    # overhead-below-floor edge cases.
+    # Keep this as a safety net for low-overhead LT edge cases where
+    # peeling stalls even though the surviving equations still span the
+    # missing source blocks.
     if (decoder.initialized and not decoder.done
             and not isinstance(decoder, RaptorQDecoder)):
         rescued = decoder.try_gaussian_rescue()

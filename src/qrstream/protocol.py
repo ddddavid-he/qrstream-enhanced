@@ -6,10 +6,8 @@ Block layout (V3 LT / V4 RaptorQ, 28 bytes overhead):
 
 QR-encoding flag (flag bit 0x02 in the header):
     - 0: base64 (standard mode, ASCII, pure byte-mode QR)
-    - 1: high-density mode. Currently implemented with base45
-      (QR alphanumeric mode). Older videos produced by qrstream <= 0.5
-      used COBS+latin-1 here; the decoder's multi-strategy try chain
-      keeps those playable.
+    - 1: high-density mode implemented with base45
+      (QR alphanumeric mode)
 
 The flag only tells the decoder which decoders to try first for the
 on-wire QR payload. It does NOT change the LT/CRC layout at all.
@@ -24,65 +22,6 @@ import struct
 import zlib
 from dataclasses import dataclass
 from math import ceil
-
-
-# ── COBS (legacy decoder support only) ───────────────────────────
-# COBS was the pre-0.6 high-density encoding. It is retained so that
-# videos produced by older versions can still be decoded.  New
-# encoders no longer emit COBS payloads.
-
-def cobs_encode(data: bytes) -> bytes:
-    """COBS-encode data: output contains no \x00 bytes.
-
-    Overhead is at most 1 byte per 254 input bytes (~0.4%).
-    Still exported for backward-compatible test fixtures; new code
-    should use :func:`base45_encode` instead.
-    """
-    output = bytearray()
-    idx = 0
-    length = len(data)
-    while idx <= length:
-        group = bytearray()
-        while idx < length and data[idx] != 0 and len(group) < 254:
-            group.append(data[idx])
-            idx += 1
-        if idx < length and data[idx] == 0:
-            output.append(len(group) + 1)
-            output.extend(group)
-            idx += 1
-        else:
-            if len(group) == 254:
-                output.append(0xFF)
-                output.extend(group)
-            else:
-                output.append(len(group) + 1)
-                output.extend(group)
-                break
-    return bytes(output)
-
-
-def cobs_decode(data: bytes) -> bytes:
-    """Decode COBS-encoded data back to original bytes.
-
-    Used by the decoder when the incoming video was produced by a
-    pre-0.6 qrstream version.
-    """
-    output = bytearray()
-    idx = 0
-    length = len(data)
-    while idx < length:
-        code = data[idx]
-        if code == 0:
-            raise ValueError("COBS decode error: unexpected zero byte")
-        idx += 1
-        for _ in range(code - 1):
-            if idx >= length:
-                raise ValueError("COBS decode error: truncated data")
-            output.append(data[idx])
-            idx += 1
-        if code < 0xFF and idx < length:
-            output.append(0)
-    return bytes(output)
 
 
 # ── Base45 (RFC 9285, QR alphanumeric mode) ──────────────────────
@@ -173,39 +112,6 @@ V3_VERSION = 0x03
 V3_HEADER_SIZE = 24
 V3_TRAILING_CRC_SIZE = 4
 V3_BLOCK_OVERHEAD = V3_HEADER_SIZE + V3_TRAILING_CRC_SIZE
-
-
-# TODO(v0.10.0): drop legacy prng_version=0 support.
-#
-# The LCG-warmup PRNG schedule (flag bit 0x04 cleared) was the
-# default through qrstream ≤ 0.7 and is retained in v0.8+ only so
-# videos captured with older encoders keep decoding.  When v0.10.0
-# ships:
-#
-#   * remove the ``prng_version`` parameter from ``pack_v3`` and
-#     treat flag bit 0x04 as "must be 1"; reject blocks with it
-#     cleared as an unsupported legacy protocol (similar to how V2
-#     was dropped in v0.6 — see commit 1a60f48).
-#   * delete the ``prng_version == 0`` branch in
-#     :class:`qrstream.lt_codec.PRNG` (the legacy warmup loop) and
-#     the ``prng_version`` constructor arg on :class:`LTEncoder`
-#     and :class:`LTDecoder`.
-#   * delete :data:`qrstream.lt_codec.PRNG_WARMUP_ROUNDS` and the
-#     docstring comments that contrast v0 vs v1 behaviour.
-#   * update :func:`qrstream.decoder._decode_into_decoder` to skip
-#     the Gauss-Jordan rescue pass for native v1 streams (peeling
-#     always converges above the ``_MIN_OVERHEAD`` CLI floor); keep
-#     the GE pass only if we still want a safety net for
-#     overhead-below-floor edge cases.
-#   * drop ``tests/test_prng_v2.py::test_legacy_prng_v0_blocks_still_decode``
-#     and the legacy halves of the other parametrized tests;
-#     rewrite :mod:`tests.test_gaussian_rescue` fixtures to produce
-#     a pathological v1 stall synthetically instead of relying on
-#     v0 encoders.
-#
-# Two-minor-version deprecation window (v0.8 introduces v1,
-# v0.10 removes v0) gives users two releases' notice to re-encode
-# any long-lived v0 videos they care about.
 
 # QR byte-mode capacity (ISO/IEC 18004), keyed by (version, ec_level).
 # ec_level: 0=L, 1=M, 2=Q, 3=H.
@@ -314,22 +220,19 @@ class V3Header:
     seed: int
     block_seq: int
     crc32: int
-    # Flag bit 0x02: set when the on-wire QR payload is encoded in a
-    # high-density mode (base45 today, historically COBS).  Kept under
-    # the legacy ``binary_qr`` name so existing API consumers don't
-    # break; use the ``alphanumeric_qr`` alias for new code.
+    # Flag bit 0x02: set when the on-wire QR payload is encoded in
+    # high-density mode (base45).  Kept under the legacy ``binary_qr``
+    # name so existing API consumers don't break; use the
+    # ``alphanumeric_qr`` alias for new code.
     binary_qr: bool = False
-    # Flag bit 0x04: PRNG schema version.
-    #   0 — legacy LCG with 5 warmup rounds (qrstream ≤ 0.7)
-    #   1 — SplitMix64 seed-mixer then same LCG output stream
-    # Written by encoders v0.8+, defaults to 0 when parsing older
-    # videos so legacy fixtures keep decoding.
-    prng_version: int = 0
+    # Flag bit 0x04 is mandatory for supported V3 streams and denotes
+    # the SplitMix64-seeded LT schedule introduced in qrstream 0.8.
+    prng_version: int = 1
     reserved: int = 0
 
     @property
     def alphanumeric_qr(self) -> bool:
-        """Alias for the high-density flag (base45 / legacy COBS)."""
+        """Alias for the high-density flag (base45)."""
         return self.binary_qr
 
 
@@ -345,16 +248,11 @@ def pack_v3(filesize: int, blocksize: int, block_count: int,
             seed: int, block_seq: int, data: bytes,
             compressed: bool = False,
             binary_qr: bool = False,
-            alphanumeric_qr: bool | None = None,
-            prng_version: int = 0) -> bytes:
+            alphanumeric_qr: bool | None = None) -> bytes:
     """Serialize a V3 block (header + data + trailing CRC32) to bytes.
 
     ``binary_qr`` and ``alphanumeric_qr`` are aliases for the
     high-density flag bit (0x02). Prefer ``alphanumeric_qr`` in new code.
-
-    ``prng_version`` selects the seed → PRNG-state mapping used by
-    the LT codec. 0 = legacy LCG warmup, 1 = SplitMix64 mixer
-    (default in qrstream 0.8+). Written as flag bit 0x04.
     """
     high_density = _resolve_alphanumeric_flag(binary_qr, alphanumeric_qr)
     if filesize > 0xFFFFFFFFFFFFFFFF:
@@ -365,16 +263,13 @@ def pack_v3(filesize: int, blocksize: int, block_count: int,
         raise ValueError("V3 blocksize exceeds uint16 limit")
     if len(data) > blocksize:
         raise ValueError("Block data longer than blocksize")
-    if prng_version not in (0, 1):
-        raise ValueError(f"Unsupported prng_version: {prng_version}")
-
     flags = 0x00
     if compressed:
         flags |= 0x01
     if high_density:
         flags |= 0x02
-    if prng_version == 1:
-        flags |= 0x04
+    # qrstream 0.10+ only accepts the SplitMix64 LT schedule.
+    flags |= 0x04
 
     header = struct.pack(
         '>BBQHIIHH',
@@ -404,6 +299,11 @@ def unpack_v3(raw: bytes, skip_crc: bool = False) -> tuple[V3Header, bytes]:
     data = raw[V3_HEADER_SIZE:-V3_TRAILING_CRC_SIZE]
     stored_crc = struct.unpack('>I', raw[-V3_TRAILING_CRC_SIZE:])[0]
 
+    if (flags & 0x04) == 0:
+        raise ValueError(
+            "Unsupported legacy V3 block: prng_version=0 was removed in qrstream 0.10"
+        )
+
     if len(data) != blocksize:
         raise ValueError(
             f"V3 data length mismatch: expected {blocksize}, got {len(data)}")
@@ -425,7 +325,7 @@ def unpack_v3(raw: bytes, skip_crc: bool = False) -> tuple[V3Header, bytes]:
         block_seq=block_seq,
         crc32=stored_crc,
         binary_qr=bool(flags & 0x02),
-        prng_version=1 if (flags & 0x04) else 0,
+        prng_version=1,
         reserved=reserved,
     )
     return header, data
@@ -657,6 +557,5 @@ __all__ = [
     "V4Header",
     "pack_v4", "unpack_v4",
     "auto_blocksize",
-    "cobs_encode", "cobs_decode",
     "base45_encode", "base45_decode",
 ]

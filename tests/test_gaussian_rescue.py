@@ -5,9 +5,9 @@ degree-1 check node but the surviving equations still collectively
 span the unknown source blocks — :meth:`LTDecoder.try_gaussian_rescue`
 must finish decoding without needing additional encoded frames.
 
-We construct stalls on purpose by forcing the legacy
-``prng_version=0`` schedule at low overhead on K=1827 (the exact
-user-reported failure). The GE pass must rescue that.
+We construct stalls by using very low overhead (1.05×) so that peeling
+cannot converge on its own, then verify that the GE pass rescues the
+decode.
 """
 
 from __future__ import annotations
@@ -24,11 +24,10 @@ def _payload(size: int) -> bytes:
     return bytes(rng.randrange(256) for _ in range(size))
 
 
-def test_gaussian_rescue_finishes_stalled_legacy_stream():
-    """K=1827 at overhead=1.5 on prng_version=0 is the exact user
-    report.  Peeling alone stalls at ~225/1827.  GE rescue must
-    finish it."""
-    K = 1827
+def test_gaussian_rescue_finishes_stalled_stream():
+    """K=512 at overhead=1.05 causes peeling to stall (not enough
+    degree-1 check nodes).  GE rescue must finish it."""
+    K = 512
     blocksize = 128
     payload = _payload(K * blocksize)
 
@@ -37,10 +36,9 @@ def test_gaussian_rescue_finishes_stalled_legacy_stream():
         blocksize=blocksize,
         compressed=False,
         alphanumeric_qr=True,
-        prng_version=0,   # force the buggy schedule
     )
     dec = LTDecoder()
-    for packed, _seed, _seq in enc.generate_blocks(int(K * 1.5)):
+    for packed, _seed, _seq in enc.generate_blocks(int(K * 1.05)):
         try:
             dec.decode_bytes(packed)
         except (ValueError, struct.error):
@@ -48,10 +46,9 @@ def test_gaussian_rescue_finishes_stalled_legacy_stream():
 
     # Sanity: peeling really did stall below K.
     assert dec.num_recovered < K, (
-        f"Expected peeling to stall at K={K} overhead=1.5 on "
-        f"prng_version=0, but it already recovered "
-        f"{dec.num_recovered}/{K} via peeling alone. Test premise no "
-        f"longer holds — pick a more pathological fixture."
+        f"Expected peeling to stall at K={K} overhead=1.05, but it "
+        f"already recovered {dec.num_recovered}/{K} via peeling alone. "
+        f"Test premise no longer holds — pick a lower overhead."
     )
 
     rescued = dec.try_gaussian_rescue()
@@ -71,7 +68,7 @@ def test_gaussian_rescue_is_noop_when_peeling_already_done():
     K = 64
     blocksize = 64
     payload = _payload(K * blocksize)
-    enc = LTEncoder(payload, blocksize=blocksize, prng_version=1)
+    enc = LTEncoder(payload, blocksize=blocksize)
     dec = LTDecoder()
     for packed, _seed, _seq in enc.generate_blocks(int(K * 2.0)):
         done, _ = dec.decode_bytes(packed)
@@ -92,7 +89,7 @@ def test_gaussian_rescue_gives_up_cleanly_without_enough_info():
     K = 64
     blocksize = 64
     payload = _payload(K * blocksize)
-    enc = LTEncoder(payload, blocksize=blocksize, prng_version=1)
+    enc = LTEncoder(payload, blocksize=blocksize)
     dec = LTDecoder()
     for packed, _seed, _seq in enc.generate_blocks(K // 2):
         try:
@@ -105,27 +102,25 @@ def test_gaussian_rescue_gives_up_cleanly_without_enough_info():
     assert not dec.is_done()
 
 
-def test_decode_blocks_auto_triggers_rescue_on_stalled_legacy_stream():
+def test_decode_blocks_auto_triggers_rescue_on_stalled_stream():
     """The top-level :func:`decode_blocks` must auto-invoke GE
     rescue when peeling finishes without converging — that's how
-    users whose historical (prng_version=0) videos benefit from
-    the fallback without any flag flip."""
-    K = 1827
-    blocksize = 64
+    users benefit from the fallback without any flag flip."""
+    K = 512
+    blocksize = 128
     payload = _payload(K * blocksize)
     enc = LTEncoder(
         payload,
         blocksize=blocksize,
         compressed=False,
         alphanumeric_qr=True,
-        prng_version=0,
     )
-    # Collect 1.5×K encoded blocks — peeling alone can't finish this
-    # at prng_version=0, as the regression tests prove.
-    blocks = [packed for packed, _, _ in enc.generate_blocks(int(K * 1.5))]
+    # Collect 1.05×K encoded blocks — peeling alone can't finish this
+    # at such low overhead.
+    blocks = [packed for packed, _, _ in enc.generate_blocks(int(K * 1.05))]
 
     recovered = decode_blocks(blocks, verbose=False)
     assert recovered == payload, (
-        "decode_blocks must finish a stalled legacy stream via the "
+        "decode_blocks must finish a stalled stream via the "
         "built-in GE rescue path."
     )

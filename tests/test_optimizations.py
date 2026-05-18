@@ -11,7 +11,6 @@ from qrstream.lt_codec import (
 )
 from qrstream.protocol import (
     pack_v3, unpack,
-    cobs_encode, cobs_decode,
     base45_encode, base45_decode,
 )
 from qrstream import __version__
@@ -93,16 +92,6 @@ class TestQrGeneration:
                        seed=1, block_seq=0, data=b'\xAA' * 64)
         img = generate_qr_image(data, ec_level=1, version=20,
                                 alphanumeric=False)
-        assert img is not None
-        assert img.shape[2] == 3
-
-    def test_legacy_binary_mode_alias(self):
-        """The deprecated ``binary_mode`` kwarg still works."""
-        data = pack_v3(filesize=100, blocksize=64, block_count=2,
-                       seed=1, block_seq=0, data=b'\xAA' * 64,
-                       binary_qr=True)
-        img = generate_qr_image(data, ec_level=1, version=20,
-                                binary_mode=True)
         assert img is not None
         assert img.shape[2] == 3
 
@@ -220,107 +209,43 @@ class TestZxingDetector:
         recovered = base45_decode(qr_str)
         assert recovered == packed
 
-    def test_legacy_cobs_video_decoder_fallback(self):
-        """Decoder worker still accepts COBS/latin-1 payloads (legacy videos)."""
-        from qrstream.decoder import _worker_detect_qr
-        # Simulate a pre-0.6 video frame: cobs-encoded payload embedded
-        # as latin-1 string. We skip the QR image round-trip since
-        # generate_qr_image no longer emits COBS; instead we build the
-        # QR image directly via qrcode lib and hand the ndarray to
-        # the worker (the worker accepts frames as ndarrays).
-        import cv2
-        import numpy as np
-        qrcode = pytest.importorskip(
-            "qrcode",
-            reason="qrcode library not installed; legacy COBS frame test skipped",
-        )
-        from qrcode.constants import ERROR_CORRECT_M
-
-        block_data = bytes((i * 13 + 5) % 256 for i in range(64))
-        packed = pack_v3(filesize=64, blocksize=64, block_count=1,
-                         seed=200, block_seq=0, data=block_data,
-                         alphanumeric_qr=True)
-        # Legacy encoder path: cobs → latin-1 string → qrcode.add_data(str)
-        cobs_payload = cobs_encode(packed).decode('latin-1')
-        q = qrcode.QRCode(version=None, error_correction=ERROR_CORRECT_M,
-                          box_size=10, border=4)
-        q.add_data(cobs_payload)
-        q.make(fit=True)
-        pil = q.make_image(fill_color='black', back_color='white')
-        img = cv2.cvtColor(np.array(pil.convert('RGB')), cv2.COLOR_RGB2BGR)
-
-        frame_idx, candidate, seed = _worker_detect_qr((0, img))
-        assert candidate is not None, "legacy COBS path should still decode"
-        assert seed == 200
 
 
-class TestCobs:
-    """Test COBS encode/decode correctness (legacy decoder support)."""
+class TestBase45:
+    """Test base45 encode/decode correctness."""
 
     def test_roundtrip_simple(self):
-        assert cobs_decode(cobs_encode(b'Hello, World!')) == b'Hello, World!'
+        assert base45_decode(base45_encode(b'Hello, World!')) == b'Hello, World!'
 
     def test_roundtrip_with_nulls(self):
         data = b'\x00\x00\x00'
-        encoded = cobs_encode(data)
-        assert b'\x00' not in encoded
-        assert cobs_decode(encoded) == data
+        assert base45_decode(base45_encode(data)) == data
 
     def test_roundtrip_mixed(self):
         data = b'\x01\x00\x02\x00\x03'
-        encoded = cobs_encode(data)
-        assert b'\x00' not in encoded
-        assert cobs_decode(encoded) == data
-
-    def test_roundtrip_no_nulls(self):
-        data = b'\x01\x02\x03\x04\x05'
-        encoded = cobs_encode(data)
-        assert b'\x00' not in encoded
-        assert cobs_decode(encoded) == data
+        assert base45_decode(base45_encode(data)) == data
 
     def test_roundtrip_all_bytes(self):
         data = bytes(range(256)) * 3
-        encoded = cobs_encode(data)
-        assert b'\x00' not in encoded
-        assert cobs_decode(encoded) == data
-
-    # NOTE: the previous ``test_roundtrip_random`` (os.urandom(1000))
-    # was removed: COBS is a deprecated write path and cobs_encode
-    # has a latent boundary bug when the input has a zero byte
-    # positioned exactly after a run of 254 non-zero bytes (the
-    # 0xFF-run output eats that zero). The random test hit this
-    # sporadically (~0.6 %/run on ubuntu-latest 3.13) and the fix
-    # is not worth the churn since no production code still *writes*
-    # COBS — only ``cobs_decode`` remains on the decoder fallback
-    # path, guarded by the deterministic tests above plus
-    # ``test_v3_block_roundtrip_with_cobs`` below.
+        assert base45_decode(base45_encode(data)) == data
 
     def test_empty(self):
-        assert cobs_decode(cobs_encode(b'')) == b''
+        assert base45_decode(base45_encode(b'')) == b''
 
-    def test_single_null(self):
-        data = b'\x00'
-        encoded = cobs_encode(data)
-        assert b'\x00' not in encoded
-        assert cobs_decode(encoded) == data
-
-    def test_overhead_is_small(self):
+    def test_roundtrip_random(self):
         data = random.Random(0x0BC0E5E1).randbytes(10000)
-        encoded = cobs_encode(data)
-        overhead = len(encoded) - len(data)
-        assert overhead <= ceil(len(data) / 254) + 1
+        assert base45_decode(base45_encode(data)) == data
 
-    def test_v3_block_roundtrip_with_cobs(self):
-        """COBS is no longer emitted by the encoder but must still
-        survive a roundtrip for legacy-video decoding."""
+    def test_v3_block_roundtrip_with_base45(self):
+        """base45 roundtrip through V3 block serialization."""
         block_data = random.Random(0xC0B5B10C).randbytes(64)
         packed = pack_v3(filesize=64, blocksize=64, block_count=1,
                          seed=42, block_seq=0, data=block_data,
                          alphanumeric_qr=True)
-        encoded = cobs_encode(packed)
-        assert b'\x00' not in encoded
-        decoded = cobs_decode(encoded)
+        encoded = base45_encode(packed)
+        decoded = base45_decode(encoded)
         assert decoded == packed
         header, data = unpack(decoded)
         assert header.seed == 42
         assert data == block_data
+

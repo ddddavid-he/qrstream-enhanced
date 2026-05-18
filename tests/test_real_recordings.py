@@ -81,14 +81,14 @@ _GATING_CASES = [
     ),
     # Current codec fixtures: deterministic π digits, no source file.
     pytest.param(
-        "real-phone-current", "lt-pi-1MB.mp4",
+        "real-phone-current", "v092-lt-pi-1MB.mp4",
         None,
         "7806ee47461b49ef1f578e14461b2c83c09c6d7a9a914275da1d71e9cbbf7069",
         1_000_000,
         id="current-lt-pi-1MB-phone",
     ),
     pytest.param(
-        "real-phone-current", "raptorq-pi-1MB.mp4",
+        "real-phone-current", "v092-raptorq-pi-1MB.mp4",
         None,
         "7806ee47461b49ef1f578e14461b2c83c09c6d7a9a914275da1d71e9cbbf7069",
         1_000_000,

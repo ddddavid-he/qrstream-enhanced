@@ -35,8 +35,7 @@ src/qrstream/
 ├── lt_codec.py               # [412L]  LT fountain code: PRNG, Robust Soliton, BlockGraph
 ├── raptorq_codec.py          # [499L]  RaptorQ (RFC 6330) wrapper around `raptorq` crate
 │
-├── protocol.py               # [662L]  Frame serialization: V3/V4 headers, base45, CRC32
-├── qr_utils.py               # [287L]  QR generation & detection (zxing-cpp backend)
+├── protocol.py               # [662L]  Frame serialization: V3/V4 headers, base45, CRC32├── qr_utils.py               # [287L]  QR generation & detection (zxing-cpp backend)
 │
 ├── display_cache.py          # [491L]  Bit-packed frame cache for display mode
 ├── display_player_qt.py      # [992L]  PySide6 Qt player for `--display`
@@ -145,7 +144,6 @@ Key display-mode components:
 ```
 PRNG (prng_version=1, SplitMix64)
   └─ Non-linear seed mixing, no warmup needed
-  └─ Legacy prng_version=0 (LCG + 5-round warmup) kept for test fixtures
 
 Robust Soliton Distribution (c=0.1, delta=0.5)
   └─ Ideal Soliton ρ(d) + τ(d) adjustment
@@ -183,7 +181,7 @@ Overhead defaults (`overhead_policy.py`):
 - Uses `pack_v3()` / `unpack()`; parsed into `V3Header` dataclass
 - Struct fields: `version`, `flags` (compressed/high-density/prng_version bitmask),
   `filesize`, `blocksize`, `block_count`, `seed`, `block_seq`, `reserved`
-- On-wire: base45 (default) or base64; legacy COBS kept for backward compat decode
+- On-wire: base45 (default) or base64
 
 ### V4 (RaptorQ, default ≥0.10)
 - Same 28-byte overhead layout as V3
@@ -194,7 +192,6 @@ Overhead defaults (`overhead_policy.py`):
 ### Wire encoding
 - Default: **base45** → QR alphanumeric mode (5.5 bits/char)
 - Legacy: base64 → QR byte mode (kept for backward-compatible decode)
-- Pre-0.6: COBS + latin-1 (decoder multi-strategy try chain keeps these playable)
 
 ## Calibration (`qrstream calibrate`)
 

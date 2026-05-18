@@ -76,15 +76,14 @@ def _make_random_bytes(size: int, seed: int = 0xDEADBEEF) -> bytes:
 
 
 def _roundtrip_lt(data: bytes, overhead: float = 3.5,
-                  blocksize: int | None = None,
-                  prng_version: int = 1) -> bytes | None:
+                  blocksize: int | None = None) -> bytes | None:
     """Pure LT encode→decode without QR or video I/O."""
     filesize = len(data)
     if blocksize is None:
         blocksize = max(64, min(512, filesize // 500 + 1))
     K = ceil(filesize / blocksize)
     num_blocks = int(K * overhead)
-    encoder = LTEncoder(data, blocksize, prng_version=prng_version)
+    encoder = LTEncoder(data, blocksize)
     decoder = LTDecoder()
     for packed, seed, seq in encoder.generate_blocks(num_blocks):
         done, _ = decoder.decode_bytes(packed)
@@ -162,7 +161,7 @@ class TestVideoRoundtrip:
 
         encode_to_video(
             input_path, output_path,
-            overhead=3.0, fps=10, ec_level=1, qr_version=15,
+            overhead=3.0, fps=10, qr_version=15,
             compress=False, verbose=False, workers=workers,
         )
 
@@ -215,15 +214,6 @@ class TestRoundtripMultiSize:
         data = _make_random_bytes(10 * 1024 * 1024, seed=0x10_0000)
         result = _roundtrip_lt(data, overhead=2.5)
         assert result is not None, "LT decode stalled at 10MB"
-        assert result == data
-
-    @pytest.mark.parametrize("size_kb", [50, 100, 500, 1000])
-    def test_roundtrip_prng_v0(self, size_kb):
-        """Legacy prng_version=0 path."""
-        data = _make_random_bytes(size_kb * 1024, seed=size_kb + 0x100)
-        result = _roundtrip_lt(data, prng_version=0, overhead=4.0)
-        assert result is not None, \
-            f"LT decode stalled at {size_kb}KB (prng_v0)"
         assert result == data
 
     @pytest.mark.parametrize("size_kb,blocksize", [
@@ -281,18 +271,18 @@ class TestPRNGSeedZero:
 
     def test_seed_zero_is_deterministic(self):
         """seed=0 must give the same result regardless of prior PRNG state."""
-        p = PRNG(K=200, delta=DEFAULT_DELTA, c=DEFAULT_C, prng_version=1)
+        p = PRNG(K=200, delta=DEFAULT_DELTA, c=DEFAULT_C)
         p.get_src_blocks(seed=12345)               # pollute state
         _, d1, s1 = p.get_src_blocks(seed=0)
 
-        p2 = PRNG(K=200, delta=DEFAULT_DELTA, c=DEFAULT_C, prng_version=1)
+        p2 = PRNG(K=200, delta=DEFAULT_DELTA, c=DEFAULT_C)
         _, d2, s2 = p2.get_src_blocks(seed=0)      # clean state
 
         assert (d1, s1) == (d2, s2), \
             "seed=0 result depends on prior state — if seed: bug is back"
 
     def test_seed_zero_differs_from_seed_one(self):
-        p = PRNG(K=200, delta=DEFAULT_DELTA, c=DEFAULT_C, prng_version=1)
+        p = PRNG(K=200, delta=DEFAULT_DELTA, c=DEFAULT_C)
         _, _, s0 = p.get_src_blocks(seed=0)
         _, _, s1 = p.get_src_blocks(seed=1)
         assert s0 != s1

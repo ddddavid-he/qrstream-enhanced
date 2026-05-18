@@ -51,8 +51,8 @@ real-world workflow.
 
 | File | Output SHA-256 (first 8) | Decoded size | Encoded with | Recorded | Compressed |
 |---|---|---|---|---|---|
-| `lt-pi-1MB.mp4` | `7806ee47…` | 1 000 000 B | current LT, π decimal digits, `--no-compress --qr-version 40 --fps 25 --overhead 1.2` | iPhone 15 Pro | HEVC, 640×616, CRF 28 |
-| `raptorq-pi-1MB.mp4` | `7806ee47…` | 1 000 000 B | current RaptorQ, π decimal digits, `--no-compress --qr-version 40 --fps 25 --overhead 1.1` | iPhone 15 Pro | HEVC, 840×1002, CRF 28 (crop=1040:1240:15:270 from 1080×1920 portrait) |
+| `v092-lt-pi-1MB.mp4` | `7806ee47…` | 1 000 000 B | current LT, π decimal digits, `--no-compress --qr-version 40 --fps 25 --overhead 1.2` | iPhone 15 Pro | HEVC, 640×616, CRF 28 |
+| `v092-raptorq-pi-1MB.mp4` | `7806ee47…` | 1 000 000 B | current RaptorQ, π decimal digits, `--no-compress --qr-version 40 --fps 25 --overhead 1.1` | iPhone 15 Pro | HEVC, 840×1002, CRF 28 (crop=1040:1240:15:270 from 1080×1920 portrait) |
 
 The π source is deterministic and not committed.  The tests verify
 its decoded byte stream by size plus SHA-256.
@@ -139,12 +139,12 @@ its decoded byte stream by size plus SHA-256.
        ffmpeg -i phone.mov \
            -vf "crop=1040:1240:15:270,scale=840:-2:flags=lanczos" \
            -c:v libx265 -crf 28 -preset medium -tag:v hvc1 -an \
-           raptorq-pi-1MB.mp4
+           v092-raptorq-pi-1MB.mp4
 
        # LT
        ffmpeg -i phone.mov -vf "scale=640:-2:flags=lanczos" \
            -c:v libx265 -crf 28 -preset medium -tag:v hvc1 -an \
-           lt-pi-1MB.mp4
+           v092-lt-pi-1MB.mp4
 
 ## How the tests use them
 

@@ -14,7 +14,7 @@
 ```
 
 1. **编码**：将文件（可选 zlib 压缩）分块，通过 RaptorQ（默认）或 LT 喷泉码生成冗余编码块，每块序列化为 V3/V4 协议帧，经 base45 编码后嵌入 QR 码的 alphanumeric 模式，最终输出 MP4 视频。
-2. **解码**：使用 zxing-cpp 从视频中提取 QR 码（原生 C++，快速、鲁棒、无崩溃风险），base45 解码后 CRC32 校验去除损坏帧，喂入 RaptorQ 或 LT 解码器进行恢复，重建原始文件。旧版 base64/COBS 视频（v0.6 之前）会走 fallback 路径继续兼容。
+2. **解码**：使用 zxing-cpp 从视频中提取 QR 码（原生 C++，快速、鲁棒、无崩溃风险），base45 解码后 CRC32 校验去除损坏帧，喂入 RaptorQ 或 LT 解码器进行恢复，重建原始文件。旧版 base64 视频会走 fallback 路径继续兼容。
 
 **核心优势**：
 - **RaptorQ（RFC 6330）**：默认喷泉码——系统性编码，仅需收到任意 K 个包即可高概率恢复；LT 喷泉码作为传统选项仍可使用
@@ -285,7 +285,7 @@ project-root/
 │   ├── decoder.py             # 视频帧提取 → QR 检测 → RaptorQ/LT 解码 → 文件重建
 │   ├── raptorq_codec.py       # RaptorQ（RFC 6330）编码/解码器
 │   ├── lt_codec.py            # LT 喷泉码原语（PRNG、RSD、BlockGraph、GF(2) 救援）
-│   ├── protocol.py            # V3/V4 协议序列化 + base45 编解码（解码端兼容旧版 base64/COBS）
+│   ├── protocol.py            # V3/V4 协议序列化 + base45 编解码（解码端兼容旧版 base64）
 │   ├── qr_utils.py            # QR 生成 + 检测（zxing-cpp）
 │   ├── calibrate.py           # 校准视频生成与分析
 │   ├── calibration_optimizer.py # 联合 QR version/FPS/冗余优化
@@ -356,7 +356,7 @@ Offset  Size  Field
 ```
 
 - 默认编码使用 **V4 + RaptorQ + base45 alphanumeric QR**。
-- 解码端从版本字节自动检测 V4（RaptorQ）和 V3（LT），并按 base45 → base64 → COBS 顺序尝试，保留对 v0.6 之前老视频的兼容。
+- 解码端从版本字节自动检测 V4（RaptorQ）和 V3（LT），并按 base45 → base64 顺序尝试，保留对旧版视频的兼容。
 - V3/V4 将 `filesize` 扩展为 `uint64`，`block_count`/`symbol_count` 扩展为 `uint32`，适合更大的文件和块数。
 
 ### 编码模式
@@ -365,7 +365,6 @@ Offset  Size  Field
 |------|---------|---------|----------|------|
 | Base45 alphanumeric | raw bytes → base45 → `0-9A-Z $%*+-./:` | Alphanumeric（5.5 bit/字符） | ~67%（但落在更密的 QR 模式 → **净密度更高**） | 是 |
 | Base64 | raw bytes → base64 string | Byte（8 bit/字符） | ~33% | 否（`--qr-mode base64`） |
-| COBS（legacy） | raw bytes → COBS → latin-1 string | Byte | ~0.4% | **v0.6 起移除编码路径**，仅解码端保留以兼容旧视频 |
 
 Base45（RFC 9285）成为默认是因为 QR 的 alphanumeric 模式每字符承载的 bit 比 byte 模式更多——V25/M 下 base45 的单帧载荷比 base64 大约 30%，实测视频小 20~25%、编解码快 10~20%。
 

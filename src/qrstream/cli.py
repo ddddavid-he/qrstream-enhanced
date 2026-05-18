@@ -376,17 +376,14 @@ def cmd_encode(args):
             input_path=args.file,
             overhead=args.overhead,
             fps=args.fps,
-            ec_level=args.ec_level,
             qr_version=args.qr_version,
             border=args.border,
             lead_in_seconds=args.lead_in_seconds,
             compress=not args.no_compress,
             verbose=verbose,
             workers=args.workers,
-            use_legacy_qr=args.legacy_qr,
             alphanumeric_qr=alphanumeric_qr,
             force_compress=args.force_compress,
-            auto_mask=args.auto_mask,
             reporter=reporter,
             fountain_codec=fountain_codec,
         )
@@ -602,19 +599,6 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                           f'{_MIN_OVERHEAD_LT} for lt)')
     enc.add_argument('--fps', type=int, default=10,
                      help='Frames per second in output video (default: 10)')
-    # TODO(v0.10.0): remove ``--ec-level`` entirely.  QR-level error
-    # correction is redundant in qrstream's pipeline because LT fountain
-    # ``--overhead`` already handles frame-level loss (which is the
-    # dominant failure mode on phone captures), and WeChatQRCode either
-    # decodes a QR into its payload or fails outright — EC rarely
-    # rescues a borderline frame that the detector would otherwise
-    # return ``None`` for.  The option is kept hidden in v0.8/0.9 so
-    # scripts built around the previous CLI continue to work, but users
-    # should stop setting it.  See ``encoder.encode_to_video`` for the
-    # corresponding API-level parameter which is retained for the same
-    # deprecation window.
-    enc.add_argument('--ec-level', type=int, default=1, choices=[0, 1, 2, 3],
-                     help=argparse.SUPPRESS)
     enc.add_argument('--qr-version', type=int, default=25,
                      choices=range(1, 41), metavar='N',
                      help='QR code version 1-40, controls density (default: 25)')
@@ -627,8 +611,6 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                      help='Disable zlib compression')
     enc.add_argument('--force-compress', action='store_true',
                      help='Force compression even for large V3 inputs (uses more memory)')
-    enc.add_argument('--legacy-qr', action='store_true',
-                     help='Accepted for backward compatibility; ignored.')
     enc.add_argument('--qr-mode', choices=['alphanumeric', 'base64'],
                      default='alphanumeric',
                      help='QR payload encoding: alphanumeric (default, base45 '
@@ -642,10 +624,6 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                           'or lt (legacy LT codes)')
     enc.add_argument('-w', '--workers', type=int, default=None,
                      help='Parallel workers for QR generation (default: 1; higher values may not improve performance)')
-    enc.add_argument('--auto-mask', action='store_true',
-                     help='Accepted for backward compatibility; ignored. '
-                          'zxing-cpp always evaluates all 8 ISO 18004 mask '
-                          'patterns in native C++ at negligible cost.')
     _add_output_mode_group(enc)
 
     # ── decode ────────────────────────────────────────────────────

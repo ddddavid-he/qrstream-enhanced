@@ -1,24 +1,25 @@
-"""Tests for the prng_version=1 (SplitMix64) codec path and for
-backward compatibility with prng_version=0 encoded blocks.
+"""Tests for the SplitMix64 PRNG codec path (qrstream 0.10+).
 
-The PRNG schema is carried in V3 header flag bit 0x04:
-  * cleared: legacy LCG with 5 warmup rounds (qrstream ≤ 0.7)
-  * set:     SplitMix64 seed-mixer (qrstream ≥ 0.8, default)
+As of v0.10, prng_version=0 (legacy LCG) has been removed.  Only
+prng_version=1 (SplitMix64) is supported.  The V3 header flag bit 0x04
+is now always set by pack_v3(), and unpack_v3() raises ValueError if
+the bit is cleared (rejecting legacy prng_version=0 blocks).
 
-These tests pin down the wire format of the flag bit and verify
-that both codec paths round-trip correctly.
+These tests pin down the wire format of the flag bit and verify the
+single supported codec path round-trips correctly.
 """
 
 from __future__ import annotations
 
 import random
 import struct
+import zlib
 
 import pytest
 
 from qrstream.encoder import LTEncoder
 from qrstream.decoder import LTDecoder
-from qrstream.lt_codec import PRNG, splitmix64_mix
+from qrstream.lt_codec import splitmix64_mix
 from qrstream.protocol import V3_VERSION, pack_v3, unpack_v3
 
 
@@ -62,52 +63,57 @@ def test_splitmix64_mix_decorrelates_small_seeds():
 # 2. Flag bit 0x04 on the V3 wire format.
 # ---------------------------------------------------------------------
 
-def test_pack_v3_sets_flag_bit_for_prng_v1():
+def test_pack_v3_sets_flag_bit():
+    """pack_v3 always sets the 0x04 flag bit (SplitMix64)."""
     data = b'\x00' * 32
     raw = pack_v3(
         filesize=128, blocksize=32, block_count=4,
         seed=7, block_seq=0, data=data,
         compressed=False, alphanumeric_qr=False,
-        prng_version=1,
     )
     # Layout: version byte, then flags byte.
     assert raw[0] == V3_VERSION
-    assert raw[1] & 0x04, "prng_version=1 must set flag bit 0x04"
-
-
-def test_pack_v3_clears_flag_bit_for_prng_v0():
-    data = b'\x00' * 32
-    raw = pack_v3(
-        filesize=128, blocksize=32, block_count=4,
-        seed=7, block_seq=0, data=data,
-        compressed=False, alphanumeric_qr=False,
-        prng_version=0,
-    )
-    assert (raw[1] & 0x04) == 0, "prng_version=0 must clear flag bit 0x04"
+    assert raw[1] & 0x04, "pack_v3 must always set flag bit 0x04"
 
 
 def test_unpack_v3_reports_prng_version():
-    for want in (0, 1):
-        raw = pack_v3(
-            filesize=128, blocksize=32, block_count=4,
-            seed=7, block_seq=0, data=b'\x00' * 32,
-            prng_version=want,
-        )
-        header, _ = unpack_v3(raw)
-        assert header.prng_version == want
+    """unpack_v3 always reports prng_version=1."""
+    raw = pack_v3(
+        filesize=128, blocksize=32, block_count=4,
+        seed=7, block_seq=0, data=b'\x00' * 32,
+    )
+    header, _ = unpack_v3(raw)
+    assert header.prng_version == 1
 
 
-def test_pack_v3_rejects_unknown_prng_version():
-    with pytest.raises(ValueError, match="prng_version"):
-        pack_v3(
-            filesize=128, blocksize=32, block_count=4,
-            seed=7, block_seq=0, data=b'\x00' * 32,
-            prng_version=2,
-        )
+def test_unpack_v3_rejects_legacy_prng_v0_blocks():
+    """Manually construct a V3 block with the 0x04 flag cleared and
+    verify that unpack_v3 raises ValueError."""
+    blocksize = 32
+    data = b'\x00' * blocksize
+    # Build a raw V3 block with flag bit 0x04 cleared (legacy prng_version=0).
+    flags = 0x00  # no compression, no high-density, NO prng bit
+    header = struct.pack(
+        '>BBQHIIHH',
+        V3_VERSION,
+        flags,
+        128,        # filesize
+        blocksize,  # blocksize
+        4,          # block_count
+        7,          # seed
+        0,          # block_seq
+        0,          # reserved
+    )
+    payload = header + data
+    crc = zlib.crc32(payload) & 0xFFFFFFFF
+    raw = payload + struct.pack('>I', crc)
+
+    with pytest.raises(ValueError, match="prng_version=0 was removed"):
+        unpack_v3(raw)
 
 
 # ---------------------------------------------------------------------
-# 3. End-to-end roundtrip for both PRNG versions.
+# 3. End-to-end roundtrip for the SplitMix64 PRNG path.
 # ---------------------------------------------------------------------
 
 def _payload(size: int) -> bytes:
@@ -115,8 +121,8 @@ def _payload(size: int) -> bytes:
     return bytes(rng.randrange(256) for _ in range(size))
 
 
-@pytest.mark.parametrize("prng_version", [0, 1])
-def test_encoder_decoder_roundtrip_for_each_prng_version(prng_version):
+def test_encoder_decoder_roundtrip():
+    """Round-trip using the default (and only) SplitMix64 PRNG path."""
     K = 256
     blocksize = 64
     payload = _payload(K * blocksize)
@@ -125,7 +131,6 @@ def test_encoder_decoder_roundtrip_for_each_prng_version(prng_version):
         blocksize=blocksize,
         compressed=False,
         alphanumeric_qr=False,
-        prng_version=prng_version,
     )
     dec = LTDecoder()
     for packed, _seed, _seq in enc.generate_blocks(int(K * 2.0)):
@@ -136,85 +141,5 @@ def test_encoder_decoder_roundtrip_for_each_prng_version(prng_version):
         except (ValueError, struct.error):
             pass
     assert dec.is_done()
-    assert dec.prng_version == prng_version
+    assert dec.prng_version == 1
     assert dec.bytes_dump() == payload
-
-
-def test_mixing_prng_versions_in_same_session_raises():
-    """Blocks with different prng_version flags in the same decode
-    session are unsolvable; the decoder must reject the inconsistent
-    second block loudly."""
-    K = 64
-    blocksize = 64
-    payload = _payload(K * blocksize)
-
-    enc_v1 = LTEncoder(payload, blocksize=blocksize, prng_version=1)
-    enc_v0 = LTEncoder(payload, blocksize=blocksize, prng_version=0)
-
-    first, _, _ = next(enc_v1.generate_blocks(1))
-    second, _, _ = next(enc_v0.generate_blocks(1))
-
-    dec = LTDecoder()
-    dec.decode_bytes(first)
-    with pytest.raises(ValueError, match="prng_version mismatch"):
-        dec.decode_bytes(second)
-
-
-# ---------------------------------------------------------------------
-# 4. Backward compatibility — prng_version=0 must still decode
-# even when the default encoder is prng_version=1.
-# ---------------------------------------------------------------------
-
-def test_legacy_prng_v0_blocks_still_decode():
-    """Explicitly emit prng_version=0 blocks (as qrstream ≤ 0.7 would
-    have) and verify the current decoder handles them via the
-    LCG-warmup fallback path."""
-    K = 128
-    blocksize = 64
-    payload = _payload(K * blocksize)
-    enc = LTEncoder(
-        payload,
-        blocksize=blocksize,
-        compressed=False,
-        alphanumeric_qr=True,
-        prng_version=0,
-    )
-    dec = LTDecoder()
-    for packed, _seed, _seq in enc.generate_blocks(int(K * 2.5)):
-        try:
-            done, _ = dec.decode_bytes(packed)
-            if done:
-                break
-        except (ValueError, struct.error):
-            pass
-    assert dec.is_done()
-    assert dec.prng_version == 0
-    assert dec.bytes_dump() == payload
-
-
-# ---------------------------------------------------------------------
-# 5. PRNG class honours prng_version kwarg.
-# ---------------------------------------------------------------------
-
-def test_prng_rejects_unknown_version():
-    with pytest.raises(ValueError, match="prng_version"):
-        PRNG(K=32, prng_version=42)
-
-
-def test_prng_versions_produce_different_src_blocks():
-    """For the same seed, the two PRNG schemas must produce
-    different (degree, src_blocks) tuples — otherwise the flag bit
-    would be meaningless."""
-    K = 256
-    p0 = PRNG(K, prng_version=0)
-    p1 = PRNG(K, prng_version=1)
-    diffs = 0
-    for seed in range(1, 30):
-        _, d0, n0 = p0.get_src_blocks(seed=seed)
-        _, d1, n1 = p1.get_src_blocks(seed=seed)
-        if (d0, n0) != (d1, n1):
-            diffs += 1
-    assert diffs >= 20, (
-        f"Only {diffs}/29 seeds differ between prng v0 and v1 — "
-        f"the two schemas are suspiciously close."
-    )

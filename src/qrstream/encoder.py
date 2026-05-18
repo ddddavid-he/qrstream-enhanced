@@ -47,6 +47,7 @@ from .ui import ProgressReporter, QuietReporter
 
 # Prefer mmap-backed random access for larger uncompressed inputs.
 _MMAP_THRESHOLD = 10 * 1024 * 1024
+_DEFAULT_QR_EC_LEVEL = 1
 
 
 class _WriterFailure(RuntimeError):
@@ -83,8 +84,7 @@ class LTEncoder:
                  compressed: bool = False,
                  binary_qr: bool = False,
                  alphanumeric_qr: bool | None = None,
-                 c: float = DEFAULT_C, delta: float = DEFAULT_DELTA,
-                 prng_version: int = 1):
+                 c: float = DEFAULT_C, delta: float = DEFAULT_DELTA):
         self.data = data
         self.filesize = len(data)
         self.blocksize = blocksize
@@ -93,19 +93,8 @@ class LTEncoder:
         # header flag bit (0x02); prefer the alphanumeric_qr name.
         self.alphanumeric_qr = _resolve_alphanumeric_flag(
             binary_qr, alphanumeric_qr)
-        # PRNG schema version. 1 = SplitMix64 (default, qrstream ≥
-        # 0.8); 0 = legacy LCG warmup (kept so tests / tooling can
-        # reproduce old fixtures on demand).
-        #
-        # TODO(v0.10.0): remove the prng_version kwarg entirely
-        # once legacy v0 encode support is dropped. See
-        # ``protocol.py`` for the full removal checklist.
-        if prng_version not in (0, 1):
-            raise ValueError(f"Unsupported prng_version: {prng_version}")
-        self.prng_version = prng_version
         self.K = ceil(self.filesize / blocksize)
-        self.prng = PRNG(self.K, delta=delta, c=c,
-                         prng_version=prng_version)
+        self.prng = PRNG(self.K, delta=delta, c=c)
         self._seq = 0
         self._cached_last_block = None
 
@@ -163,7 +152,6 @@ class LTEncoder:
                 data=block_data,
                 compressed=self.compressed,
                 alphanumeric_qr=self.alphanumeric_qr,
-                prng_version=self.prng_version,
             )
             yield packed, seed, seq
 
@@ -415,19 +403,16 @@ class _DisplayVideoSink:
 def encode_to_video(input_path: str, output_path: str,
                     overhead: float = 2.0,
                     fps: int = 10,
-                    ec_level: int = 1,
                     qr_version: int = 25,
                     border: float | None = None,
                     lead_in_seconds: float = 0.0,
                     compress: bool = True,
                     verbose: bool = False,
                     workers: int | None = None,
-                    use_legacy_qr: bool = False,
                     codec: str = 'h264',
                     binary_qr: bool = True,
                     alphanumeric_qr: bool | None = None,
                     force_compress: bool = False,
-                    auto_mask: bool = False,
                     reporter: ProgressReporter | None = None,
                     fountain_codec: str = 'raptorq'):
     """Encode a file to a QR-code video using fountain codes.
@@ -448,15 +433,6 @@ def encode_to_video(input_path: str, output_path: str,
     ``reporter`` --- optional :class:`qrstream.ui.ProgressReporter` used
     for progress/status rendering.  When ``None`` a :class:`QuietReporter`
     is used so the function stays side-effect-free for programmatic use.
-
-    .. deprecated:: 0.8
-        ``ec_level`` is redundant with ``overhead`` in qrstream's
-        pipeline and will be removed in v0.10.0.  QR-level Reed-Solomon
-        only rescues *bit* errors within a detected frame, but
-        WeChatQRCode either decodes a frame's payload or returns
-        ``None``; borderline frames are handled by fountain overhead
-        at the video level.  The CLI already hides ``--ec-level``; the
-        API keyword is retained for one deprecation window.
     """
     if reporter is None:
         reporter = QuietReporter()
@@ -493,7 +469,7 @@ def encode_to_video(input_path: str, output_path: str,
 
         blocksize = auto_blocksize(
             payload_size,
-            ec_level,
+            _DEFAULT_QR_EC_LEVEL,
             qr_version,
             alphanumeric_qr=high_density,
         )
@@ -534,13 +510,11 @@ def encode_to_video(input_path: str, output_path: str,
         first_packed, _, _ = next(encoder.generate_blocks(1))
         first_qr = generate_qr_image(
             first_packed,
-            ec_level=ec_level,
+            ec_level=_DEFAULT_QR_EC_LEVEL,
             box_size=10,
             border=border_modules,
             version=qr_version,
-            use_legacy=use_legacy_qr,
             alphanumeric=high_density,
-            auto_mask=auto_mask,
         )
         h, w = first_qr.shape[:2]
 
@@ -689,13 +663,12 @@ def encode_to_video(input_path: str, output_path: str,
                         break
                     # generate_qr_image signature:
                     #   (data, ec_level, box_size, border, version,
-                    #    use_legacy, binary_mode, alphanumeric, auto_mask)
+                    #    alphanumeric)
                     qr_imgs = list(pool.map(
                         generate_qr_image, batch,
-                        repeat(ec_level), repeat(10), repeat(border_modules),
-                        repeat(qr_version), repeat(use_legacy_qr),
-                        repeat(None), repeat(high_density),
-                        repeat(auto_mask),
+                        repeat(_DEFAULT_QR_EC_LEVEL), repeat(10),
+                        repeat(border_modules), repeat(qr_version),
+                        repeat(high_density),
                     ))
                     for qr_img in qr_imgs:
                         writer_queue.put(qr_img)
@@ -710,13 +683,11 @@ def encode_to_video(input_path: str, output_path: str,
             for packed, _, _ in encoder.generate_blocks(num_blocks):
                 qr_img = generate_qr_image(
                     packed,
-                    ec_level=ec_level,
+                    ec_level=_DEFAULT_QR_EC_LEVEL,
                     box_size=10,
                     border=border_modules,
                     version=qr_version,
-                    use_legacy=use_legacy_qr,
                     alphanumeric=high_density,
-                    auto_mask=auto_mask,
                 )
                 writer_queue.put(qr_img)
                 if writer_error:
@@ -778,8 +749,8 @@ def _display_producer_main(
     shm_name: str, total_frames: int, module_side: int,
     payload_data: bytes, blocksize: int,
     num_blocks: int, lead_in_frames: int,
-    ec_level: int, border_modules: int, qr_version: int,
-    high_density: bool, auto_mask: bool,
+    border_modules: int, qr_version: int,
+    high_density: bool,
     fountain_codec: str, compress: bool,
     produced_value, done_event, cancel_event, started_value,
 ) -> None:
@@ -801,7 +772,6 @@ def _display_producer_main(
                 payload_data, blocksize,
                 compressed=compress, alphanumeric_qr=high_density)
         else:
-            from .lt_codec import LTEncoder
             encoder = LTEncoder(
                 payload_data, blocksize,
                 compressed=compress, alphanumeric_qr=high_density)
@@ -825,11 +795,10 @@ def _display_producer_main(
                 return
             module_img = generate_qr_module_image(
                 packed,
-                ec_level=ec_level,
+                ec_level=_DEFAULT_QR_EC_LEVEL,
                 border=border_modules,
                 version=qr_version,
                 alphanumeric=high_density,
-                auto_mask=auto_mask,
             )
             frame_index = lead_in_frames + offset
             packed_frame = pack_module_image(module_img)
@@ -844,18 +813,15 @@ def _display_producer_main(
 def encode_to_display(input_path: str,
                       overhead: float = 2.0,
                       fps: int = 10,
-                      ec_level: int = 1,
                       qr_version: int = 25,
                       border: float | None = None,
                       lead_in_seconds: float = 0.0,
                       compress: bool = True,
                       verbose: bool = False,
                       workers: int | None = None,
-                      use_legacy_qr: bool = False,
                       binary_qr: bool = True,
                       alphanumeric_qr: bool | None = None,
                       force_compress: bool = False,
-                      auto_mask: bool = False,
                       reporter: ProgressReporter | None = None,
                       player=None,
                       _player=None,
@@ -921,7 +887,7 @@ def encode_to_display(input_path: str,
 
         blocksize = auto_blocksize(
             payload_size,
-            ec_level,
+            _DEFAULT_QR_EC_LEVEL,
             qr_version,
             alphanumeric_qr=high_density,
         )
@@ -960,12 +926,10 @@ def encode_to_display(input_path: str,
         first_packed, _, _ = next(encoder.generate_blocks(1))
         first_module = generate_qr_module_image(
             first_packed,
-            ec_level=ec_level,
+            ec_level=_DEFAULT_QR_EC_LEVEL,
             border=border_modules,
             version=qr_version,
-            use_legacy=use_legacy_qr,
             alphanumeric=high_density,
-            auto_mask=auto_mask,
         )
         module_side = int(first_module.shape[0])
         plan = plan_module_cache(total_frames, module_side, fps)
@@ -1051,12 +1015,10 @@ def encode_to_display(input_path: str,
                 return blank_module.copy()
             return generate_qr_module_image(
                 packed,
-                ec_level=ec_level,
+                ec_level=_DEFAULT_QR_EC_LEVEL,
                 border=border_modules,
                 version=qr_version,
-                use_legacy=use_legacy_qr,
                 alphanumeric=high_density,
-                auto_mask=auto_mask,
             )
 
         def _produce() -> None:
@@ -1094,10 +1056,9 @@ def encode_to_display(input_path: str,
                                 break
                             module_imgs = list(pool.map(
                                 generate_qr_module_image, batch,
-                                repeat(ec_level), repeat(border_modules),
-                                repeat(qr_version), repeat(use_legacy_qr),
-                                repeat(None), repeat(high_density),
-                                repeat(auto_mask),
+                                repeat(_DEFAULT_QR_EC_LEVEL),
+                                repeat(border_modules), repeat(qr_version),
+                                repeat(high_density),
                             ))
                             for module_img in module_imgs:
                                 if cancel_event.is_set() or state.cancel_requested():
@@ -1117,12 +1078,10 @@ def encode_to_display(input_path: str,
                             return
                         module_img = generate_qr_module_image(
                             packed,
-                            ec_level=ec_level,
+                            ec_level=_DEFAULT_QR_EC_LEVEL,
                             border=border_modules,
                             version=qr_version,
-                            use_legacy=use_legacy_qr,
                             alphanumeric=high_density,
-                            auto_mask=auto_mask,
                         )
                         frame_index = lead_in_frames + offset
                         packed_frame = pack_module_image(module_img)
@@ -1179,11 +1138,9 @@ def encode_to_display(input_path: str,
                     blocksize=blocksize,
                     num_blocks=num_blocks,
                     lead_in_frames=lead_in_frames,
-                    ec_level=ec_level,
                     border_modules=border_modules,
                     qr_version=qr_version,
                     high_density=high_density,
-                    auto_mask=auto_mask,
                     fountain_codec=fountain_codec,
                     compress=compress,
                     produced_value=shared_state._produced,
@@ -1233,7 +1190,7 @@ def encode_to_display(input_path: str,
                     block_size=blocksize,
                     total_frames=total_frames,
                     qr_version=qr_version,
-                    ec_level=ec_level,
+                    ec_level=_DEFAULT_QR_EC_LEVEL,
                     module_side=module_side,
                     fps=fps,
                     high_density=high_density,
@@ -1280,7 +1237,7 @@ def encode_to_display(input_path: str,
                     block_size=blocksize,
                     total_frames=total_frames,
                     qr_version=qr_version,
-                    ec_level=ec_level,
+                    ec_level=_DEFAULT_QR_EC_LEVEL,
                     module_side=module_side,
                     fps=fps,
                     high_density=high_density,

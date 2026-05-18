@@ -15,7 +15,7 @@ Encoder                                     Decoder
 ```
 
 1. **Encode**: Split the file (optionally zlib-compressed) into blocks, generate redundant coded blocks via RaptorQ (default) or LT fountain codes, serialize each into a V3/V4 protocol frame, base45-encode into QR alphanumeric-mode symbols, and output an MP4 video.
-2. **Decode**: Extract QR codes from video using zxing-cpp (fast, robust, crash-free), base45-decode, CRC32-validate to discard corrupted frames, feed into the RaptorQ or LT decoder for recovery, and reconstruct the original file. Legacy base64 and COBS videos (pre-v0.6) continue to decode via a fallback path.
+2. **Decode**: Extract QR codes from video using zxing-cpp (fast, robust, crash-free), base45-decode, CRC32-validate to discard corrupted frames, feed into the RaptorQ or LT decoder for recovery, and reconstruct the original file. Legacy base64 videos continue to decode via a fallback path.
 
 **Key Features**:
 - **RaptorQ (RFC 6330)**: Default fountain codec — systematic, near-optimal recovery with any K packets; LT codes also available as a legacy option
@@ -287,7 +287,7 @@ project-root/
 │   ├── decoder.py             # Video frame extraction → QR detect → RaptorQ/LT decode → file rebuild
 │   ├── raptorq_codec.py       # RaptorQ (RFC 6330) encoder/decoder
 │   ├── lt_codec.py            # LT fountain code primitives (PRNG, RSD, BlockGraph, GF(2) rescue)
-│   ├── protocol.py            # V3/V4 protocol serialization + base45 codec (legacy base64/COBS decode supported)
+│   ├── protocol.py            # V3/V4 protocol serialization + base45 codec (legacy base64 decode supported)
 │   ├── qr_utils.py            # QR generation + detection (zxing-cpp)
 │   ├── calibrate.py           # Calibration video generation and analysis
 │   ├── calibration_optimizer.py # Joint QR version/FPS/overhead optimization
@@ -359,7 +359,7 @@ Offset  Size  Field
 ```
 
 - Default encoding uses **V4 + RaptorQ + base45 alphanumeric QR**.
-- The decoder auto-detects V4 (RaptorQ) vs V3 (LT) from the version byte, and tries base45 → base64 → COBS in order, preserving compatibility with pre-v0.6 videos.
+- The decoder auto-detects V4 (RaptorQ) vs V3 (LT) from the version byte, and tries base45 → base64 in order, preserving compatibility with older videos.
 - V3/V4 extend `filesize` to `uint64` and `block_count`/`symbol_count` to `uint32`, supporting larger files and block counts.
 
 ### Encoding Modes
@@ -368,7 +368,6 @@ Offset  Size  Field
 |------|-----------|---------|----------|---------|
 | Base45 alphanumeric | raw bytes → base45 → `0-9A-Z $%*+-./:` | Alphanumeric (5.5 bits/char) | ~67% (but uses denser QR mode → **net denser** than byte mode) | Yes |
 | Base64 | raw bytes → base64 string | Byte (8 bits/char) | ~33% | No (`--qr-mode base64`) |
-| COBS (legacy) | raw bytes → COBS → latin-1 string | Byte | ~0.4% | **Removed** in v0.6; decode-only fallback for old videos |
 
 Base45 (RFC 9285) is the default because QR's alphanumeric mode is denser per character than byte mode — at V25/M the base45 payload per frame is ~30% larger than base64, and in practice produces 20–25% smaller videos and 10–20% faster encode/decode.
 

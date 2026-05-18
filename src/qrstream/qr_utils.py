@@ -38,8 +38,8 @@ History note — why we no longer emit COBS payloads
     internally UTF-8-encodes strings, which doubles every byte >= 0x80,
     overflowing the requested QR version and silently upgrading it
     (e.g. V20 -> V25). base45 avoids this by producing pure ASCII and
-    using QR alphanumeric mode directly. The decoder still recognises
-    legacy COBS payloads for backward compatibility.
+    using QR alphanumeric mode directly.  COBS support (both encode and
+    decode) was removed in v0.10.
 
 History note — WeChatQRCode replaced by zxing-cpp (v0.9)
     ``cv2.wechat_qrcode_WeChatQRCode`` had two fatal problems:
@@ -69,14 +69,10 @@ _EC_MAP: dict[int, str] = {0: 'L', 1: 'M', 2: 'Q', 3: 'H'}
 # ── QR Generation ────────────────────────────────────────────────
 
 def _encode_qr_payload(data: bytes,
-                       binary_mode: bool | None = None,
                        alphanumeric: bool | None = None) -> tuple[str, bool]:
     """Encode packed protocol bytes into the ASCII QR payload string."""
     if alphanumeric is None:
-        if binary_mode is None:
-            use_alphanumeric = True
-        else:
-            use_alphanumeric = bool(binary_mode)
+        use_alphanumeric = True
     else:
         use_alphanumeric = bool(alphanumeric)
 
@@ -92,8 +88,6 @@ def _encode_qr_payload(data: bytes,
 def generate_qr_image(data: bytes, ec_level: int = 1,
                       box_size: int = 10, border: float = 4,
                       version: int | None = None,
-                      use_legacy: bool = False,
-                      binary_mode: bool | None = None,
                       alphanumeric: bool | None = None,
                       auto_mask: bool = False) -> np.ndarray:
     """Generate a QR code image from binary data.
@@ -107,9 +101,6 @@ def generate_qr_image(data: bytes, ec_level: int = 1,
             fit at the requested version, zxing-cpp raises
             ``ValueError``.  Pass ``None`` to let the library choose
             the smallest version that fits.
-        use_legacy: Accepted for backward compatibility; ignored.
-        binary_mode: Deprecated alias for ``alphanumeric``. If both
-            are supplied, ``alphanumeric`` wins.
         alphanumeric: When True (default), encode via base45 into QR
             alphanumeric mode (higher density). When False, encode via
             base64 into QR byte mode.
@@ -121,9 +112,8 @@ def generate_qr_image(data: bytes, ec_level: int = 1,
     Returns:
         BGR numpy array suitable for OpenCV.
     """
-    del use_legacy  # legacy parameter kept for API stability
     payload, use_alphanumeric = _encode_qr_payload(
-        data, binary_mode=binary_mode, alphanumeric=alphanumeric)
+        data, alphanumeric=alphanumeric)
     return _render_qr(payload, ec_level, box_size, border, version,
                       use_alphanumeric, auto_mask)
 
@@ -131,8 +121,6 @@ def generate_qr_image(data: bytes, ec_level: int = 1,
 def generate_qr_module_image(data: bytes, ec_level: int = 1,
                              border: float = 4,
                              version: int | None = None,
-                             use_legacy: bool = False,
-                             binary_mode: bool | None = None,
                              alphanumeric: bool | None = None,
                              auto_mask: bool = False) -> np.ndarray:
     """Generate a 1-pixel-per-module grayscale QR image.
@@ -141,9 +129,8 @@ def generate_qr_module_image(data: bytes, ec_level: int = 1,
     values. It is intended for display-mode caching; callers can upscale it
     with nearest-neighbour interpolation at playback time.
     """
-    del use_legacy  # legacy parameter kept for API stability
     payload, use_alphanumeric = _encode_qr_payload(
-        data, binary_mode=binary_mode, alphanumeric=alphanumeric)
+        data, alphanumeric=alphanumeric)
     return _render_qr_gray(payload, ec_level, 1, border, version,
                            use_alphanumeric, auto_mask)
 
