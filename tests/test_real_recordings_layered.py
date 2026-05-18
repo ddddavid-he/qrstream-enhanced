@@ -96,16 +96,6 @@ class _FixtureSpec:
 # must be greater than K (number of source blocks in the fixture)
 # and leave some margin for normal run-to-run variance.
 _FIXTURES = {
-    "v061": _FixtureSpec(
-        video="real-phone-v3/v061.mp4",
-        input_bin="real-phone-v3/v061.input.bin",
-        expected_sha=(
-            "4a440b6da851a9a2e35eacca95b7b2fe29e3560c169b0a57211fccc2f5469443"
-        ),
-        min_uniq_blocks=40,
-        qr_version=25,
-        ec_level=1,
-    ),
     "v073-100kB": _FixtureSpec(
         video="real-phone-v4/v073-100kB.mp4",
         input_bin="real-phone-v4/v073-100kB.input.bin",
@@ -129,7 +119,7 @@ _FIXTURES = {
         ec_level=1,
     ),
     "lt-pi-1MB": _FixtureSpec(
-        video="real-phone-current/lt-pi-1MB.mp4",
+        video="real-phone-current/v092-lt-pi-1MB.mp4",
         input_bin=None,
         expected_sha=(
             "7806ee47461b49ef1f578e14461b2c83c09c6d7a9a914275da1d71e9cbbf7069"
@@ -188,12 +178,6 @@ def _build_ground_truth_encoder(
         blocksize=blocksize,
         compressed=header.compressed,
         alphanumeric_qr=header.alphanumeric_qr,
-        # Replay the exact PRNG schema the original encoder used,
-        # so ``(seed) → (degree, src_blocks)`` matches byte-for-byte.
-        # Without this, ground-truth blocks from a legacy v0 fixture
-        # would be rebuilt under the v1 SplitMix64 schedule and the
-        # L2 assertion would fire on every block.
-        prng_version=header.prng_version,
     )
 
 
@@ -212,7 +196,6 @@ def _ground_truth_block_for_seed(enc: LTEncoder, seed: int) -> bytes:
 @pytest.fixture(
     scope="module",
     params=[
-        pytest.param("v061", id="v3-v061"),
         pytest.param("v073-100kB", id="v4-v073-100kB"),
         pytest.param("v073-300kB", id="v4-v073-300kB"),
         pytest.param("lt-pi-1MB", id="current-lt-pi-1MB"),

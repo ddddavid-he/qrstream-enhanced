@@ -11,8 +11,6 @@ slower smoke layer.
 Fixtures are split by the protocol path they exercise:
 
     tests/fixtures/
-      real-phone-v3/       # captures decoded via the legacy
-                           # prng_version=0 LT path (qrstream ≤ 0.7)
       real-phone-v4/       # captures decoded via the prng_version=1
                            # LT path (qrstream ≥ 0.8 default,
                            # SplitMix64 mixer + GE rescue)
@@ -24,18 +22,12 @@ raw payload that was fed into the encoder) and ``<case>.mp4`` (the
 phone recording, re-encoded to a git-friendly size).  Current
 π-payload fixtures commit only ``.mp4`` files; the source is
 identified by size plus SHA-256 so a 1 MB input file does not need
-to be duplicated per codec.  Legacy case stems encode the qrstream
+to be duplicated per codec.  Case stems encode the qrstream
 CLI version used to produce the original encoded video (e.g.
-``v061`` means qrstream 0.6.1), so you can tell from a filename
+``v073`` means qrstream 0.7.3), so you can tell from a filename
 alone which encoder path produced a given fixture.
 
 ## Files
-
-### real-phone-v3 (legacy LCG-warmup PRNG path)
-
-| File | Input SHA-256 (first 8) | Input size | Encoded with | Recorded | Compressed |
-|---|---|---|---|---|---|
-| `v061.*` | `4a440b6d…` | 30 720 B | v0.6.0 defaults (V25, base45, ec=M, border=10%, lead-in=1.5 s) | iPhone @ 60 fps, 720×720 | x264 CRF 36, 30 fps |
 
 ### real-phone-v4 (SplitMix64 PRNG path + GE rescue)
 
@@ -58,26 +50,6 @@ The π source is deterministic and not committed.  The tests verify
 its decoded byte stream by size plus SHA-256.
 
 ## How the fixtures were generated
-
-### v3 legacy cases
-
-1. Generate a random input file of the documented size with
-   `os.urandom`.
-2. Encode it to a QR video using the CLI:
-
-       qrstream encode v061.input.bin \
-           -o v061.source.mp4 \
-           --qr-version 25 --qr-mode alphanumeric \
-           --ec-level 1 --overhead 2.0 --fps 10 \
-           --border 10 --lead-in-seconds 1.5
-
-3. Play the resulting `.mp4` full-screen on a monitor.
-4. Record the screen with a phone camera.
-5. Re-encode the phone recording with ffmpeg at CRF 36:
-
-       ffmpeg -i phone-recording.mov \
-           -c:v libx264 -crf 36 -preset slow -r 10 -an \
-           v061.mp4
 
 ### v4 cases (qrstream 0.7.3+ default path)
 
