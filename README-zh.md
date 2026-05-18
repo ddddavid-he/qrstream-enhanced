@@ -78,6 +78,13 @@ git clone https://github.com/ddddavid-he/qrstream-enhanced.git && cd qrstream-en
 uv sync --dev
 ```
 
+### 开发文档
+
+- [CONTRIBUTING.md](docs/CONTRIBUTING.md)：分支策略、提交/PR 约定、CI 触发/skip 规则与发布流程
+- [ARCH.md](docs/ARCH.md)：架构说明、核心模块索引、协议/UI/校准设计与测试入口
+
+仓库根目录下旧的 `BRANCHING.md` 已下线，分支与开发流程规则统一维护在 `docs/CONTRIBUTING.md`。
+
 ### 系统要求
 
 - Python >= 3.10（已测试 3.10 – 3.14）
@@ -307,9 +314,9 @@ project-root/
 │   ├── test_cli_*.py          # CLI 验证测试
 │   └── test_ui_reporter.py    # UI 报告器测试
 └── docs/
-    ├── design/                # 长期设计文档
+    ├── CONTRIBUTING.md        # 开发流程、分支/提交/CI 规则
+    ├── ARCH.md                # 架构参考文档
     ├── discovery/             # 调研记录与发现
-    ├── archive/               # 历史规划 / 归档文档
     └── tooling/               # benchmark、profiling 与本地容器辅助工具
 ```
 

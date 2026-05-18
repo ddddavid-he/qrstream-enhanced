@@ -80,6 +80,13 @@ git clone https://github.com/ddddavid-he/qrstream-enhanced.git && cd qrstream-en
 uv sync --dev
 ```
 
+### Developer Docs
+
+- [Contributing Guide](docs/CONTRIBUTING.md): Branching strategy, commit/PR rules, CI trigger/skip conventions, and release flow
+- [Architecture Reference](docs/ARCH.md): Module map, protocol layout, calibration/UI design, and testing/tooling reference
+
+The old top-level `BRANCHING.md` has been retired; branch and workflow rules now live in `docs/CONTRIBUTING.md`.
+
 ### Requirements
 
 - Python >= 3.10 (3.10 – 3.14 tested)
@@ -310,9 +317,9 @@ project-root/
 │   ├── test_cli_*.py          # CLI validation tests
 │   └── test_ui_reporter.py    # UI reporter tests
 └── docs/
-    ├── design/                # Long-lived design specs
+    ├── CONTRIBUTING.md        # Contributor workflow, branch/commit/CI rules
+    ├── ARCH.md                # Architecture reference
     ├── discovery/             # Investigation notes and findings
-    ├── archive/               # Superseded planning/history docs
     └── tooling/               # Benchmark, profiling, and local container helpers
 ```
 
