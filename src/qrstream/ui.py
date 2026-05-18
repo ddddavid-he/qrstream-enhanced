@@ -891,7 +891,8 @@ class LogReporter:
     def calibrate_generate_start(self, *, preset: str,
                                  total_frames: int) -> None:
         self._write_line(phase="calibrate-generate", status="start",
-                         preset=preset, total_frames=total_frames)
+                         preset=preset, total_frames=total_frames,
+                         experimental=True)
 
     def calibrate_generate_update(self, *, progress_pct: float) -> None:
         if not self._should_emit("calibrate-generate", progress_pct):
@@ -906,7 +907,7 @@ class LogReporter:
 
     def calibrate_analyze_start(self, *, total_frames: int) -> None:
         self._write_line(phase="calibrate-analyze", status="start",
-                         total_frames=total_frames)
+                         total_frames=total_frames, experimental=True)
 
     def calibrate_analyze_update(self, *, progress_pct: float,
                                  segment: str) -> None:
@@ -1996,7 +1997,7 @@ class RichReporter:
                                  total_frames: int) -> None:
         self._stop_live()
         self._console.print(
-            f"[bold cyan]Calibrate[/bold cyan]  "
+            f"[bold cyan]Calibrate[/bold cyan]  [yellow](experimental)[/yellow]  "
             f"preset=[bold]{preset}[/bold]  frames=[bold]{total_frames}[/bold]"
         )
         self._progress = Progress(
@@ -2047,7 +2048,7 @@ class RichReporter:
         self._stop_live()
         frame_count = total_frames if total_frames > 0 else "?"
         self._console.print(
-            f"[bold cyan]Analyze[/bold cyan]  calibration video  "
+            f"[bold cyan]Analyze[/bold cyan]  calibration video  [yellow](experimental)[/yellow]  "
             f"frames=[bold]{frame_count}[/bold]"
         )
         pct_column = (TextColumn("{task.percentage:>3.0f}%")

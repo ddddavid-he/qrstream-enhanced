@@ -479,6 +479,11 @@ def cmd_calibrate(args):
         render_results,
     )
 
+    print(
+        "Note: 'calibrate' is experimental and may change in future releases.",
+        file=sys.stderr,
+    )
+
     mode, reporter = _build_reporter(args)
 
     try:
@@ -647,7 +652,7 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
     # ── calibrate ────────────────────────────────────────────────
     cal = subparsers.add_parser(
         'calibrate',
-        help='Auto-calibrate channel parameters for optimal encode settings')
+        help='(experimental) Auto-calibrate channel parameters for optimal encode settings')
     cal_mode = cal.add_mutually_exclusive_group()
     cal_mode.add_argument(
         '--display', action='store_true',

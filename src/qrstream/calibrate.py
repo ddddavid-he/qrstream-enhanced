@@ -1,7 +1,12 @@
-"""Adaptive channel calibration for QRStream.
+"""Adaptive channel calibration for QRStream (experimental).
 
 Generates a calibration video with stepped QR versions and frame rates,
 then analyzes the captured result to recommend optimal encoding parameters.
+
+.. note::
+
+   This module is experimental and its interface may change in future
+   releases.
 
 Encoder side:
     ``generate_calibration()`` produces a ~25-90s calibration video/display
@@ -1436,7 +1441,7 @@ def _generate_display(
     state.mark_done()
 
     player_config = DisplayPlayerQtConfig(
-        title="QRStream Calibration",
+        title="QRStream Calibration (Experimental)",
         integer_scale=False,
         initial_screen_fraction=0.95,
         ignore_saved_geometry=True,
@@ -1732,7 +1737,7 @@ def format_results(result: CalibrationResult, verbose: bool = False) -> str:
     encode decision.
     """
     lines: list[str] = []
-    lines.append("QRStream Calibration Results")
+    lines.append("QRStream Calibration Results (Experimental)")
     lines.append("=" * 50)
     lines.append(f"  Channel quality : {result.channel_quality.capitalize()}")
     lines.append(f"  Precision       : {result.preset}")
@@ -1958,7 +1963,7 @@ def render_results(result: CalibrationResult, verbose: bool = False):
 
     return Panel(
         Group(*parts),
-        title="QRStream Calibration Results",
+        title="QRStream Calibration Results (Experimental)",
         border_style=quality_style,
     )
 
