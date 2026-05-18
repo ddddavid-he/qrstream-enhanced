@@ -747,7 +747,6 @@ def encode_to_video(input_path: str, output_path: str,
 
 def _display_producer_main(
     shm_name: str, total_frames: int, module_side: int,
-    input_path: str, compress_payload: bool, force_compress_payload: bool,
     blocksize: int,
     num_blocks: int, lead_in_frames: int,
     border_modules: int, qr_version: int,
@@ -755,6 +754,8 @@ def _display_producer_main(
     fountain_codec: str, compress: bool,
     produced_value, done_event, cancel_event, started_value,
     error_flag, error_msg,
+    payload_data: bytes | None = None,
+    input_path: str | None = None,
 ) -> None:
     """Producer entry point running in a child process.
 
@@ -763,27 +764,34 @@ def _display_producer_main(
     in its own process so it has an independent GIL and cannot block
     the Qt GUI thread.
 
-    The subprocess loads the payload from *input_path* independently
-    to avoid pickling the full payload across the process boundary.
+    Payload is supplied either as *payload_data* (bytes, cheap to
+    pickle) or via *input_path* (for mmap-backed large files, so the
+    subprocess opens the file independently and avoids copying the
+    full payload through the process boundary).
     """
     import time as _time
     buf = SharedFrameBuffer(total_frames, module_side, name=shm_name)
     started_value.value = _time.monotonic()
+    _local_payload = None  # track for cleanup in finally
     try:
-        payload_data, _compress, _used_mmap, _raw = _load_payload(
-            input_path,
-            compress=compress_payload,
-            force_compress=force_compress_payload,
-        )
+        if payload_data is not None:
+            _local_payload = payload_data
+        elif input_path is not None:
+            _local_payload, _c, _m, _r = _load_payload(
+                input_path, compress=False, force_compress=False)
+        else:
+            raise ValueError(
+                "_display_producer_main requires payload_data or input_path"
+            )
         row_bytes = buf.row_bytes
 
         if fountain_codec == 'raptorq':
             encoder = RaptorQEncoder(
-                payload_data, blocksize,
+                _local_payload, blocksize,
                 compressed=compress, alphanumeric_qr=high_density)
         else:
             encoder = LTEncoder(
-                payload_data, blocksize,
+                _local_payload, blocksize,
                 compressed=compress, alphanumeric_qr=high_density)
 
         blank_module = np.full(
@@ -825,9 +833,10 @@ def _display_producer_main(
         done_event.set()
         buf.close()
         # Close mmap-backed payload if applicable.
-        _close = getattr(payload_data, 'close', None)
-        if callable(_close):
-            _close()
+        if _local_payload is not None:
+            _close = getattr(_local_payload, 'close', None)
+            if callable(_close):
+                _close()
 
 
 def encode_to_display(input_path: str,
@@ -1156,18 +1165,20 @@ def encode_to_display(input_path: str,
         #   Use a thread because video_sink / _player cannot cross
         #   the process boundary.
         #
-        # Memory guard: SharedFrameBuffer always allocates
-        # total_frames × frame_bytes as flat shared memory (no
-        # window/eviction).  When plan_module_cache recommends
-        # "window" mode the required shared memory exceeds the
-        # soft budget — fall back to the thread path which uses
-        # the windowed ModuleFrameCache.
+        # Memory guard: SharedFrameBuffer allocates a flat region of
+        # (total_frames × frame_bytes + total_frames) bytes with no
+        # window/eviction.  Use subprocess only when that fits within
+        # the one-hour cache limit (192 MiB by default); otherwise
+        # fall back to the thread path which uses the windowed
+        # ModuleFrameCache to stay within budget.
 
+        from .display_cache import DEFAULT_MODULE_CACHE_ONE_HOUR_LIMIT
+        _shm_bytes = plan.total_bytes + total_frames  # data + flags
         _use_subprocess = (
             output_path is None
             and _player is None
             and video_sink is None
-            and plan.mode == "full"
+            and _shm_bytes <= DEFAULT_MODULE_CACHE_ONE_HOUR_LIMIT
         )
 
         if _use_subprocess:
@@ -1178,15 +1189,24 @@ def encode_to_display(input_path: str,
                 shared_state = SharedProducerState(total_frames)
                 cache_adapter = SharedBufferCacheAdapter(shm_buf, shared_state)
 
+                # Choose how to pass payload to the subprocess:
+                # - bytes/compressed payload: pass directly (pickle is
+                #   cheap for bytes, no extra I/O, guarantees consistency).
+                # - mmap-backed large file: pass input_path so the
+                #   subprocess opens the file independently, avoiding a
+                #   full-file copy through the process boundary.
+                if used_mmap:
+                    _sub_payload_kw = dict(input_path=input_path)
+                else:
+                    _sub_payload_kw = dict(
+                        payload_data=bytes(payload))
+
                 proc = _mp.Process(
                     target=_display_producer_main,
                     kwargs=dict(
                         shm_name=shm_buf.name,
                         total_frames=total_frames,
                         module_side=module_side,
-                        input_path=input_path,
-                        compress_payload=compress,
-                        force_compress_payload=force_compress,
                         blocksize=blocksize,
                         num_blocks=num_blocks,
                         lead_in_frames=lead_in_frames,
@@ -1201,6 +1221,7 @@ def encode_to_display(input_path: str,
                         started_value=shared_state._started,
                         error_flag=shared_state._error_flag,
                         error_msg=shared_state._error_msg,
+                        **_sub_payload_kw,
                     ),
                     daemon=True,
                 )
@@ -1280,18 +1301,13 @@ def encode_to_display(input_path: str,
                         f"{proc.exitcode}"
                     )
 
-                # Copy shared-memory frames into an in-process cache
-                # before closing the shared buffer, so the returned
-                # object remains valid for callers (e.g. video
-                # finalization).
-                result_cache = ModuleFrameCache.from_plan(
-                    total_frames, module_side, plan)
-                for fi in range(total_frames):
-                    packed = cache_adapter.get_packed(fi)
-                    if packed is not None:
-                        result_cache.put_packed(fi, packed)
-                result_cache.mark_done()
-                return result_cache
+                # Pure display mode — the caller typically ignores the
+                # return value.  Return an empty but correctly-typed
+                # cache instead of copying all frames out of shared
+                # memory (which would double peak memory for no
+                # benefit).  The shm is released in the outer finally.
+                cache.mark_done()
+                return cache
             finally:
                 shm_buf.close()
 
