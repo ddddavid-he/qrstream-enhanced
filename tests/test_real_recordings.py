@@ -19,12 +19,12 @@ Invoke locally with either::
 
 Fixtures live under ``tests/fixtures/`` in layered sub-dirs:
 
-* ``real-phone-v4/`` — captures produced with the qrstream ≥ 0.8
+* ``real-phone-v073/`` — captures produced with the qrstream ≥ 0.8
   default path (``prng_version=1`` flag set; SplitMix64 mixer,
   GE rescue available).  Recorded at ``--overhead 1.5 --fps 10``
   then re-encoded with HEVC / CRF 32-36 / 720×720 / 12-15 fps to
   keep the repo footprint manageable.
-* ``real-phone-current/`` — current codec fixtures: one LT and one
+* ``real-phone-v092/`` — v0.9.2 codec fixtures: one LT and one
   RaptorQ phone recording of the deterministic first 1,000,000
   digits after π's decimal point.  These assert by SHA-256 only, so
   no source ``.input.bin`` needs to be committed.
@@ -52,35 +52,35 @@ _FIXTURES_DIR = Path(__file__).parent / "fixtures"
 # assert against the deterministic decoded bytes by SHA-256 and size,
 # avoiding a committed 1 MB source file per codec.
 _GATING_CASES = [
-    # real-phone-v4: the qrstream 0.8+ LT default path.
+    # real-phone-v073: the qrstream 0.8+ LT default path.
     pytest.param(
-        "real-phone-v4", "v073-100kB.mp4",
+        "real-phone-v073", "v073-100kB.mp4",
         "v073-100kB.input.bin",
         "6fbf396baedd1233f4c8486e8a4a4cc43b9a1283e19ae4dcb3cd27c4ad4dbed2",
         102_400,
-        id="v4-v073-100kB-V25-15fps-phone",
+        id="v073-100kB-V25-15fps-phone",
     ),
     pytest.param(
-        "real-phone-v4", "v073-300kB.mp4",
+        "real-phone-v073", "v073-300kB.mp4",
         "v073-300kB.input.bin",
         "115e32de92187eb5cc544e04b5bb5ed953577d6c75489d8e4c1f2b1c374380fb",
         307_200,
-        id="v4-v073-300kB-V25-12fps-phone",
+        id="v073-300kB-V25-12fps-phone",
     ),
     # Current codec fixtures: deterministic π digits, no source file.
     pytest.param(
-        "real-phone-current", "v092-lt-pi-1MB.mp4",
+        "real-phone-v092", "v092-lt-pi-1MB.mp4",
         None,
         "7806ee47461b49ef1f578e14461b2c83c09c6d7a9a914275da1d71e9cbbf7069",
         1_000_000,
-        id="current-lt-pi-1MB-phone",
+        id="v092-lt-pi-1MB-phone",
     ),
     pytest.param(
-        "real-phone-current", "v092-raptorq-pi-1MB.mp4",
+        "real-phone-v092", "v092-raptorq-pi-1MB.mp4",
         None,
         "7806ee47461b49ef1f578e14461b2c83c09c6d7a9a914275da1d71e9cbbf7069",
         1_000_000,
-        id="current-raptorq-pi-1MB-phone",
+        id="v092-raptorq-pi-1MB-phone",
     ),
 ]
 

@@ -155,15 +155,50 @@ jobs:
         # -m e2e opts into the marker excluded from the default run.
         # --timeout is not available without pytest-timeout; we rely on
         # the GitHub Actions job-level timeout (below) instead.
-        run: uv run pytest -m e2e -v tests/test_e2e_encode_decode.py
+        # Exclude the large-file Z=2 test here — it runs in a dedicated
+        # single-platform job below to avoid wasting CI resources.
+        run: uv run pytest -m e2e -v tests/test_e2e_encode_decode.py --deselect tests/test_e2e_encode_decode.py::TestE2ELargeFileMultiSourceBlock
 
       - name: Run QR generation regression tests
         # Also run the QR-generation unit tests here so glog(0) and
         # image-property checks are verified on real OpenCV/segno builds.
         run: uv run pytest -v tests/test_qr_generate.py
 
-    # Each test encodes up to ~100 KB of data (~200 frames at 36 fps ≈
-    # 6 s encode).  The full suite is 9 test cases; 20 minutes is a
+    # Each test encodes up to ~500 KB of data (~1000 frames at 10 fps ≈
+    # 100 s encode).  The full suite is 9 test cases; 20 minutes is a
     # generous ceiling that will catch genuine hangs without false
     # timeouts on slow arm64 runners.
     timeout-minutes: 20
+
+  # ── Large-file Z=2 multi-source-block stress test ───────────────
+  #
+  # 20MB file with QR v15 → K=56,528, Z=2 source blocks, ~62K frames.
+  # Runs on a single platform only to keep CI cost manageable (~8-12 min).
+  e2e-large-file:
+    needs: check-dev-gate
+    if: needs.check-dev-gate.outputs.skip-e2e != 'true'
+    name: e2e-large-file (20MB Z=2)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run 20MB multi-source-block E2E test
+        run: uv run pytest -m e2e -v tests/test_e2e_encode_decode.py::TestE2ELargeFileMultiSourceBlock
+
+    # 20MB → ~62K frames; encode + decode takes ~8-12 min on standard
+    # runners.  40 minutes accommodates slow CI without false timeouts.
+    timeout-minutes: 40
