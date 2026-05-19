@@ -52,7 +52,8 @@ def _sha256(path: pathlib.Path) -> str:
 def _encode_decode_verify(raw: bytes, tmp_path: pathlib.Path,
                            label: str = "file",
                            compress: bool = True,
-                           qr_version: int = 25) -> None:
+                           qr_version: int = 25,
+                           overhead: float = 2.0) -> None:
     """Complete pipeline: raw bytes → MP4 → recovered bytes → assert SHA256."""
     from qrstream.encoder import encode_to_video
     from qrstream.decoder import extract_qr_from_video, decode_blocks_to_file
@@ -65,7 +66,7 @@ def _encode_decode_verify(raw: bytes, tmp_path: pathlib.Path,
     src_hash = _sha256(src)
 
     encode_to_video(str(src), str(mp4), compress=compress,
-                    qr_version=qr_version, verbose=False)
+                    qr_version=qr_version, overhead=overhead, verbose=False)
     assert mp4.exists() and mp4.stat().st_size > 0, \
         f"encode_to_video produced no output for {label}"
 
@@ -168,4 +169,58 @@ class TestE2EEncodeDecode:
         _encode_decode_verify(
             raw, tmp_path, f"v{qr_version}-{payload_size}",
             compress=False, qr_version=qr_version,
+        )
+
+
+@pytest.mark.e2e
+class TestE2ELargeFileMultiSourceBlock:
+    """Full-pipeline stress test: 20MB file triggering RaptorQ Z=2 source blocks.
+
+    This test exercises the complete encode→video→decode pipeline with a
+    file large enough to trigger multiple RaptorQ source blocks (Z=2),
+    which requires K > 56,403 symbols.  With QR version 15 (blocksize=371)
+    and 20MB input, K ≈ 56,528, just crossing the Z=2 threshold.
+
+    Parameters:
+      - File size: 20MB (random, incompressible)
+      - QR version: 15 (blocksize=371, gives K=56,528 → Z=2)
+      - Overhead: 1.1 (RaptorQ converges near K; 10% margin is safe)
+      - Compress: False (random data won't compress; avoids payload
+        shrinkage that would drop K below the Z=2 threshold)
+
+    Video characteristics:
+      - ~62,180 frames @ 10fps → ~104 min encoded video
+      - Estimated CI time: 8–12 minutes
+
+    This test is intentionally expensive and should run on a single
+    platform only to avoid wasting CI resources.  It validates:
+      1. Multi-source-block (Z=2) encode/decode correctness end-to-end
+      2. Sub-block interleaving does not cause silent corruption through
+         the full QR generation + detection + reassembly pipeline
+      3. Large-file memory handling in both encoder and decoder
+    """
+
+    def test_20mb_multi_source_block_roundtrip(self, tmp_path):
+        """20MB encode→video→decode with Z=2 RaptorQ source blocks."""
+        from qrstream.raptorq_codec import _rq_num_source_blocks
+
+        data_size = 20 * 1024 * 1024
+        raw = _random_bytes(data_size, seed=0x22_6A7E)
+        qr_version = 15
+
+        # Verify precondition: this configuration must produce Z=2
+        from qrstream.protocol import auto_blocksize
+        blocksize = auto_blocksize(data_size, qr_version=qr_version)
+        K = ceil(data_size / blocksize)
+        Z = _rq_num_source_blocks(K)
+        assert Z == 2, (
+            f"Test precondition failed: expected Z=2 but got Z={Z} "
+            f"(blocksize={blocksize}, K={K}). "
+            f"Adjust file size or qr_version.")
+
+        _encode_decode_verify(
+            raw, tmp_path, "20mb_z2",
+            compress=False,
+            qr_version=qr_version,
+            overhead=1.1,
         )

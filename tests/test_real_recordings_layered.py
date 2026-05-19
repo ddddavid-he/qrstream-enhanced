@@ -97,8 +97,8 @@ class _FixtureSpec:
 # and leave some margin for normal run-to-run variance.
 _FIXTURES = {
     "v073-100kB": _FixtureSpec(
-        video="real-phone-v4/v073-100kB.mp4",
-        input_bin="real-phone-v4/v073-100kB.input.bin",
+        video="real-phone-v073/v073-100kB.mp4",
+        input_bin="real-phone-v073/v073-100kB.input.bin",
         expected_sha=(
             "6fbf396baedd1233f4c8486e8a4a4cc43b9a1283e19ae4dcb3cd27c4ad4dbed2"
         ),
@@ -108,8 +108,8 @@ _FIXTURES = {
         ec_level=1,
     ),
     "v073-300kB": _FixtureSpec(
-        video="real-phone-v4/v073-300kB.mp4",
-        input_bin="real-phone-v4/v073-300kB.input.bin",
+        video="real-phone-v073/v073-300kB.mp4",
+        input_bin="real-phone-v073/v073-300kB.input.bin",
         expected_sha=(
             "115e32de92187eb5cc544e04b5bb5ed953577d6c75489d8e4c1f2b1c374380fb"
         ),
@@ -119,7 +119,7 @@ _FIXTURES = {
         ec_level=1,
     ),
     "lt-pi-1MB": _FixtureSpec(
-        video="real-phone-current/v092-lt-pi-1MB.mp4",
+        video="real-phone-v092/v092-lt-pi-1MB.mp4",
         input_bin=None,
         expected_sha=(
             "7806ee47461b49ef1f578e14461b2c83c09c6d7a9a914275da1d71e9cbbf7069"
@@ -196,9 +196,9 @@ def _ground_truth_block_for_seed(enc: LTEncoder, seed: int) -> bytes:
 @pytest.fixture(
     scope="module",
     params=[
-        pytest.param("v073-100kB", id="v4-v073-100kB"),
-        pytest.param("v073-300kB", id="v4-v073-300kB"),
-        pytest.param("lt-pi-1MB", id="current-lt-pi-1MB"),
+        pytest.param("v073-100kB", id="v073-100kB"),
+        pytest.param("v073-300kB", id="v073-300kB"),
+        pytest.param("lt-pi-1MB", id="v092-lt-pi-1MB"),
     ],
 )
 def fixture_spec(request) -> _FixtureSpec:
