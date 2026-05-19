@@ -227,27 +227,43 @@ class RaptorQEncoder:
             )
         return self._encoder
 
-    def _source_symbol(self, source_index: int) -> bytes:
-        start = source_index * self.blocksize
-        end = start + self.blocksize
-        if start >= self.filesize:
-            return b'\x00' * self.blocksize
-        block = self.data[start:min(end, self.filesize)]
-        if not isinstance(block, bytes):
-            block = bytes(block)
-        if len(block) < self.blocksize:
-            block += b'\x00' * (self.blocksize - len(block))
-        return block
+    def _build_source_symbol_map(self, source_blocks: int
+                                    ) -> dict[int, bytes]:
+        """Obtain source symbols from the raptorq library.
+
+        The raptorq Rust library may apply sub-block interleaving
+        (RFC 6330 Section 5.6) when K is large, so the Nth source symbol
+        is NOT necessarily ``data[N*T : (N+1)*T]``.  We must retrieve
+        the actual symbol payloads from the library to guarantee
+        encode/decode consistency.
+
+        Returns a dict mapping PayloadId → symbol data (without the
+        4-byte PayloadId header).
+        """
+        packets = self._ensure_encoder().get_encoded_packets(0)
+        symbol_map: dict[int, bytes] = {}
+        for pkt in packets:
+            payload_id = struct.unpack('>I', pkt[:_RQ_ESI_HEADER_SIZE])[0]
+            if _rq_source_index(payload_id, self.K, source_blocks) is not None:
+                symbol_map[payload_id] = pkt[_RQ_ESI_HEADER_SIZE:]
+        return symbol_map
 
     def _iter_source_packets(self, source_blocks: int):
+        """Yield ``(payload_id, symbol_data)`` in source-block round-robin order.
+
+        Source symbol data is obtained from the raptorq library (which
+        handles sub-block interleaving correctly) rather than slicing
+        the original data linearly.
+        """
+        symbol_map = self._build_source_symbol_map(source_blocks)
         layout = _rq_source_block_layout(self.K, source_blocks)
         max_symbols = max((count for _, count in layout), default=0)
         for local_esi in range(max_symbols):
-            for sbn, (offset, count) in enumerate(layout):
+            for sbn, (_offset, count) in enumerate(layout):
                 if local_esi >= count:
                     continue
                 payload_id = _rq_payload_id(sbn, local_esi)
-                yield payload_id, self._source_symbol(offset + local_esi)
+                yield payload_id, symbol_map[payload_id]
 
     # Keep ``binary_qr`` as a read-only alias for symmetry with
     # LTEncoder.

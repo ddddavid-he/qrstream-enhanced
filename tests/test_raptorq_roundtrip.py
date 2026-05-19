@@ -1,8 +1,11 @@
 """End-to-end roundtrip tests for RaptorQ codec (no video I/O)."""
 
+import hashlib
 import random
 import zlib
 from math import ceil
+
+import pytest
 
 from qrstream.raptorq_codec import RaptorQEncoder, RaptorQDecoder
 from qrstream.protocol import V4Header, unpack
@@ -175,3 +178,122 @@ class TestMixedV3V4Detection:
 
         result = decode_blocks(blocks_raw)
         assert result == data
+
+
+class TestRaptorQLargeDataInterleave:
+    """Regression tests for sub-block interleaving with large K.
+
+    The raptorq library (RFC 6330 Section 5.6) uses sub-block column
+    interleaving when the transfer length exceeds an internal threshold.
+    Source symbols from the library are NOT simple linear slices of the
+    input data in this regime.  These tests verify that encode→decode
+    roundtrips remain correct for parameters that trigger this behaviour.
+
+    See: https://github.com/ddddavid-he/qrstream-enhanced — bug report
+    "RaptorQ large data silent data corruption"
+    """
+
+    def _roundtrip_sha256(self, data: bytes, blocksize: int,
+                          overhead: float = 1.0) -> bytes:
+        """Encode→decode and verify SHA256 integrity."""
+        expected_sha = hashlib.sha256(data).hexdigest()
+
+        encoder = RaptorQEncoder(data, blocksize)
+        num_blocks = max(encoder.K, int(encoder.K * overhead))
+
+        decoder = RaptorQDecoder()
+        for packed, esi, seq in encoder.generate_blocks(num_blocks):
+            done, _ = decoder.decode_bytes(packed)
+            if done:
+                result = decoder.bytes_dump()
+                actual_sha = hashlib.sha256(result).hexdigest()
+                assert actual_sha == expected_sha, (
+                    f"SHA256 mismatch: blocksize={blocksize}, "
+                    f"data_len={len(data)}, K={encoder.K}")
+                return result
+
+        raise AssertionError(
+            f"Decode did not converge: blocksize={blocksize}, "
+            f"data_len={len(data)}, K={encoder.K}, fed={num_blocks}")
+
+    @pytest.mark.parametrize("blocksize", [256, 512, 936])
+    def test_large_k_subblock_interleave_roundtrip(self, blocksize):
+        """10MB roundtrip with blocksizes that trigger sub-block interleaving.
+
+        This is the exact scenario described in the bug report where
+        K ≥ ~11131 with blocksize=936 causes the raptorq library to
+        apply column interleaving.
+        """
+        data_size = 10 * 1024 * 1024  # 10MB
+        # Use deterministic pseudo-random data so mismatches are reproducible.
+        rng = random.Random(0xDEADBEEF)
+        data = rng.randbytes(data_size)
+
+        result = self._roundtrip_sha256(data, blocksize)
+        assert result == data
+
+    def test_blocksize_936_1mb_roundtrip(self):
+        """1MB with blocksize=936 — triggers interleaving at lower threshold."""
+        data_size = 1 * 1024 * 1024
+        rng = random.Random(42)
+        data = rng.randbytes(data_size)
+
+        result = self._roundtrip_sha256(data, blocksize=936)
+        assert result == data
+
+    def test_blocksize_936_boundary_k(self):
+        """Test near the exact K boundary where interleaving activates.
+
+        For blocksize=936, the raptorq library activates sub-block
+        interleaving at K=11131 (data_size=10,418,616 bytes).
+        """
+        # Just above threshold: K=11131 triggers interleaving
+        data_size = 11131 * 936
+        rng = random.Random(0xCAFEBABE)
+        data = rng.randbytes(data_size)
+
+        result = self._roundtrip_sha256(data, blocksize=936)
+        assert result == data
+
+    def test_non_aligned_large_data(self):
+        """Large data not aligned to blocksize boundary."""
+        # 10MB + 473 bytes — not a multiple of 936
+        data_size = 10 * 1024 * 1024 + 473
+        rng = random.Random(0xBAADF00D)
+        data = rng.randbytes(data_size)
+
+        result = self._roundtrip_sha256(data, blocksize=936)
+        assert result == data
+
+    def test_large_data_with_packet_loss(self):
+        """Large data roundtrip with simulated packet loss."""
+        data_size = 10 * 1024 * 1024
+        blocksize = 936
+        rng = random.Random(0x12345678)
+        data = rng.randbytes(data_size)
+
+        encoder = RaptorQEncoder(data, blocksize)
+        # Request 20% overhead to survive packet loss
+        all_blocks = list(encoder.generate_blocks(int(encoder.K * 1.2)))
+
+        # Drop 15% of packets randomly
+        drop_rng = random.Random(999)
+        drop_count = int(len(all_blocks) * 0.15)
+        indices = list(range(len(all_blocks)))
+        drop_rng.shuffle(indices)
+        kept = sorted(indices[drop_count:])
+        kept_blocks = [all_blocks[i] for i in kept]
+
+        decoder = RaptorQDecoder()
+        for packed, esi, seq in kept_blocks:
+            done, _ = decoder.decode_bytes(packed)
+            if done:
+                result = decoder.bytes_dump()
+                assert hashlib.sha256(result).hexdigest() == \
+                    hashlib.sha256(data).hexdigest()
+                assert result == data
+                return
+
+        raise AssertionError(
+            f"Failed to decode with {len(kept_blocks)} of "
+            f"{len(all_blocks)} blocks")
