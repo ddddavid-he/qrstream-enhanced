@@ -11,15 +11,15 @@ slower smoke layer.
 Fixtures are split by the protocol path they exercise:
 
     tests/fixtures/
-      real-phone-v4/       # captures decoded via the prng_version=1
+      real-phone-v073/     # captures decoded via the prng_version=1
                            # LT path (qrstream ≥ 0.8 default,
                            # SplitMix64 mixer + GE rescue)
-      real-phone-current/  # current LT and RaptorQ phone captures
+      real-phone-v092/     # v0.9.2 LT and RaptorQ phone captures
                            # of a deterministic π payload
 
 Historical sub-dirs contain pairs of ``<case>.input.bin`` (the
 raw payload that was fed into the encoder) and ``<case>.mp4`` (the
-phone recording, re-encoded to a git-friendly size).  Current
+phone recording, re-encoded to a git-friendly size).  The v0.9.2
 π-payload fixtures commit only ``.mp4`` files; the source is
 identified by size plus SHA-256 so a 1 MB input file does not need
 to be duplicated per codec.  Case stems encode the qrstream
@@ -29,7 +29,7 @@ alone which encoder path produced a given fixture.
 
 ## Files
 
-### real-phone-v4 (SplitMix64 PRNG path + GE rescue)
+### real-phone-v073 (SplitMix64 PRNG path + GE rescue)
 
 | File | Input SHA-256 (first 8) | Input size | Encoded with | Recorded | Compressed |
 |---|---|---|---|---|---|
@@ -39,12 +39,12 @@ alone which encoder path produced a given fixture.
 Both v4 cases are **gating** — a regression blocks the
 real-world workflow.
 
-### real-phone-current (current LT + RaptorQ paths)
+### real-phone-v092 (v0.9.2 LT + RaptorQ paths)
 
 | File | Output SHA-256 (first 8) | Decoded size | Encoded with | Recorded | Compressed |
 |---|---|---|---|---|---|
-| `v092-lt-pi-1MB.mp4` | `7806ee47…` | 1 000 000 B | current LT, π decimal digits, `--no-compress --qr-version 40 --fps 25 --overhead 1.2` | iPhone 15 Pro | HEVC, 640×616, CRF 28 |
-| `v092-raptorq-pi-1MB.mp4` | `7806ee47…` | 1 000 000 B | current RaptorQ, π decimal digits, `--no-compress --qr-version 40 --fps 25 --overhead 1.1` | iPhone 15 Pro | HEVC, 840×1002, CRF 28 (crop=1040:1240:15:270 from 1080×1920 portrait) |
+| `v092-lt-pi-1MB.mp4` | `7806ee47…` | 1 000 000 B | v0.9.2 LT, π decimal digits, `--no-compress --qr-version 40 --fps 25 --overhead 1.2` | iPhone 15 Pro | HEVC, 640×616, CRF 28 |
+| `v092-raptorq-pi-1MB.mp4` | `7806ee47…` | 1 000 000 B | v0.9.2 RaptorQ, π decimal digits, `--no-compress --qr-version 40 --fps 25 --overhead 1.1` | iPhone 15 Pro | HEVC, 840×1002, CRF 28 (crop=1040:1240:15:270 from 1080×1920 portrait) |
 
 The π source is deterministic and not committed.  The tests verify
 its decoded byte stream by size plus SHA-256.
@@ -84,14 +84,14 @@ its decoded byte stream by size plus SHA-256.
    each CRF (CRF 34 / 38) starts failing to decode on the
    marginal 300 kB case.
 
-### Current π fixtures
+### v0.9.2 π fixtures
 
 1. Generate the first 1,000,000 digits after π's decimal point:
 
        uv run --with mpmath python -c \
          "from mpmath import mp; mp.dps=2000000; open('/tmp/pi_1mb.txt','w').write(str(mp.pi)[2:1000002])"
 
-2. Encode with current codecs and no zlib compression:
+2. Encode with v0.9.2 codecs and no zlib compression:
 
        qrstream encode /tmp/pi_1mb.txt -o raptorq.source.mp4 \
            --qr-version 40 --fps 25 --overhead 1.1 \
