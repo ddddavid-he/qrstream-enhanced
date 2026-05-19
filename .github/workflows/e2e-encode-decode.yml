@@ -175,12 +175,17 @@ jobs:
   # 20MB file with QR v15 → K=56,528, Z=2 source blocks, ~62K frames.
   # Runs on a single platform only to keep CI cost manageable (~8-12 min).
   # Only runs on main (push/PR/release gate) — too expensive for every
-  # dev push.
+  # dev push.  Ignores the dev-gate skip since this test never runs on
+  # dev in the first place.
   e2e-large-file:
     needs: check-dev-gate
     if: |
-      needs.check-dev-gate.outputs.skip-e2e != 'true' &&
-      (github.ref == 'refs/heads/main' || github.base_ref == 'main' || github.event_name == 'workflow_call')
+      always() &&
+      (github.ref == 'refs/heads/main' || github.base_ref == 'main' || github.event_name == 'workflow_call') &&
+      !(
+        github.event_name == 'push' &&
+        startsWith(github.event.head_commit.message || '', 'skip-ci:')
+      )
     name: e2e-large-file (20MB Z=2)
     runs-on: ubuntu-latest
     steps:
