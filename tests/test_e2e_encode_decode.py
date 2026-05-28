@@ -92,14 +92,15 @@ class TestE2EEncodeDecode:
         """
         17 574-byte payload encoded without compression.
 
-        ``auto_blocksize(17574)`` returns 938 → K=19 blocks, v25 EC_M.
-        This is the exact (payload_size, blocksize, version) triple that
+        ``auto_blocksize(17574, qr_version=25)`` returns 938 → K=19 blocks,
+        v25 EC_M. This is the exact (payload_size, blocksize, version) triple that
         triggered the ``qrcode 8.x glog(0)`` crash.  With zxing-cpp as the
         QR backend it must complete and recover the file byte-exactly.
         """
-        # Verify the trigger condition is still active
-        bs = auto_blocksize(17_574)
-        assert bs == 938, f"auto_blocksize changed: {bs} (expected 938)"
+        # Verify the V25 trigger condition is still active even though
+        # encode defaults may move to denser QR versions.
+        bs = auto_blocksize(17_574, qr_version=25)
+        assert bs == 938, f"auto_blocksize V25 changed: {bs} (expected 938)"
         assert ceil(17_574 / bs) == 19
 
         raw = _random_bytes(17_574, seed=0x616C6F67)  # "alog" in hex
