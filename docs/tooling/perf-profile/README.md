@@ -38,7 +38,7 @@ snakeviz docs/tooling/perf-profile/results/encode_single_100kb.prof
 ## 目标场景
 
 - 文件大小：1KB、10KB、100KB、1MB、5MB、10MB
-- 参数：默认 overhead=2.0, fps=10, qr_version=25, qr_mode=alphanumeric（base45），V3 协议；QR 纠错级别参数已隐藏/废弃，主要可靠性由 LT overhead 与 GE rescue 提供
+- 当前 encode 默认参数：RaptorQ/V4，overhead=1.2, fps=15, qr_version=30, qr_mode=alphanumeric（base45）；部分历史 profile 脚本仍保留 LT/V25/10fps 路径用于纵向对比
 - 超过 10MB 的文件不在本次 profile 范围
 
 ## 阅读 cProfile 输出的提示

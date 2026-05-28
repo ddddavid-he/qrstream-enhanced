@@ -112,6 +112,32 @@ def test_encode_defaults_to_one_worker_without_warning(monkeypatch, tmp_path):
     assert any("workers: 1" in msg for msg in reporter.debugs)
     assert reporter.starts[-1]["input_path"] == str(src)
     assert reporter.starts[-1]["file_size"] == src.stat().st_size
+    assert reporter.starts[-1]["anonymous"] is False
+    assert out.exists() and out.stat().st_size > 0
+
+
+def test_encode_anonymous_hides_source_metadata(monkeypatch, tmp_path):
+    _patch_fast_encode(monkeypatch)
+    reporter = _CaptureReporter()
+    src = tmp_path / "secret.bin"
+    out = tmp_path / "out.mp4"
+    src.write_bytes(b"hello encoder workers")
+
+    encode_to_video(
+        str(src),
+        str(out),
+        workers=None,
+        verbose=True,
+        reporter=reporter,
+        anonymous=True,
+    )
+
+    debug_output = "\n".join(reporter.debugs)
+    assert reporter.starts[-1]["input_path"] == ""
+    assert reporter.starts[-1]["anonymous"] is True
+    assert "secret.bin" not in debug_output
+    assert str(src) not in debug_output
+    assert "anonymous" in debug_output
     assert out.exists() and out.stat().st_size > 0
 
 

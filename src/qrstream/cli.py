@@ -3,8 +3,9 @@ Unified CLI for QRStream.
 
 Usage:
     qrstream -v | --version
-    qrstream encode <file> [-o output.mp4] [--display] [--overhead RATIO]
-                          [--fps 10] [--output-mode MODE]
+    qrstream encode <file> [-o output.mp4] [--display] [--anonymous]
+                          [--overhead RATIO] [--fps 15]
+                          [--qr-version 30] [--output-mode MODE]
     qrstream decode <video> -o output_file [-s sample_rate]
                           [--output-mode MODE]
 
@@ -310,8 +311,13 @@ def cmd_encode(args):
     """Handle the 'encode' subcommand."""
     from .encoder import encode_to_video
 
+    anonymous = bool(getattr(args, 'anonymous', False))
+
     if not os.path.exists(args.file):
-        print(f"Error: File not found: {args.file}")
+        if anonymous:
+            print("Error: input file not found.")
+        else:
+            print(f"Error: File not found: {args.file}")
         sys.exit(1)
 
     output = args.output
@@ -360,10 +366,16 @@ def cmd_encode(args):
         )
 
     if output_requested and os.path.abspath(args.file) == os.path.abspath(output):
-        print(
-            f"Error: output path is the same as the input file '{args.file}'.\n"
-            f"Specify a different path with -o."
-        )
+        if anonymous:
+            print(
+                "Error: output path is the same as the input file.\n"
+                "Specify a different path with -o."
+            )
+        else:
+            print(
+                f"Error: output path is the same as the input file '{args.file}'.\n"
+                f"Specify a different path with -o."
+            )
         sys.exit(1)
 
     alphanumeric_qr = (args.qr_mode == 'alphanumeric')
@@ -386,6 +398,7 @@ def cmd_encode(args):
             force_compress=args.force_compress,
             reporter=reporter,
             fountain_codec=fountain_codec,
+            anonymous=anonymous,
         )
         if display:
             from .encoder import encode_to_display
@@ -602,11 +615,11 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                           f'{_DEFAULT_OVERHEAD_LT} for lt; minimum: '
                           f'{_MIN_OVERHEAD_RQ} for raptorq, '
                           f'{_MIN_OVERHEAD_LT} for lt)')
-    enc.add_argument('--fps', type=int, default=10,
-                     help='Frames per second in output video (default: 10)')
-    enc.add_argument('--qr-version', type=int, default=25,
+    enc.add_argument('--fps', type=int, default=15,
+                     help='Frames per second in output video (default: 15)')
+    enc.add_argument('--qr-version', type=int, default=30,
                      choices=range(1, 41), metavar='N',
-                     help='QR code version 1-40, controls density (default: 25)')
+                     help='QR code version 1-40, controls density (default: 30)')
     enc.add_argument('--border', type=float, default=None,
                      help='Quiet-zone width as a percentage of QR content width (default: standard 4-module quiet zone; use 0 to disable)')
     enc.add_argument('--lead-in-seconds', type=float, default=0.0,
@@ -627,6 +640,8 @@ def build_parser(prog: str = 'qrstream') -> argparse.ArgumentParser:
                      choices=['raptorq', 'lt'], default='raptorq',
                      help='Fountain code: raptorq (default, RFC 6330, near-optimal) '
                           'or lt (legacy LT codes)')
+    enc.add_argument('--anonymous', action='store_true',
+                     help='Hide source filename/path in encode progress, logs, and display UI')
     enc.add_argument('-w', '--workers', type=int, default=None,
                      help='Parallel workers for QR generation (default: 1; higher values may not improve performance)')
     _add_output_mode_group(enc)

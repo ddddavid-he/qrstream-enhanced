@@ -113,10 +113,11 @@ qrstream encode <file> [-o output.mp4] [--display] [options]
 | `<file>` | - | Input file path |
 | `-o, --output` | optional | Output video path. If omitted, encode defaults to on-screen display. |
 | `--display` | - | Display generated QR frames in the built-in GUI player. When combined with `-o/--output`, display smoothness is prioritised and the output video is completed after the display window closes if needed. |
+| `--anonymous` | - | Hide the source filename/path in encode progress, logs, and display UI. This does not remove metadata inside the file content. |
 | `--overhead` | `1.2` (RaptorQ) / `2.0` (LT) | Encoding redundancy ratio (multiple of source block count). Default depends on `--fountain-codec`. |
-| `--fps` | `10` | Output video frame rate |
+| `--fps` | `15` | Output video frame rate |
 | `--ec-level` | `1` | **Deprecated and hidden**: QR error correction level. Redundant — LT `--overhead` already handles frame loss. Existing scripts continue to work during the deprecation window but should stop using this option. |
-| `--qr-version` | `25` | QR code version 1-40 (higher = denser) |
+| `--qr-version` | `30` | QR code version 1-40 (higher = denser) |
 | `--border` | standard 4-module quiet zone | Quiet-zone width as a percentage of QR content width (`--border 10` = 10%, `--border 0` disables it) |
 | `--lead-in-seconds` | `0.0` | Insert white lead-in frames before the first QR frame |
 | `--no-compress` | - | Disable zlib compression |
@@ -371,7 +372,7 @@ Offset  Size  Field
 | Base45 alphanumeric | raw bytes → base45 → `0-9A-Z $%*+-./:` | Alphanumeric (5.5 bits/char) | ~67% (but uses denser QR mode → **net denser** than byte mode) | Yes |
 | Base64 | raw bytes → base64 string | Byte (8 bits/char) | ~33% | No (`--qr-mode base64`) |
 
-Base45 (RFC 9285) is the default because QR's alphanumeric mode is denser per character than byte mode — at V25/M the base45 payload per frame is ~30% larger than base64, and in practice produces 20–25% smaller videos and 10–20% faster encode/decode.
+Base45 (RFC 9285) is the default because QR's alphanumeric mode is denser per character than byte mode — at V30/M the base45 payload per frame is ~30% larger than base64, and in practice produces 20–25% smaller videos and 10–20% faster encode/decode.
 
 ### Large Files & Low-Memory Paths
 

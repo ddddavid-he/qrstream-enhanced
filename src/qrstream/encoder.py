@@ -48,6 +48,11 @@ from .ui import ProgressReporter, QuietReporter
 # Prefer mmap-backed random access for larger uncompressed inputs.
 _MMAP_THRESHOLD = 10 * 1024 * 1024
 _DEFAULT_QR_EC_LEVEL = 1
+_ANONYMOUS_SOURCE_NAME = "anonymous"
+
+
+def _source_display_name(input_path: str, anonymous: bool) -> str:
+    return _ANONYMOUS_SOURCE_NAME if anonymous else os.path.basename(input_path)
 
 
 class _WriterFailure(RuntimeError):
@@ -402,8 +407,8 @@ class _DisplayVideoSink:
 
 def encode_to_video(input_path: str, output_path: str,
                     overhead: float = 2.0,
-                    fps: int = 10,
-                    qr_version: int = 25,
+                    fps: int = 15,
+                    qr_version: int = 30,
                     border: float | None = None,
                     lead_in_seconds: float = 0.0,
                     compress: bool = True,
@@ -414,7 +419,8 @@ def encode_to_video(input_path: str, output_path: str,
                     alphanumeric_qr: bool | None = None,
                     force_compress: bool = False,
                     reporter: ProgressReporter | None = None,
-                    fountain_codec: str = 'raptorq'):
+                    fountain_codec: str = 'raptorq',
+                    anonymous: bool = False):
     """Encode a file to a QR-code video using fountain codes.
 
     ``fountain_codec`` selects the erasure code: ``'raptorq'``
@@ -457,15 +463,21 @@ def encode_to_video(input_path: str, output_path: str,
         payload_size = len(payload)
         if verbose:
             source_desc = "mmap" if used_mmap else "memory"
-            reporter.debug(
-                f"Input: {input_path} ({raw_size} bytes, source={source_desc})"
-            )
-            if compress:
-                ratio = payload_size / raw_size * 100 if raw_size else 0.0
+            if anonymous:
+                reporter.debug(f"Input: anonymous (source={source_desc})")
+            else:
                 reporter.debug(
-                    f"Compressed: {raw_size} → {payload_size} bytes "
-                    f"({ratio:.1f}%)"
+                    f"Input: {input_path} ({raw_size} bytes, source={source_desc})"
                 )
+            if compress:
+                if anonymous:
+                    reporter.debug("Compression: enabled")
+                else:
+                    ratio = payload_size / raw_size * 100 if raw_size else 0.0
+                    reporter.debug(
+                        f"Compressed: {raw_size} → {payload_size} bytes "
+                        f"({ratio:.1f}%)"
+                    )
 
         blocksize = auto_blocksize(
             payload_size,
@@ -550,8 +562,9 @@ def encode_to_video(input_path: str, output_path: str,
             qr_version=qr_version,
             mode=mode_str,
             overhead=overhead,
-            input_path=input_path,
+            input_path="" if anonymous else input_path,
             file_size=raw_size,
+            anonymous=anonymous,
         )
 
         codec_info = _PYAV_CODEC_MAP.get(codec)
@@ -565,6 +578,11 @@ def encode_to_video(input_path: str, output_path: str,
 
         final_output_path = output_path
         if os.path.abspath(input_path) == os.path.abspath(final_output_path):
+            if anonymous:
+                raise ValueError(
+                    "Output path is the same as the input file. "
+                    "Choose a different output path."
+                )
             raise ValueError(
                 f"Output path is the same as the input file: {final_output_path}. "
                 "Choose a different output path."
@@ -841,8 +859,8 @@ def _display_producer_main(
 
 def encode_to_display(input_path: str,
                       overhead: float = 2.0,
-                      fps: int = 10,
-                      qr_version: int = 25,
+                      fps: int = 15,
+                      qr_version: int = 30,
                       border: float | None = None,
                       lead_in_seconds: float = 0.0,
                       compress: bool = True,
@@ -858,7 +876,8 @@ def encode_to_display(input_path: str,
                       codec: str = 'h264',
                       video_queue_frames: int | None = None,
                       report_display_done: bool = True,
-                      fountain_codec: str = 'raptorq') -> ModuleFrameCache:
+                      fountain_codec: str = 'raptorq',
+                      anonymous: bool = False) -> ModuleFrameCache:
     """Encode a file into a display module-frame cache and play it.
 
     QR frames are rendered at one pixel per module, bit-packed into
@@ -904,15 +923,21 @@ def encode_to_display(input_path: str,
         payload_size = len(payload)
         if verbose:
             source_desc = "mmap" if used_mmap else "memory"
-            reporter.debug(
-                f"Input: {input_path} ({raw_size} bytes, source={source_desc})"
-            )
-            if compress:
-                ratio = payload_size / raw_size * 100 if raw_size else 0.0
+            if anonymous:
+                reporter.debug(f"Input: anonymous (source={source_desc})")
+            else:
                 reporter.debug(
-                    f"Compressed: {raw_size} → {payload_size} bytes "
-                    f"({ratio:.1f}%)"
+                    f"Input: {input_path} ({raw_size} bytes, source={source_desc})"
                 )
+            if compress:
+                if anonymous:
+                    reporter.debug("Compression: enabled")
+                else:
+                    ratio = payload_size / raw_size * 100 if raw_size else 0.0
+                    reporter.debug(
+                        f"Compressed: {raw_size} → {payload_size} bytes "
+                        f"({ratio:.1f}%)"
+                    )
 
         blocksize = auto_blocksize(
             payload_size,
@@ -966,6 +991,11 @@ def encode_to_display(input_path: str,
         state = DisplayProducerState(total_frames)
         if output_path is not None:
             if os.path.abspath(input_path) == os.path.abspath(output_path):
+                if anonymous:
+                    raise ValueError(
+                        "Output path is the same as the input file. "
+                        "Choose a different output path."
+                    )
                 raise ValueError(
                     f"Output path is the same as the input file: {output_path}. "
                     "Choose a different output path."
@@ -996,8 +1026,9 @@ def encode_to_display(input_path: str,
             qr_version=qr_version,
             mode=mode_str,
             overhead=overhead,
-            input_path=input_path,
+            input_path="" if anonymous else input_path,
             file_size=raw_size,
+            anonymous=anonymous,
         )
 
         def _report_progress(produced: int, start_ts: float,
@@ -1256,7 +1287,7 @@ def encode_to_display(input_path: str,
 
                 try:
                     player_meta = DisplayMetadata(
-                        file_name=os.path.basename(input_path),
+                        file_name=_source_display_name(input_path, anonymous),
                         file_size=raw_size,
                         payload_size=payload_size,
                         compressed=compress,
@@ -1269,9 +1300,10 @@ def encode_to_display(input_path: str,
                         module_side=module_side,
                         fps=fps,
                         high_density=high_density,
+                        anonymous=anonymous,
                     )
                     player_config = DisplayPlayerQtConfig(
-                        title=f"QRStream — {os.path.basename(input_path)}",
+                        title=f"QRStream — {_source_display_name(input_path, anonymous)}",
                         metadata=player_meta,
                     )
                     play_display_qt(
@@ -1320,7 +1352,7 @@ def encode_to_display(input_path: str,
                 _player(cache, state, fps)
             else:
                 player_meta = DisplayMetadata(
-                    file_name=os.path.basename(input_path),
+                    file_name=_source_display_name(input_path, anonymous),
                     file_size=raw_size,
                     payload_size=payload_size,
                     compressed=compress,
@@ -1333,9 +1365,10 @@ def encode_to_display(input_path: str,
                     module_side=module_side,
                     fps=fps,
                     high_density=high_density,
+                    anonymous=anonymous,
                 )
                 player_config = DisplayPlayerQtConfig(
-                    title=f"QRStream — {os.path.basename(input_path)}",
+                    title=f"QRStream — {_source_display_name(input_path, anonymous)}",
                     metadata=player_meta,
                 )
                 play_display_qt(cache, state, fps, config=player_config)

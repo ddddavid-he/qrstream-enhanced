@@ -84,6 +84,7 @@ class DisplayMetadata:
     module_side: int = 0
     fps: int = 0
     high_density: bool = False
+    anonymous: bool = False
 
 
 @dataclass
@@ -763,6 +764,11 @@ else:
                     return f"{n / (1024 * 1024):.2f} MiB"
 
             duration = meta.total_frames / max(1, meta.fps)
+            file_name = "anonymous" if meta.anonymous else meta.file_name
+            original_size = "hidden" if meta.anonymous else _fmt_size(meta.file_size)
+            payload_size = "hidden" if meta.anonymous else _fmt_size(meta.payload_size)
+            payload_suffix = "" if meta.anonymous else (
+                "(compressed)" if meta.compressed else "")
 
             html = f"""
             <style>
@@ -791,12 +797,12 @@ else:
               <div class="section-title">Source</div>
               <table>
                 <tr><td class="key">File</td>
-                    <td class="val">{meta.file_name}</td></tr>
+                    <td class="val">{file_name}</td></tr>
                 <tr><td class="key">Original size</td>
-                    <td class="val">{_fmt_size(meta.file_size)}</td></tr>
+                    <td class="val">{original_size}</td></tr>
                 <tr><td class="key">Payload size</td>
-                    <td class="val">{_fmt_size(meta.payload_size)}
-                    {"(compressed)" if meta.compressed else ""}</td></tr>
+                    <td class="val">{payload_size}
+                    {payload_suffix}</td></tr>
               </table>
             </div>
             <div class="section">

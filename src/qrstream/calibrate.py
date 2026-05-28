@@ -105,32 +105,32 @@ _VERSION_LADDER_FPS = 10
 # ── Preset ladder configurations ────────────────────────────────────
 
 # Version ladders: list of QR version numbers to test.  Public presets start
-# at the encode defaults (V25 / 10fps) and explore upward; use ``low`` when the
+# at the encode defaults (V30 / 15fps) and explore upward; use ``low`` when the
 # default settings are not detectable on the target channel.
 _VERSION_LADDER_LOW = [5, 8, 10, 12, 15, 17, 20, 22, 25, 28]
-_VERSION_LADDER_FAST = [25, 28, 30, 33, 35, 40]
+_VERSION_LADDER_FAST = [30, 33, 35, 40]
 _VERSION_LADDER_QUICK = _VERSION_LADDER_FAST
-_VERSION_LADDER_STANDARD = [25, 27, 28, 30, 32, 33, 35, 38, 40]
-_VERSION_LADDER_FULL = [25, 26, 27, 28, 29, 30, 32, 33, 35, 38, 40]
+_VERSION_LADDER_STANDARD = [30, 32, 33, 35, 38, 40]
+_VERSION_LADDER_FULL = [30, 31, 32, 33, 35, 38, 40]
 _VERSION_LADDER_THOROUGH = _VERSION_LADDER_FULL
-_VERSION_LADDER_HIGH = [25, 28, 30, 32, 33, 35, 36, 38, 39, 40]
+_VERSION_LADDER_HIGH = [30, 32, 33, 35, 36, 38, 39, 40]
 
 # FPS ladders: list of target frame rates to test.
 _FPS_LADDER_LOW = [5, 6, 8, 10, 12, 15, 18, 20]
-_FPS_LADDER_FAST = [10, 15, 20, 25, 30, 45, 60]
+_FPS_LADDER_FAST = [15, 20, 25, 30, 45, 50, 60]
 _FPS_LADDER_QUICK = _FPS_LADDER_FAST
-_FPS_LADDER_STANDARD = [10, 12, 15, 18, 20, 25, 30, 45, 60]
-_FPS_LADDER_FULL = [10, 12, 14, 15, 18, 22, 30, 45, 60]
+_FPS_LADDER_STANDARD = [15, 18, 20, 25, 30, 45, 50, 60]
+_FPS_LADDER_FULL = [15, 18, 22, 25, 30, 45, 50, 60]
 _FPS_LADDER_THOROUGH = _FPS_LADDER_FULL
 # ``high`` uses a candidate pool filtered by display refresh rate.
 _FPS_CANDIDATES_HIGH = [10, 15, 18, 20, 25, 30, 35, 40, 45, 50, 60, 75, 90, 100, 120]
 
 # FPS anchor versions (used to encode QR frames in the FPS segment).
 _FPS_ANCHOR_LOW = 15
-_FPS_ANCHOR_FAST = 25
+_FPS_ANCHOR_FAST = 30
 _FPS_ANCHOR_QUICK = _FPS_ANCHOR_FAST
-_FPS_ANCHOR_STANDARD = 25
-_FPS_ANCHOR_FULL = 25
+_FPS_ANCHOR_STANDARD = 30
+_FPS_ANCHOR_FULL = 30
 _FPS_ANCHOR_THOROUGH = _FPS_ANCHOR_FULL
 _FPS_ANCHOR_HIGH = 35
 
@@ -247,6 +247,10 @@ def _select_pairwise_plan(
     max_fps_idx = min(len(fps_ladder), 16) - 1
     mid_ver_idx = max_ver_idx // 2
     mid_fps_idx = max_fps_idx // 2
+    phone_fps_idx = max(
+        (i for i, fps in enumerate(fps_ladder[:16]) if fps <= 50),
+        default=mid_fps_idx,
+    )
 
     candidates = [
         (0, 0),                         # stable baseline
@@ -254,6 +258,7 @@ def _select_pairwise_plan(
         (mid_ver_idx, mid_fps_idx),     # balanced joint point
         (max_ver_idx, 0),               # version frontier at stable FPS
         (max_ver_idx, mid_fps_idx),     # high-V mid-F (likely-picked region)
+        (max_ver_idx, phone_fps_idx),   # high-V phone high-F (50fps class)
         (max_ver_idx, max_fps_idx),     # throughput frontier
     ]
 
@@ -670,7 +675,7 @@ def estimate_target_k(target_size_bytes: int | None) -> int:
     blocksize = auto_blocksize(
         target_size_bytes,
         ec_level=_CALIBRATION_EC_LEVEL,
-        qr_version=25,
+        qr_version=30,
         alphanumeric_qr=True,
     )
     return max(1, math.ceil(target_size_bytes / blocksize))

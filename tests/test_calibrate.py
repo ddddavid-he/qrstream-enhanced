@@ -258,6 +258,12 @@ class TestPresetConfig:
         assert max(cfg_50.fps_ladder) == 50
         assert max(cfg_120.fps_ladder) == 60
 
+    @pytest.mark.parametrize("name", ["fast", "standard", "full"])
+    def test_public_presets_include_high_fps_phone_samples(self, name):
+        cfg = resolve_preset(name, display_hz=60)
+        assert 25 in cfg.fps_ladder
+        assert 50 in cfg.fps_ladder
+
     def test_high_preset_fps_extends_to_display_hz(self):
         cfg_60 = resolve_preset("high", display_hz=60)
         cfg_144 = resolve_preset("high", display_hz=144)
@@ -669,9 +675,8 @@ class TestRecommendations:
             preset_name="standard",
             video_metadata=VideoMetadata(width=1920, height=1080, fps=59.94),
         )
-        # tier ceilings: aggressive=56, balanced=53, safe=50
-        # On standard ladder [10,12,15,18,20,25,30,45,60], all three
-        # tiers should cap at fps <= 45.
+        # tier ceilings: aggressive=56, balanced=53, safe=50.
+        # With the measured FPS points below, all tiers should cap at <=45.
         for rec in result.recommendations:
             if rec.available:
                 assert rec.fps <= 45, (
@@ -784,11 +789,15 @@ class TestRecommendations:
             CalibrationFrame(SEG_FPS, fps, step_idx, len(cfg.fps_ladder), 0)
             for step_idx, fps in enumerate(cfg.fps_ladder)
         )
-        pairwise_step = _select_pairwise_plan(
-            cfg.version_ladder, cfg.fps_ladder).index((8, 8))
-        pairwise_param = _pack_pairwise_param(8, 8)
+        version_idx = cfg.version_ladder.index(40)
+        fps_idx = cfg.fps_ladder.index(50)
+        pairwise_plan = _select_pairwise_plan(cfg.version_ladder, cfg.fps_ladder)
+        pairwise_step = pairwise_plan.index((version_idx, fps_idx))
+        pairwise_param = _pack_pairwise_param(version_idx, fps_idx)
         payload_frames.extend(
-            CalibrationFrame(SEG_PAIRWISE, pairwise_param, pairwise_step, 5, fseq)
+            CalibrationFrame(
+                SEG_PAIRWISE, pairwise_param, pairwise_step,
+                len(pairwise_plan), fseq)
             for fseq in range(cfg.frames_per_pairwise_step)
         )
         payloads = [
@@ -804,9 +813,8 @@ class TestRecommendations:
                 return self.payload
 
         class FakeVideoStream:
-            # Use 64 fps so that even the aggressive tier ceiling
-            # (floor(64 * 0.95) = 60) still admits fps=60.
-            average_rate = 64
+                # Use 60 fps so tier ceilings admit the 50fps phone-camera sample.
+            average_rate = 60
             duration = None
             time_base = None
             width = 1920
@@ -833,9 +841,9 @@ class TestRecommendations:
 
         best = next(r for r in result.recommendations if r.available)
         assert best.qr_version == 40
-        assert best.fps == 60
+        assert best.fps == 50
         assert best.source == "pairwise"
-        assert result.pairwise_detect_rates[(40, 60)] == 1.0
+        assert result.pairwise_detect_rates[(40, 50)] == 1.0
 
     def test_analyze_calibration_reconstructs_non_60hz_pairwise_plan(
             self, monkeypatch):
@@ -916,9 +924,9 @@ class TestRecommendations:
         result = cal_mod.analyze_calibration("fake.mp4", target_k=20)
 
         assert set(result.pairwise_detect_rates) == set(generated_pairs)
-        assert (25, 120) in result.pairwise_detect_rates
+        assert (30, 120) in result.pairwise_detect_rates
         assert (40, 120) in result.pairwise_detect_rates
-        assert (25, 60) not in result.pairwise_detect_rates
+        assert (30, 60) not in result.pairwise_detect_rates
         assert (40, 60) not in result.pairwise_detect_rates
         assert all(rate == 1.0 for rate in result.pairwise_detect_rates.values())
 
@@ -1171,6 +1179,13 @@ class TestPairwisePlanDiversity:
         max_ver_idx = len(cfg.version_ladder) - 1
         mid_fps_idx = (len(cfg.fps_ladder) - 1) // 2
         assert (max_ver_idx, mid_fps_idx) in plan
+
+    def test_plan_includes_high_v_50fps_phone_probe(self):
+        cfg = resolve_preset("standard", display_hz=60)
+        plan = _select_pairwise_plan(cfg.version_ladder, cfg.fps_ladder)
+        max_ver_idx = len(cfg.version_ladder) - 1
+        fps_50_idx = cfg.fps_ladder.index(50)
+        assert (max_ver_idx, fps_50_idx) in plan
 
     def test_plan_unique_pairs(self):
         cfg = resolve_preset("standard", display_hz=60)

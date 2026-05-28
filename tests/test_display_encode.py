@@ -7,6 +7,7 @@ from qrstream.encoder import encode_to_display
 class _CaptureReporter:
     def __init__(self):
         self.starts = []
+        self.debugs = []
 
     def info(self, message):
         pass
@@ -18,7 +19,7 @@ class _CaptureReporter:
         pass
 
     def debug(self, message):
-        pass
+        self.debugs.append(message)
 
     def encode_start(self, **kwargs):
         self.starts.append(kwargs)
@@ -121,6 +122,58 @@ def test_encode_to_display_reports_input_size(tmp_path):
 
     assert reporter.starts[-1]["input_path"] == str(src)
     assert reporter.starts[-1]["file_size"] == src.stat().st_size
+    assert reporter.starts[-1]["anonymous"] is False
+
+
+def test_encode_to_display_anonymous_hides_input_path_from_reporter(tmp_path):
+    src = tmp_path / "secret.bin"
+    src.write_bytes(b"display reporter metadata")
+    reporter = _CaptureReporter()
+
+    def fake_player(cache, state, fps):
+        assert state.wait_done(timeout=10)
+
+    encode_to_display(
+        input_path=str(src),
+        overhead=2.0,
+        fps=10,
+        qr_version=10,
+        lead_in_seconds=0.0,
+        compress=False,
+        player=fake_player,
+        reporter=reporter,
+        anonymous=True,
+    )
+
+    assert reporter.starts[-1]["input_path"] == ""
+    assert reporter.starts[-1]["anonymous"] is True
+
+
+def test_encode_to_display_anonymous_verbose_hides_source_metadata(tmp_path):
+    src = tmp_path / "secret.bin"
+    src.write_bytes(b"display reporter metadata")
+    reporter = _CaptureReporter()
+
+    def fake_player(cache, state, fps):
+        assert state.wait_done(timeout=10)
+
+    encode_to_display(
+        input_path=str(src),
+        overhead=2.0,
+        fps=10,
+        qr_version=10,
+        lead_in_seconds=0.0,
+        compress=False,
+        verbose=True,
+        player=fake_player,
+        reporter=reporter,
+        anonymous=True,
+    )
+
+    debug_output = "\n".join(reporter.debugs)
+    assert "secret.bin" not in debug_output
+    assert str(src) not in debug_output
+    assert "anonymous" in debug_output
 
 
 def test_encode_to_display_streams_video_to_output(monkeypatch, tmp_path):

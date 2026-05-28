@@ -111,10 +111,11 @@ qrstream encode <file> [-o output.mp4] [--display] [options]
 | `<file>` | - | 输入文件路径 |
 | `-o, --output` | 可选 | 输出视频路径；省略时编码默认进入屏幕显示模式。 |
 | `--display` | - | 直接在内置 GUI 播放器中显示生成的 QR 帧。与 `-o/--output` 同时使用时，优先保障显示流畅度；如后台写入未完成，关闭显示窗口后会继续完成剩余视频输出。 |
+| `--anonymous` | - | 在编码进度、日志和显示 UI 中隐藏源文件名/路径；不会清理文件内容内部的元数据。 |
 | `--overhead` | `1.2`（RaptorQ）/ `2.0`（LT） | 编码冗余倍率（源块数的倍数）。默认值取决于 `--fountain-codec`。 |
-| `--fps` | `10` | 输出视频帧率 |
+| `--fps` | `15` | 输出视频帧率 |
 | `--ec-level` | `1` | **已废弃并隐藏**：QR 纠错等级。在 qrstream 管线中实际多余——帧丢失已由 LT `--overhead` 处理。旧脚本在废弃窗口内仍可继续使用，但建议停止设置此参数。 |
-| `--qr-version` | `25` | QR 码版本 1-40（越大密度越高） |
+| `--qr-version` | `30` | QR 码版本 1-40（越大密度越高） |
 | `--border` | 标准 4 模块静区 | 静区宽度，按 QR 内容宽度百分比计算（`--border 10` = 10%，`--border 0` 可关闭） |
 | `--lead-in-seconds` | `0.0` | 在首个 QR 帧前插入白色引导帧，便于开始录屏 |
 | `--no-compress` | - | 禁用 zlib 压缩 |
@@ -368,7 +369,7 @@ Offset  Size  Field
 | Base45 alphanumeric | raw bytes → base45 → `0-9A-Z $%*+-./:` | Alphanumeric（5.5 bit/字符） | ~67%（但落在更密的 QR 模式 → **净密度更高**） | 是 |
 | Base64 | raw bytes → base64 string | Byte（8 bit/字符） | ~33% | 否（`--qr-mode base64`） |
 
-Base45（RFC 9285）成为默认是因为 QR 的 alphanumeric 模式每字符承载的 bit 比 byte 模式更多——V25/M 下 base45 的单帧载荷比 base64 大约 30%，实测视频小 20~25%、编解码快 10~20%。
+Base45（RFC 9285）成为默认是因为 QR 的 alphanumeric 模式每字符承载的 bit 比 byte 模式更多——V30/M 下 base45 的单帧载荷比 base64 大约 30%，实测视频小 20~25%、编解码快 10~20%。
 
 ### 大文件与低内存路径
 

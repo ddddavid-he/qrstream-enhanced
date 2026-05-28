@@ -260,8 +260,9 @@ Output modes: `auto`, `interactive`, `log`, `quiet`, `verbose`
 
 ```
 qrstream (alias: qrs, python -m qrstream)
-├── encode <file> [-o out.mp4] [--display] [--overhead RATIO]
-│                 [--fps 10] [--codec h264] [--workers 1]
+├── encode <file> [-o out.mp4] [--display] [--anonymous]
+│                 [--overhead RATIO] [--fps 15] [--qr-version 30]
+│                 [--codec h264] [--workers 1]
 ├── decode <video> -o <file> [-s sample_rate] [--output-mode MODE]
 ├── calibrate [-o cal.mp4 | -i captured.mp4] [--precision standard]
 │             [--target-size SIZE] [--confidence P]

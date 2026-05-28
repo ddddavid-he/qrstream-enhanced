@@ -367,7 +367,7 @@ def _alphanumeric_byte_capacity(qr_version: int, ec_level: int) -> int:
 
 
 def auto_blocksize(filesize: int, ec_level: int = 1,
-                   qr_version: int = 25,
+                   qr_version: int = 30,
                    binary_qr: bool = True,
                    alphanumeric_qr: bool | None = None) -> int:
     """Choose an optimal blocksize for the given QR parameters.

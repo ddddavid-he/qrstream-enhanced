@@ -42,10 +42,11 @@ def _random_bytes(size: int, seed: int = 0) -> bytes:
 
 
 def _make_lt_blocks(raw: bytes, overhead: float = 2.0,
-                    compress: bool = True) -> list[bytes]:
+                    compress: bool = True,
+                    qr_version: int = 25) -> list[bytes]:
     """Return a list of packed LT blocks for ``raw``."""
     payload = zlib.compress(raw) if compress else raw
-    blocksize = auto_blocksize(len(payload))
+    blocksize = auto_blocksize(len(payload), qr_version=qr_version)
     K = ceil(len(payload) / blocksize)
     num = int(K * overhead)
     enc = LTEncoder(payload, blocksize, compressed=compress, alphanumeric_qr=True)

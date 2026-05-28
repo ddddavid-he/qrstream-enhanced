@@ -164,6 +164,48 @@ class TestCmdEncodeGate:
         cmd_encode(args)
         assert called, "encoder was not invoked on the happy path"
         assert called["kw"]["output_path"] == str(out)
+        assert called["kw"]["anonymous"] is False
+
+    def test_encode_anonymous_is_passed_to_video_encoder(
+            self, tmp_path, monkeypatch):
+        src = tmp_path / "secret.bin"
+        src.write_bytes(b"hello")
+        out = tmp_path / "out.mp4"
+
+        called: dict = {}
+        import qrstream.encoder as enc_mod
+        monkeypatch.setattr(
+            enc_mod, "encode_to_video",
+            lambda **kw: called.setdefault("kw", kw),
+        )
+
+        parser = build_parser()
+        args = parser.parse_args([
+            "encode", str(src), "-o", str(out), "--anonymous",
+        ])
+        cmd_encode(args)
+
+        assert called["kw"]["anonymous"] is True
+
+    def test_encode_anonymous_is_passed_to_display_encoder(
+            self, tmp_path, monkeypatch):
+        src = tmp_path / "secret.bin"
+        src.write_bytes(b"hello")
+
+        called: dict = {}
+        import qrstream.encoder as enc_mod
+        monkeypatch.setattr(
+            enc_mod, "encode_to_display",
+            lambda **kw: called.setdefault("kw", kw),
+        )
+
+        parser = build_parser()
+        args = parser.parse_args([
+            "encode", str(src), "--display", "--anonymous",
+        ])
+        cmd_encode(args)
+
+        assert called["kw"]["anonymous"] is True
 
     def test_encode_still_rejects_exact_same_input_output_path(
             self, tmp_path, capsys, monkeypatch):

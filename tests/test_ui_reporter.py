@@ -206,6 +206,19 @@ class TestLogReporter:
         assert 'size="4.0 KB"' in line
         assert 'duration=12.3s' in line
 
+    def test_log_encode_start_anonymous_hides_source_metadata(self):
+        buf = io.StringIO()
+        r = LogReporter(stream=buf)
+        r.encode_start(duration_sec=12.3, fps=30, qr_version=25,
+                       mode="base45", overhead=1.2,
+                       input_path="/tmp/private/secret.bin",
+                       file_size=4096, anonymous=True)
+        line = self._last_line(buf)
+        assert "secret.bin" not in line
+        assert "/tmp/private" not in line
+        assert "input=anonymous" in line
+        assert "size=hidden" in line
+
     def test_log_reports_ge_checkpoint(self):
         buf = io.StringIO()
         r = LogReporter(stream=buf)
@@ -277,6 +290,20 @@ class TestCalibrationProgressIntegration:
 
 
 class TestRichReporter:
+    def test_rich_encode_start_anonymous_hides_source_metadata(self):
+        buf = io.StringIO()
+        r = RichReporter(stream=buf)
+        r.encode_start(duration_sec=12.3, fps=30, qr_version=25,
+                       mode="base45", overhead=1.2,
+                       input_path="/tmp/private/secret.bin",
+                       file_size=4096, anonymous=True)
+        r.close()
+        output = buf.getvalue()
+        assert "secret.bin" not in output
+        assert "/tmp/private" not in output
+        assert "anonymous" in output
+        assert "hidden" in output
+
     def test_scan_and_file_rows_align_in_interactive_output(self):
         buf = io.StringIO()
         r = RichReporter(stream=buf)
