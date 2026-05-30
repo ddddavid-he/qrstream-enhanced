@@ -32,8 +32,9 @@ skills/
 *.egg
 uv.lock
 
-# Rust
+# Rust / SwiftPM
 target/
+.build/
 
 # Performance profiling outputs (local only, not versioned)
 docs/tooling/perf-profile/results/
