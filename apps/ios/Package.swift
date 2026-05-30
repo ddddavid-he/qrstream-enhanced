@@ -17,7 +17,7 @@ let package = Package(
         .target(
             name: "QRStream",
             path: "QRStream",
-            exclude: ["QRStreamApp.swift"]
+            exclude: ["QRStreamApp.swift", "Generated"]
         ),
         .testTarget(
             name: "QRStreamTests",

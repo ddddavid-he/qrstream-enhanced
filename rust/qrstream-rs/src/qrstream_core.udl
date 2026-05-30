@@ -1,0 +1,30 @@
+namespace qrstreamcore {};
+
+dictionary FfiDecodeResult {
+  boolean accepted;
+  boolean duplicate;
+  boolean done;
+  double progress;
+  u64 num_recovered;
+  u64 symbol_count;
+  u64 filesize;
+  string? error_message;
+};
+
+dictionary FfiDecodeSnapshot {
+  boolean initialized;
+  boolean done;
+  double progress;
+  u64 num_recovered;
+  u64 symbol_count;
+  u64 filesize;
+};
+
+interface FfiV4DecodeSession {
+  constructor();
+  FfiDecodeResult consume_qr_text(string qr_text);
+  FfiDecodeResult consume_block(bytes block);
+  FfiDecodeSnapshot snapshot();
+  bytes result_bytes();
+  void reset();
+};
