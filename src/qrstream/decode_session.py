@@ -54,9 +54,11 @@ class DecodeSession:
     tests, CLI integrations, and future Rust FFI shims.
     """
 
-    def __init__(self, c: float = DEFAULT_C, delta: float = DEFAULT_DELTA):
+    def __init__(self, c: float = DEFAULT_C, delta: float = DEFAULT_DELTA,
+                 use_rust_v4: bool = False):
         self.c = c
         self.delta = delta
+        self.use_rust_v4 = use_rust_v4
         self._decoder = None
         self._seen_blocks: set[tuple[int, int]] = set()
         self._last_frame_index: int | None = None
@@ -77,6 +79,8 @@ class DecodeSession:
         """
         self._last_frame_index = frame_index
         self._last_timestamp = timestamp
+        if isinstance(self._decoder, _RustV4Decoder):
+            return self._decoder.consume_qr_text(qr_text)
         block_bytes = _decode_qr_payload(qr_text)
         if block_bytes is None:
             return self._result(False, False, "invalid QRStream payload")
@@ -84,17 +88,30 @@ class DecodeSession:
 
     def consume_block(self, block_bytes: bytes) -> DecodeSessionResult:
         """Consume one raw V3/V4 protocol block."""
+        if self.use_rust_v4 and self._decoder is None:
+            self._decoder = _RustV4Decoder()
+            result = self._decoder.consume_block(block_bytes)
+            if result.accepted or not _could_be_v3_block(block_bytes):
+                return result
+            self._decoder = None
+
         try:
             header, data = unpack(block_bytes)
         except (ValueError, struct.error) as exc:
             return self._result(False, False, str(exc))
 
+        if self._decoder is None:
+            try:
+                self._decoder = self._new_decoder(header.version)
+            except RuntimeError as exc:
+                return self._result(False, False, str(exc))
+
+        if isinstance(self._decoder, _RustV4Decoder):
+            return self._decoder.consume_block(block_bytes)
+
         block_id = (header.version, header.seed)
         if block_id in self._seen_blocks:
             return self._result(True, True, None)
-
-        if self._decoder is None:
-            self._decoder = self._new_decoder(header.version)
 
         try:
             done, _ = self._decoder.consume_block(header, data)
@@ -145,6 +162,8 @@ class DecodeSession:
 
     def _new_decoder(self, version: int):
         if version == V4_VERSION:
+            if self.use_rust_v4:
+                return _RustV4Decoder()
             return RaptorQDecoder()
         return LTDecoder(c=self.c, delta=self.delta)
 
@@ -169,6 +188,75 @@ class DecodeSession:
             protocol_version=snapshot.protocol_version,
             error=error,
         )
+
+
+class _RustV4Decoder:
+    def __init__(self):
+        try:
+            import qrstream_rs
+        except ImportError as exc:
+            raise RuntimeError("Rust V4 backend is not available") from exc
+        self._session = qrstream_rs.V4DecodeSession()
+
+    @property
+    def initialized(self) -> bool:
+        return self._session.snapshot().initialized
+
+    @property
+    def K(self) -> int:
+        return self._session.snapshot().symbol_count or 0
+
+    @property
+    def filesize(self) -> int:
+        return self._session.snapshot().filesize or 0
+
+    @property
+    def protocol_version(self) -> int | None:
+        return self._session.snapshot().protocol_version
+
+    @property
+    def progress(self) -> float:
+        return self._session.snapshot().progress
+
+    @property
+    def num_recovered(self) -> int:
+        return self._session.snapshot().num_recovered
+
+    def is_done(self) -> bool:
+        return self._session.snapshot().done
+
+    def consume_block(self, block_bytes: bytes) -> DecodeSessionResult:
+        return _convert_rust_result(self._session.consume_block(block_bytes))
+
+    def consume_blocks(self, blocks) -> DecodeSessionResult:
+        return _convert_rust_result(self._session.consume_blocks(blocks))
+
+    def consume_qr_text(self, qr_text: str) -> DecodeSessionResult:
+        return _convert_rust_result(self._session.consume_qr_text(qr_text))
+
+    def try_gaussian_rescue(self) -> bool:
+        return self.is_done()
+
+    def bytes_dump(self) -> bytes:
+        return self._session.result_bytes()
+
+
+def _convert_rust_result(result) -> DecodeSessionResult:
+    return DecodeSessionResult(
+        accepted=result.accepted,
+        duplicate=result.duplicate,
+        done=result.done,
+        progress=result.progress,
+        num_recovered=result.num_recovered,
+        symbol_count=result.symbol_count,
+        filesize=result.filesize,
+        protocol_version=result.protocol_version,
+        error=result.error,
+    )
+
+
+def _could_be_v3_block(block_bytes: bytes) -> bool:
+    return bool(block_bytes) and block_bytes[0] == 0x03
 
 
 def _decode_qr_payload(qr_text: str) -> bytes | None:

@@ -32,6 +32,9 @@ skills/
 *.egg
 uv.lock
 
+# Rust
+target/
+
 # Performance profiling outputs (local only, not versioned)
 docs/tooling/perf-profile/results/
 

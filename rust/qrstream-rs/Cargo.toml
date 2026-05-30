@@ -1,0 +1,15 @@
+[package]
+name = "qrstream-rs"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "qrstream_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+base64 = "0.22"
+crc32fast = "1.4"
+pyo3 = { version = "0.27", features = ["extension-module"] }
+flate2 = "1.0"
+raptorq = "2.0.1"
