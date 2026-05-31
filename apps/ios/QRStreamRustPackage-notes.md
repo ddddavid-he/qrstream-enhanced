@@ -48,6 +48,46 @@ DEVELOPMENT_TEAM=<your_team_id> xcodegen generate
 
 ### 3. Build & run
 
+A `Makefile` wraps the long `xcodebuild`/`devicectl` invocations:
+
+```bash
+cd apps/ios
+
+make bootstrap                    # one-time: fetch zxing-cpp + zint sources
+make build-sim                    # build for the iOS Simulator
+make build-device DEVICE=<udid>   # build for a real device
+make run DEVICE=<udid>            # build + install + launch on device
+make devices                      # list connected real devices
+make clean                        # wipe DerivedData + SourcePackages + .xcodeproj
+make help                         # see all targets
+```
+
+Setting `DEVELOPMENT_TEAM` (10-character Apple Developer Team ID) is required for device builds:
+
+```bash
+make build-device DEVICE=<udid> DEVELOPMENT_TEAM=ABCDE12345
+# or export it once:
+export DEVELOPMENT_TEAM=ABCDE12345 && make build-device DEVICE=<udid>
+```
+
+After the first install, the device user must visit **Settings → General → VPN & Device Management → Developer App** and trust the developer certificate before the app will launch.
+
+Free Personal Team provisioning profiles expire after **7 days**; rerun `make build-device` to refresh.
+
+### Why `make bootstrap` exists
+
+zxing-cpp v3+ pulls the `zint` submodule recursively, and SwiftPM's
+shallow-clone pathway intermittently fails with `Unable to create
+shallow.lock: No such file or directory` because the submodule's git metadata
+directory hasn't been created yet when shallow-clone tries to write to it.
+`make bootstrap` does the clone manually with the full `git submodule update
+--init --recursive` flow, sidestepping the race. Once `SourcePackages/`
+exists, `xcodebuild` happily reuses it.
+
+### Manual xcodebuild commands
+
+If you'd rather skip the Makefile:
+
 **Simulator** (no signing needed):
 
 ```bash
