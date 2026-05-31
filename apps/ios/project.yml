@@ -1,0 +1,47 @@
+name: QRStreamApp
+options:
+  bundleIdPrefix: dev.qrstream
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+targets:
+  QRStreamApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: QRStream/QRStreamApp.swift
+      - path: QRStream/ContentView.swift
+      - path: QRStream/ScannerView.swift
+      - path: QRStream/DecodeProgressView.swift
+      - path: QRStream/DecodeSessionModel.swift
+      - path: QRStream/RustDecodeSession.swift
+      - path: QRStream/Generated/qrstreamcore.swift
+      - path: QRStreamRustFFI/src/anchor.c
+    dependencies:
+      - framework: QRStreamRust.xcframework
+        embed: false
+    info:
+      path: QRStreamApp/Info.plist
+      properties:
+        CFBundleDisplayName: QRStream
+        UILaunchScreen:
+          UIColorName: ""
+        NSCameraUsageDescription: "Scan QRStream codes to receive files."
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.qrstream.app
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+        CODE_SIGN_IDENTITY: "Apple Development"
+        SWIFT_VERSION: "5"
+        SWIFT_STRICT_CONCURRENCY: minimal
+        GENERATE_INFOPLIST_FILE: NO

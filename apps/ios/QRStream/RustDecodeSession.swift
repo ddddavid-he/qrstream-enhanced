@@ -1,6 +1,8 @@
 import Foundation
+#if canImport(QRStreamRust)
+import QRStreamRust
+#endif
 
-#if canImport(qrstreamcoreFFI)
 public final class RustDecodeSession: QRStreamDecodeSession {
     private let session: FfiV4DecodeSession
 
@@ -52,4 +54,3 @@ public final class RustDecodeSession: QRStreamDecodeSession {
         )
     }
 }
-#endif

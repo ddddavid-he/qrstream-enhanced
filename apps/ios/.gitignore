@@ -1,0 +1,15 @@
+# XcodeGen-generated; project.yml is the source of truth.
+# Avoid committing because the generated project may embed paths that leak
+# local developer info (Team IDs, derived data paths, code signing identities).
+QRStreamApp.xcodeproj/
+QRStreamApp/Info.plist
+
+# Pre-built Rust xcframework (95MB) — produced by `cargo build` + xcodebuild
+# in rust/qrstream-rs. Build it locally rather than committing the binary.
+# See apps/ios/QRStreamRustPackage-notes.md for build instructions.
+QRStreamRust.xcframework/
+
+# Local developer overrides (for DEVELOPMENT_TEAM etc.)
+*.xcconfig.local
+xcconfig.local
+.env
