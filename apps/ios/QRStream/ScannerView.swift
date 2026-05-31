@@ -1,8 +1,9 @@
 import SwiftUI
 
-#if canImport(UIKit) && canImport(AVFoundation)
+#if canImport(UIKit) && canImport(AVFoundation) && canImport(ZXingCpp)
 import AVFoundation
 import UIKit
+import ZXingCpp
 
 public struct ScannerView: UIViewControllerRepresentable {
     public let onQRCode: (String) -> Void
@@ -20,12 +21,37 @@ public struct ScannerView: UIViewControllerRepresentable {
     public func updateUIViewController(_ uiViewController: ScannerViewController, context: Context) {}
 }
 
-public final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
+public final class ScannerViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDelegate {
     public var onQRCode: ((String) -> Void)?
 
     private let session = AVCaptureSession()
     private var previewLayer: AVCaptureVideoPreviewLayer?
-    private var lastPayload: String?
+
+    /// Dedicated queue for AVFoundation sample-buffer delivery and ZXingCpp decoding.
+    /// Detection is non-trivially CPU-bound (~10-30 ms per 1080p frame with
+    /// `tryHarder` on), so keeping it off the main queue prevents UI stalls.
+    private let detectionQueue = DispatchQueue(
+        label: "dev.qrstream.scanner.detection",
+        qos: .userInitiated
+    )
+
+    private let payloadDeduper = PayloadDeduper()
+
+    /// Reused across frames so ZXingCpp doesn't pay setup costs on every frame.
+    /// `tryHarder` trades a few ms of latency for substantially higher
+    /// recognition rate on dense (version 30+) symbols at >15 fps.
+    private lazy var reader: ZXIBarcodeReader = {
+        let options = ZXIReaderOptions()
+        options.formats = [NSNumber(value: ZXIFormat.QR_CODE.rawValue)]
+        options.tryHarder = true
+        options.tryRotate = false
+        options.tryInvert = false
+        options.tryDownscale = true
+        // `maxNumberOfSymbols == 0` means "unlimited" in zxing-cpp; cap it so a
+        // single frame with multiple QRs doesn't run away.
+        options.maxNumberOfSymbols = 4
+        return ZXIBarcodeReader(options: options)
+    }()
 
     public override func viewDidLoad() {
         super.viewDidLoad()
@@ -41,7 +67,7 @@ public final class ScannerViewController: UIViewController, AVCaptureMetadataOut
     public override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         if !session.isRunning {
-            DispatchQueue.global(qos: .userInitiated).async { [session] in
+            detectionQueue.async { [session] in
                 session.startRunning()
             }
         }
@@ -64,20 +90,39 @@ public final class ScannerViewController: UIViewController, AVCaptureMetadataOut
         }
 
         session.beginConfiguration()
-        session.sessionPreset = .hd1280x720
+        // 1080p strikes a balance between zxing-cpp decoding cost and symbol
+        // legibility. 4K roughly doubles per-frame latency without a
+        // recognition-rate win for typical hand-held framing.
+        if session.canSetSessionPreset(.hd1920x1080) {
+            session.sessionPreset = .hd1920x1080
+        } else {
+            session.sessionPreset = .high
+        }
         session.addInput(input)
 
-        let metadataOutput = AVCaptureMetadataOutput()
-        guard session.canAddOutput(metadataOutput) else {
+        let videoOutput = AVCaptureVideoDataOutput()
+        videoOutput.alwaysDiscardsLateVideoFrames = true
+        // BGRA matches ZXingCpp's most-tested input path on iOS.
+        videoOutput.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ]
+        guard session.canAddOutput(videoOutput) else {
             session.commitConfiguration()
             showUnavailableLabel()
             return
         }
-        session.addOutput(metadataOutput)
-        metadataOutput.setMetadataObjectsDelegate(self, queue: .main)
-        if metadataOutput.availableMetadataObjectTypes.contains(.qr) {
-            metadataOutput.metadataObjectTypes = [.qr]
+        videoOutput.setSampleBufferDelegate(self, queue: detectionQueue)
+        session.addOutput(videoOutput)
+
+        if let connection = videoOutput.connection(with: .video) {
+            if connection.isVideoOrientationSupported {
+                connection.videoOrientation = .portrait
+            }
+            if connection.isVideoStabilizationSupported {
+                connection.preferredVideoStabilizationMode = .off
+            }
         }
+
         session.commitConfiguration()
 
         let layer = AVCaptureVideoPreviewLayer(session: session)
@@ -99,20 +144,70 @@ public final class ScannerViewController: UIViewController, AVCaptureMetadataOut
         ])
     }
 
-    public func metadataOutput(
-        _ output: AVCaptureMetadataOutput,
-        didOutput metadataObjects: [AVMetadataObject],
+    // MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
+
+    public func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
-        guard let object = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
-              object.type == .qr,
-              let payload = object.stringValue,
-              payload != lastPayload
-        else {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        // ZXingCpp accesses the pixel buffer's base address directly. Calling
+        // synchronously keeps the sample buffer alive for the duration of the
+        // read and avoids use-after-free.
+        let results: [ZXIResult]
+        do {
+            results = try reader.read(pixelBuffer)
+        } catch {
+            // ZXingCpp throws on malformed frames; ignore and wait for the next.
             return
         }
-        lastPayload = payload
-        onQRCode?(payload)
+
+        guard !results.isEmpty else { return }
+
+        for result in results
+        where result.format == ZXIFormat.QR_CODE && !result.text.isEmpty {
+            let payload = result.text
+            guard payloadDeduper.shouldEmit(payload) else { continue }
+            let onQRCode = self.onQRCode
+            DispatchQueue.main.async {
+                onQRCode?(payload)
+            }
+        }
+    }
+}
+
+/// Drops payloads we have already forwarded to the decode session.
+///
+/// AVCaptureVideoDataOutput hands us every frame, so the same QR symbol can
+/// arrive dozens of times in a row. The Rust decoder is itself idempotent, but
+/// the FFI hop is non-trivial — skipping duplicates here saves work and keeps
+/// the status UI stable.
+private final class PayloadDeduper {
+    private let lock = NSLock()
+    private var seen: Set<String> = []
+    private var ringBuffer: [String] = []
+    private let capacity = 4096
+
+    func shouldEmit(_ payload: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if seen.contains(payload) { return false }
+        seen.insert(payload)
+        ringBuffer.append(payload)
+        if ringBuffer.count > capacity {
+            let evicted = ringBuffer.removeFirst()
+            seen.remove(evicted)
+        }
+        return true
+    }
+
+    func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        seen.removeAll()
+        ringBuffer.removeAll()
     }
 }
 #else

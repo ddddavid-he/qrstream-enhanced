@@ -9,6 +9,9 @@ QRStreamApp/Info.plist
 # See apps/ios/QRStreamRustPackage-notes.md for build instructions.
 QRStreamRust.xcframework/
 
+# SwiftPM checkouts when using -clonedSourcePackagesDirPath SourcePackages.
+SourcePackages/
+
 # Local developer overrides (for DEVELOPMENT_TEAM etc.)
 *.xcconfig.local
 xcconfig.local

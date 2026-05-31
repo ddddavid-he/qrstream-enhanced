@@ -5,6 +5,11 @@ options:
     iOS: "17.0"
   createIntermediateGroups: true
 
+packages:
+  ZXingCpp:
+    url: https://github.com/zxing-cpp/zxing-cpp
+    from: 3.0.2
+
 targets:
   QRStreamApp:
     type: application
@@ -21,6 +26,8 @@ targets:
     dependencies:
       - framework: QRStreamRust.xcframework
         embed: false
+      - package: ZXingCpp
+        product: ZXingCpp
     info:
       path: QRStreamApp/Info.plist
       properties:

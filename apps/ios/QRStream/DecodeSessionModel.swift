@@ -158,4 +158,9 @@ public final class DecodeSessionModel: ObservableObject {
         snapshot = session.snapshot()
         statusMessage = nil
     }
+
+    /// Returns the decoded bytes if the stream finished, otherwise throws.
+    public func resultBytes() throws -> Data {
+        try session.resultBytes()
+    }
 }

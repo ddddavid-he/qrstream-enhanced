@@ -54,6 +54,7 @@ DEVELOPMENT_TEAM=<your_team_id> xcodegen generate
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
   xcodebuild -project apps/ios/QRStreamApp.xcodeproj -scheme QRStreamApp \
     -destination "platform=iOS Simulator,name=iPhone 17 Pro" \
+    -clonedSourcePackagesDirPath apps/ios/SourcePackages \
     CODE_SIGNING_ALLOWED=NO build
 ```
 
@@ -63,6 +64,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
   xcodebuild -project apps/ios/QRStreamApp.xcodeproj -scheme QRStreamApp \
     -destination "id=<device-udid>" \
+    -clonedSourcePackagesDirPath apps/ios/SourcePackages \
     -allowProvisioningUpdates build
 
 # Find the udid via:
@@ -71,6 +73,8 @@ xcrun devicectl list devices
 xcrun devicectl device install app --device <udid> <path-to-built-.app>
 xcrun devicectl device process launch --device <udid> dev.qrstream.app
 ```
+
+`-clonedSourcePackagesDirPath` keeps the SwiftPM checkouts (notably ZXingCpp, ~50 MB of C++ sources) inside the project tree rather than DerivedData, so a `rm -rf DerivedData` doesn't force a full re-clone + recompile.
 
 After the first install, the device user must visit **Settings → General → VPN & Device Management → Developer App** and trust the developer certificate before the app will launch.
 
