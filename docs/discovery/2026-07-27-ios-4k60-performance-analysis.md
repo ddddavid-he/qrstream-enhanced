@@ -147,3 +147,31 @@ Rust/UniFFI `consumeQrText` P50 约 0.02～0.06 ms、P95 约
 ROI、temporal gate 和多 detector worker 会改变“每个完整帧都执行一次检测”
 的含义，暂不进入第一阶段。若真机 4K60 仍不达标，需要先重新确认是否允许
 ROI 内逐帧检测，再引入这些策略。
+
+## 实施后本地验证
+
+实现改为 NV12、normal reader 和精确的 zxing 防御性补丁后，Mac 回放不再把
+录像标准化到 1080p，而是让 `AVAssetReader` 输出全部原始 3840x2160 帧。
+Release 构建仍保留 zxing assertion。
+
+| Case | 全帧处理 FPS | ZXing P50 | ZXing P95 | 全帧恢复 |
+|---|---:|---:|---:|---|
+| baseline | 121.74 | 7.89 ms | 9.82 ms | complete, SHA match |
+| balanced | 113.70 | 8.69 ms | 10.77 ms | complete, SHA match |
+| dense | 101.81 | 9.65 ms | 11.68 ms | complete, SHA match |
+| throughput | 97.68 | 9.36 ms | 12.25 ms | complete, SHA match |
+
+四段的平均全帧处理能力都超过 60 fps，P95 都低于 16.67 ms。旧的容量 1
+latest-frame 模拟在 throughput 的少量长尾帧上仍会覆盖 18 帧；新契约使用
+全帧 FIFO，允许可消化的瞬时积压，因此不以 latest-frame 结果判定失败。
+
+这组结果仍然只证明 Mac 和算法路径有 4K60 余量。已发现的 iPhone 15 Pro
+当时处于 `unavailable`，所以相机真实 delivered FPS、drop callback、10 分钟
+thermal state 和运行时降级仍需在设备重新连接后验证。
+
+同时完成：
+
+- 7 个 Swift 单元测试通过。
+- arm64 iOS Simulator Debug 构建通过。
+- arm64 iOS Simulator Release 构建通过。
+- `balanced` 原 assertion 帧在 assertion 保持启用时不再终止进程。
