@@ -24,6 +24,9 @@ PROJECT      := QRStreamApp.xcodeproj
 SCHEME       := QRStreamApp
 BUNDLE_ID    := dev.qrstream.app
 SOURCE_PKGS  := SourcePackages
+ZXING_CHECKOUT := $(SOURCE_PKGS)/checkouts/zxing-cpp
+ZXING_REVISION := 8dd1cf5c4fd6fb6211bb96713db926ac6f2cf825
+ZXING_PATCH := $(CURDIR)/patches/zxing-cpp-3.0.2-invalid-regression-line.patch
 
 # Pin to a specific simulator if set; otherwise xcodebuild picks one matching
 # `name=iPhone 17 Pro`.
@@ -42,29 +45,46 @@ XCODEBUILD_FLAGS := \
 
 # -- Targets ------------------------------------------------------------------
 
-.PHONY: bootstrap generate build-sim build-device install run devices clean help
+.PHONY: bootstrap patch-zxing generate build-sim build-device install run devices clean help
 
 help:
 	@awk 'BEGIN { FS = ":.*?##" } /^[a-zA-Z0-9_-]+:.*?##/ { printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
-bootstrap: $(SOURCE_PKGS)/checkouts/zxing-cpp/zint/CMakeLists.txt ## Fetch SwiftPM dependencies (zxing-cpp + zint submodule)
+bootstrap: $(ZXING_CHECKOUT)/zint/CMakeLists.txt patch-zxing ## Fetch and patch zxing-cpp
 
 # SwiftPM's `xcodebuild -resolvePackageDependencies` occasionally fails to
 # initialize the zxing-cpp `zint` submodule because its shallow-clone metadata
 # is created in a directory that doesn't exist yet. Doing the clone manually
 # sidesteps that race entirely. Subsequent `xcodebuild` runs are happy because
 # they only check that the checkout exists, not how it got there.
-$(SOURCE_PKGS)/checkouts/zxing-cpp/zint/CMakeLists.txt:
+$(ZXING_CHECKOUT)/zint/CMakeLists.txt:
 	@mkdir -p $(SOURCE_PKGS)/checkouts
-	@if [ ! -d $(SOURCE_PKGS)/checkouts/zxing-cpp ]; then \
+	@if [ ! -d $(ZXING_CHECKOUT) ]; then \
 		echo "==> Cloning zxing-cpp (this may take a minute)"; \
 		git clone --depth 1 --branch v3.0.2 \
 			https://github.com/zxing-cpp/zxing-cpp \
-			$(SOURCE_PKGS)/checkouts/zxing-cpp; \
+			$(ZXING_CHECKOUT); \
 	fi
 	@echo "==> Initializing zint submodule"
-	@cd $(SOURCE_PKGS)/checkouts/zxing-cpp && \
+	@cd $(ZXING_CHECKOUT) && \
 		git submodule update --init --recursive --depth 1
+
+# v3.0.2 can construct a RegressionLine from two identical alignment points
+# and then assert inside intersect(). Keep assertions enabled and guard the
+# invalid input at its caller instead of globally defining NDEBUG.
+patch-zxing: $(ZXING_CHECKOUT)/zint/CMakeLists.txt
+	@test "$$(git -C $(ZXING_CHECKOUT) rev-parse HEAD)" = "$(ZXING_REVISION)" || \
+		(echo "error: unexpected zxing-cpp revision; refusing to apply patch"; exit 1)
+	@chmod u+w $(ZXING_CHECKOUT)/core/src/qrcode/QRDetector.cpp
+	@if git -C $(ZXING_CHECKOUT) apply --reverse --check $(ZXING_PATCH) >/dev/null 2>&1; then \
+		echo "==> zxing-cpp regression-line patch already applied"; \
+	elif git -C $(ZXING_CHECKOUT) apply --check $(ZXING_PATCH); then \
+		echo "==> Applying zxing-cpp regression-line patch"; \
+		git -C $(ZXING_CHECKOUT) apply $(ZXING_PATCH); \
+	else \
+		echo "error: zxing-cpp patch does not apply cleanly"; \
+		exit 1; \
+	fi
 
 generate: bootstrap ## Regenerate the .xcodeproj from project.yml
 	@if [ -z "$(DEVELOPMENT_TEAM)" ]; then \

@@ -1,0 +1,25 @@
+diff --git a/core/src/qrcode/QRDetector.cpp b/core/src/qrcode/QRDetector.cpp
+index b1444daa..76a98803 100644
+--- a/core/src/qrcode/QRDetector.cpp
++++ b/core/src/qrcode/QRDetector.cpp
+@@ -467,11 +467,15 @@ DetectorResult SampleQR(const BitMatrix& image, const FinderPatternSet& fp)
+ 
+ 				// if we found 2 each, intersect the two lines that are formed by connecting the point pairs
+ 				if (Size(hori) == 2 && Size(verti) == 2) {
+-					auto guessed = intersect(RegressionLine(hori[0], hori[1]), RegressionLine(verti[0], verti[1]));
+-					auto found = LocateAlignmentPattern(image, moduleSize, guessed);
+-					// search again near that intersection and if the search fails, use the intersection
+-					if (!found) printf("location guessed at %dx%d\n", x, y);
+-					apP.set(x, y, found ? *found : guessed);
++					auto horiLine = RegressionLine(hori[0], hori[1]);
++					auto vertiLine = RegressionLine(verti[0], verti[1]);
++					if (horiLine.isValid() && vertiLine.isValid()) {
++						auto guessed = intersect(horiLine, vertiLine);
++						auto found = LocateAlignmentPattern(image, moduleSize, guessed);
++						// search again near that intersection and if the search fails, use the intersection
++						if (!found) printf("location guessed at %dx%d\n", x, y);
++						apP.set(x, y, found ? *found : guessed);
++					}
+ 				}
+ 			}
+ 

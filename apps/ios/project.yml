@@ -7,8 +7,7 @@ options:
 
 packages:
   ZXingCpp:
-    url: https://github.com/zxing-cpp/zxing-cpp
-    from: 3.0.2
+    path: SourcePackages/checkouts/zxing-cpp
 
 targets:
   QRStreamApp:
