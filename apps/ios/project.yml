@@ -18,6 +18,7 @@ targets:
       - path: QRStream/QRStreamApp.swift
       - path: QRStream/ContentView.swift
       - path: QRStream/ScannerView.swift
+      - path: QRStream/CapturePerformance.swift
       - path: QRStream/DecodeProgressView.swift
       - path: QRStream/DecodeSessionModel.swift
       - path: QRStream/RustDecodeSession.swift

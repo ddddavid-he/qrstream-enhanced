@@ -7,19 +7,29 @@ public struct ContentView: View {
     @EnvironmentObject private var decodeModel: DecodeSessionModel
     @State private var shareURL: URL?
     @State private var shareError: String?
+    @State private var scannerPerformance = ScannerPerformanceSnapshot()
+    @State private var showScannerDebug = false
 
     public init() {}
 
     public var body: some View {
         NavigationStack {
             VStack(spacing: 20) {
-                ScannerView { text in
-                    decodeModel.consume(qrText: text)
-                }
+                ScannerView(
+                    recognitionEnabled: !decodeModel.snapshot.done,
+                    onPerformanceUpdate: { scannerPerformance = $0 },
+                    onQRCode: { text in
+                        decodeModel.consume(qrText: text)
+                    }
+                )
                 .frame(maxWidth: .infinity, minHeight: 360)
                 .clipShape(RoundedRectangle(cornerRadius: 20))
 
                 DecodeProgressView(snapshot: decodeModel.snapshot)
+
+                if showScannerDebug {
+                    ScannerPerformanceDetailsView(snapshot: scannerPerformance)
+                }
 
                 if decodeModel.snapshot.done {
                     Button {
@@ -51,6 +61,9 @@ public struct ContentView: View {
             .padding()
             .navigationTitle("QRStream")
             .toolbar {
+                Button(showScannerDebug ? "Hide Debug" : "Debug") {
+                    showScannerDebug.toggle()
+                }
                 Button("Reset") {
                     decodeModel.reset()
                     shareURL = nil
@@ -97,6 +110,65 @@ public struct ContentView: View {
             return "txt"
         }
         return "bin"
+    }
+}
+
+private struct ScannerPerformanceDetailsView: View {
+    let snapshot: ScannerPerformanceSnapshot
+
+    var body: some View {
+        Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+            metricRow(
+                "Capture",
+                captureDescription
+            )
+            metricRow(
+                "Delivered / detect",
+                String(
+                    format: "%.1f / %.1f fps",
+                    snapshot.deliveredFramesPerSecond,
+                    snapshot.detectionAttemptsPerSecond
+                )
+            )
+            metricRow(
+                "ZXing avg / P95",
+                String(
+                    format: "%.2f / %.2f ms",
+                    snapshot.averageDetectionMilliseconds,
+                    snapshot.p95DetectionMilliseconds
+                )
+            )
+            metricRow(
+                "Frames / drops",
+                "\(snapshot.detectionAttempts) / \(snapshot.droppedFrames)"
+            )
+            metricRow("Thermal", snapshot.thermalState)
+            if let statusMessage = snapshot.statusMessage {
+                metricRow("Status", statusMessage)
+            }
+        }
+        .font(.caption.monospacedDigit())
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private var captureDescription: String {
+        guard let tier = snapshot.activeTier else { return "Unavailable" }
+        guard snapshot.capturedWidth > 0, snapshot.capturedHeight > 0 else {
+            return tier.displayName
+        }
+        return "\(tier.displayName) · \(snapshot.capturedWidth)×\(snapshot.capturedHeight)"
+    }
+
+    @ViewBuilder
+    private func metricRow(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .textSelection(.enabled)
+        }
     }
 }
 
