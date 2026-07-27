@@ -9,73 +9,138 @@ public struct ContentView: View {
     @State private var shareError: String?
     @State private var scannerPerformance = ScannerPerformanceSnapshot()
     @State private var showScannerDebug = false
+    @State private var isScanning = false
 
     public init() {}
 
     public var body: some View {
-        NavigationStack {
-            VStack(spacing: 20) {
-                ScannerView(
-                    recognitionEnabled: !decodeModel.snapshot.done,
-                    onPerformanceUpdate: { scannerPerformance = $0 },
-                    onQRCode: { text in
-                        decodeModel.consume(qrText: text)
-                    }
-                )
-                .frame(maxWidth: .infinity, minHeight: 360)
-                .clipShape(RoundedRectangle(cornerRadius: 20))
+        ZStack {
+            ScannerView(
+                recognitionEnabled: isScanning && !decodeModel.snapshot.done,
+                onPerformanceUpdate: { scannerPerformance = $0 },
+                onQRCode: { text in
+                    decodeModel.consume(qrText: text)
+                }
+            )
+            .ignoresSafeArea()
 
-                DecodeProgressView(snapshot: decodeModel.snapshot)
+            LinearGradient(
+                colors: [
+                    .black.opacity(0.52),
+                    .clear,
+                    .clear,
+                    .black.opacity(0.72),
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+
+            VStack(spacing: 14) {
+                cameraToolbar
 
                 if showScannerDebug {
                     ScannerPerformanceDetailsView(snapshot: scannerPerformance)
+                        .transition(.move(edge: .top).combined(with: .opacity))
                 }
 
-                if decodeModel.snapshot.done {
-                    Button {
-                        prepareShare()
-                    } label: {
-                        Label("Share decoded file", systemImage: "square.and.arrow.up")
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 8)
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
+                Spacer(minLength: 16)
 
-                if let message = decodeModel.statusMessage {
-                    Text(message)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                ScannerReticle(isActive: isScanning)
+                    .frame(width: 270, height: 270)
 
-                if let shareError {
-                    Text(shareError)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                Spacer(minLength: 16)
 
-                Spacer()
+                CameraProgressOverlay(
+                    snapshot: decodeModel.snapshot,
+                    isScanning: isScanning,
+                    statusMessage: decodeModel.statusMessage,
+                    errorMessage: shareError
+                )
+
+                cameraControls
             }
-            .padding()
-            .navigationTitle("QRStream")
-            .toolbar {
-                Button(showScannerDebug ? "Hide Debug" : "Debug") {
-                    showScannerDebug.toggle()
-                }
-                Button("Reset") {
-                    decodeModel.reset()
-                    shareURL = nil
-                    shareError = nil
-                }
-            }
-            #if canImport(UIKit)
-            .sheet(item: $shareURL) { url in
-                ActivityView(activityItems: [url])
-            }
-            #endif
+            .padding(.horizontal, 18)
+            .safeAreaPadding(.top, 8)
+            .safeAreaPadding(.bottom, 10)
         }
+        .background(.black)
+        .preferredColorScheme(.dark)
+        .animation(.easeInOut(duration: 0.2), value: showScannerDebug)
+        .onChange(of: decodeModel.snapshot.done) { _, isDone in
+            if isDone {
+                isScanning = false
+            }
+        }
+        #if canImport(UIKit)
+        .sheet(item: $shareURL) { url in
+            ActivityView(activityItems: [url])
+        }
+        #endif
+    }
+
+    private var cameraToolbar: some View {
+        HStack(spacing: 12) {
+            Text("QRStream")
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(.white)
+
+            Spacer()
+
+            CameraToolbarButton(
+                systemName: showScannerDebug ? "waveform.path.ecg.rectangle.fill" : "waveform.path.ecg.rectangle",
+                accessibilityLabel: showScannerDebug ? "Hide debug metrics" : "Show debug metrics"
+            ) {
+                showScannerDebug.toggle()
+            }
+
+            CameraToolbarButton(
+                systemName: "arrow.counterclockwise",
+                accessibilityLabel: "Reset receiving session"
+            ) {
+                resetSession()
+            }
+        }
+    }
+
+    private var cameraControls: some View {
+        HStack(alignment: .center) {
+            Color.clear
+                .frame(width: 72, height: 56)
+
+            Spacer()
+
+            CameraScanButton(
+                isScanning: isScanning,
+                isDisabled: decodeModel.snapshot.done
+            ) {
+                isScanning.toggle()
+            }
+
+            Spacer()
+
+            if decodeModel.snapshot.done {
+                CameraToolbarButton(
+                    systemName: "square.and.arrow.up",
+                    accessibilityLabel: "Share decoded file",
+                    size: 56
+                ) {
+                    prepareShare()
+                }
+                .frame(width: 72, height: 56)
+            } else {
+                Color.clear
+                    .frame(width: 72, height: 56)
+            }
+        }
+    }
+
+    private func resetSession() {
+        isScanning = false
+        decodeModel.reset()
+        shareURL = nil
+        shareError = nil
     }
 
     private func prepareShare() {
@@ -110,6 +175,210 @@ public struct ContentView: View {
             return "txt"
         }
         return "bin"
+    }
+}
+
+private struct CameraToolbarButton: View {
+    let systemName: String
+    let accessibilityLabel: String
+    var size: CGFloat = 44
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: size * 0.4, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: size, height: size)
+                .background(.black.opacity(0.46), in: Circle())
+                .overlay {
+                    Circle()
+                        .stroke(.white.opacity(0.16), lineWidth: 1)
+                }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityLabel)
+    }
+}
+
+private struct CameraScanButton: View {
+    let isScanning: Bool
+    let isDisabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        VStack(spacing: 7) {
+            Button(action: action) {
+                ZStack {
+                    Circle()
+                        .stroke(.white, lineWidth: 4)
+                        .frame(width: 78, height: 78)
+
+                    if isScanning {
+                        RoundedRectangle(cornerRadius: 7)
+                            .fill(.red)
+                            .frame(width: 30, height: 30)
+                    } else {
+                        Circle()
+                            .fill(isDisabled ? .gray : .red)
+                            .frame(width: 62, height: 62)
+                    }
+                }
+                .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(isDisabled)
+            .accessibilityLabel(isScanning ? "Stop scanning" : "Start scanning")
+
+            Text(buttonCaption)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.white.opacity(isDisabled ? 0.65 : 0.92))
+        }
+        .frame(width: 112)
+    }
+
+    private var buttonCaption: String {
+        if isDisabled {
+            return "Complete"
+        }
+        return isScanning ? "Stop" : "Scan"
+    }
+}
+
+private struct ScannerReticle: View {
+    let isActive: Bool
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 28)
+                .fill(.black.opacity(isActive ? 0.06 : 0.16))
+
+            ScannerReticleShape()
+                .stroke(
+                    isActive ? Color.yellow : Color.white,
+                    style: StrokeStyle(
+                        lineWidth: 5,
+                        lineCap: .round,
+                        lineJoin: .round
+                    )
+                )
+                .padding(2.5)
+
+            if !isActive {
+                VStack(spacing: 9) {
+                    Image(systemName: "qrcode.viewfinder")
+                        .font(.system(size: 34, weight: .medium))
+                    Text("Tap Scan to begin")
+                        .font(.subheadline.weight(.medium))
+                }
+                .foregroundStyle(.white.opacity(0.92))
+            }
+        }
+        .shadow(color: .black.opacity(0.32), radius: 12, y: 5)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct ScannerReticleShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let length = min(rect.width, rect.height) * 0.16
+        var path = Path()
+
+        path.move(to: CGPoint(x: rect.minX, y: rect.minY + length))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.minX + length, y: rect.minY))
+
+        path.move(to: CGPoint(x: rect.maxX - length, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY + length))
+
+        path.move(to: CGPoint(x: rect.maxX, y: rect.maxY - length))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.maxX - length, y: rect.maxY))
+
+        path.move(to: CGPoint(x: rect.minX + length, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY - length))
+
+        return path
+    }
+}
+
+private struct CameraProgressOverlay: View {
+    let snapshot: DecodeSnapshot
+    let isScanning: Bool
+    let statusMessage: String?
+    let errorMessage: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label(title, systemImage: iconName)
+                    .font(.headline)
+                    .foregroundStyle(.white)
+
+                Spacer()
+
+                Text(progressText)
+                    .font(.headline.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.82))
+            }
+
+            ProgressView(value: snapshot.progress)
+                .tint(snapshot.done ? .green : .yellow)
+
+            Text(detailText)
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.76))
+
+            if let statusMessage {
+                Text(statusMessage)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.76))
+            }
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+        .padding(14)
+        .background(.black.opacity(0.48), in: RoundedRectangle(cornerRadius: 18))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(.white.opacity(0.12), lineWidth: 1)
+        }
+    }
+
+    private var title: String {
+        if snapshot.done {
+            return "Complete"
+        }
+        return isScanning ? "Scanning" : "Ready"
+    }
+
+    private var iconName: String {
+        if snapshot.done {
+            return "checkmark.circle.fill"
+        }
+        return isScanning ? "dot.radiowaves.left.and.right" : "viewfinder"
+    }
+
+    private var progressText: String {
+        "\(Int((snapshot.progress * 100).rounded()))%"
+    }
+
+    private var detailText: String {
+        if snapshot.done {
+            return "\(snapshot.numRecovered)/\(snapshot.symbolCount) symbols received"
+        }
+        if snapshot.initialized {
+            return "\(snapshot.numRecovered)/\(snapshot.symbolCount) symbols received"
+        }
+        return isScanning
+            ? "Keep the QRStream code inside the frame."
+            : "Preview is active. Recognition starts only when you tap Scan."
     }
 }
 
@@ -150,7 +419,12 @@ private struct ScannerPerformanceDetailsView: View {
         .font(.caption.monospacedDigit())
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .foregroundStyle(.white)
+        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 14))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(.white.opacity(0.12), lineWidth: 1)
+        }
     }
 
     private var captureDescription: String {
@@ -165,7 +439,7 @@ private struct ScannerPerformanceDetailsView: View {
     private func metricRow(_ label: String, _ value: String) -> some View {
         GridRow {
             Text(label)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.white.opacity(0.62))
             Text(value)
                 .textSelection(.enabled)
         }
