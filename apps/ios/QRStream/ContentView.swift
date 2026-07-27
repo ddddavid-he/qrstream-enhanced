@@ -47,8 +47,8 @@ public struct ContentView: View {
 
                 Spacer(minLength: 16)
 
-                ScannerReticle(isActive: isScanning)
-                    .frame(width: 270, height: 270)
+                ScannerCrosshair(isActive: isScanning)
+                    .frame(width: 58, height: 58)
 
                 Spacer(minLength: 16)
 
@@ -245,60 +245,48 @@ private struct CameraScanButton: View {
     }
 }
 
-private struct ScannerReticle: View {
+private struct ScannerCrosshair: View {
     let isActive: Bool
 
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 28)
-                .fill(.black.opacity(isActive ? 0.06 : 0.16))
-
-            ScannerReticleShape()
-                .stroke(
-                    isActive ? Color.yellow : Color.white,
-                    style: StrokeStyle(
-                        lineWidth: 5,
-                        lineCap: .round,
-                        lineJoin: .round
-                    )
-                )
-                .padding(2.5)
-
-            if !isActive {
-                VStack(spacing: 9) {
-                    Image(systemName: "qrcode.viewfinder")
-                        .font(.system(size: 34, weight: .medium))
-                    Text("Tap Scan to begin")
-                        .font(.subheadline.weight(.medium))
-                }
-                .foregroundStyle(.white.opacity(0.92))
-            }
-        }
-        .shadow(color: .black.opacity(0.32), radius: 12, y: 5)
+        CameraCrosshairShape()
+            .stroke(
+                isActive ? Color.yellow : Color.white,
+                style: StrokeStyle(lineWidth: 2.5, lineCap: .round)
+            )
+            .shadow(color: .black.opacity(0.65), radius: 3, y: 1)
         .accessibilityHidden(true)
     }
 }
 
-private struct ScannerReticleShape: Shape {
+private struct CameraCrosshairShape: Shape {
     func path(in rect: CGRect) -> Path {
-        let length = min(rect.width, rect.height) * 0.16
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let radius = min(rect.width, rect.height) * 0.14
+        let gap = radius + 5
+        let outerInset = min(rect.width, rect.height) * 0.08
         var path = Path()
 
-        path.move(to: CGPoint(x: rect.minX, y: rect.minY + length))
-        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY))
-        path.addLine(to: CGPoint(x: rect.minX + length, y: rect.minY))
+        path.addEllipse(
+            in: CGRect(
+                x: center.x - radius,
+                y: center.y - radius,
+                width: radius * 2,
+                height: radius * 2
+            )
+        )
 
-        path.move(to: CGPoint(x: rect.maxX - length, y: rect.minY))
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY))
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.minY + length))
+        path.move(to: CGPoint(x: center.x, y: rect.minY + outerInset))
+        path.addLine(to: CGPoint(x: center.x, y: center.y - gap))
 
-        path.move(to: CGPoint(x: rect.maxX, y: rect.maxY - length))
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
-        path.addLine(to: CGPoint(x: rect.maxX - length, y: rect.maxY))
+        path.move(to: CGPoint(x: center.x, y: center.y + gap))
+        path.addLine(to: CGPoint(x: center.x, y: rect.maxY - outerInset))
 
-        path.move(to: CGPoint(x: rect.minX + length, y: rect.maxY))
-        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
-        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY - length))
+        path.move(to: CGPoint(x: rect.minX + outerInset, y: center.y))
+        path.addLine(to: CGPoint(x: center.x - gap, y: center.y))
+
+        path.move(to: CGPoint(x: center.x + gap, y: center.y))
+        path.addLine(to: CGPoint(x: rect.maxX - outerInset, y: center.y))
 
         return path
     }
@@ -377,8 +365,8 @@ private struct CameraProgressOverlay: View {
             return "\(snapshot.numRecovered)/\(snapshot.symbolCount) symbols received"
         }
         return isScanning
-            ? "Keep the QRStream code inside the frame."
-            : "Preview is active. Recognition starts only when you tap Scan."
+            ? "Scanning the entire camera frame."
+            : "Preview is active. Tap Scan to recognize the entire frame."
     }
 }
 
