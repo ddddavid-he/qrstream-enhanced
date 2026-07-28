@@ -86,6 +86,7 @@ public struct ScannerPerformanceSnapshot: Equatable, Sendable {
     public var detectionAttemptsPerSecond: Double
     public var averageDetectionMilliseconds: Double
     public var p95DetectionMilliseconds: Double
+    public var detectRate: Double
     public var thermalState: String
     public var statusMessage: String?
 
@@ -100,6 +101,7 @@ public struct ScannerPerformanceSnapshot: Equatable, Sendable {
         detectionAttemptsPerSecond: Double = 0,
         averageDetectionMilliseconds: Double = 0,
         p95DetectionMilliseconds: Double = 0,
+        detectRate: Double = 0,
         thermalState: String = "unknown",
         statusMessage: String? = nil
     ) {
@@ -113,6 +115,7 @@ public struct ScannerPerformanceSnapshot: Equatable, Sendable {
         self.detectionAttemptsPerSecond = detectionAttemptsPerSecond
         self.averageDetectionMilliseconds = averageDetectionMilliseconds
         self.p95DetectionMilliseconds = p95DetectionMilliseconds
+        self.detectRate = detectRate
         self.thermalState = thermalState
         self.statusMessage = statusMessage
     }
@@ -175,8 +178,17 @@ struct ScannerPerformanceAccumulator {
     private var presentationTimestamps = BoundedDoubleWindow(capacity: 240)
     private var detectionTimestamps = BoundedDoubleWindow(capacity: 240)
     private var detectionLatencies = BoundedDoubleWindow(capacity: 240)
+    /// Pre-allocated ring buffer — O(1) append, no heap allocation in hot path.
+    private var hitRing: [Bool]
+    private var hitRingIndex: Int = 0
+    private var hitRingFilled: Bool = false
+    private static let hitRingCapacity = 128
     private var lastEvaluationAttempt: UInt64 = 0
     private var consecutiveSlowWindows = 0
+
+    init() {
+        self.hitRing = Array(repeating: false, count: Self.hitRingCapacity)
+    }
 
     mutating func reset(activeTier: CameraCaptureTier?) {
         self.activeTier = activeTier
@@ -188,6 +200,8 @@ struct ScannerPerformanceAccumulator {
         presentationTimestamps.reset()
         detectionTimestamps.reset()
         detectionLatencies.reset()
+        hitRingIndex = 0
+        hitRingFilled = false
         lastEvaluationAttempt = 0
         consecutiveSlowWindows = 0
     }
@@ -216,6 +230,21 @@ struct ScannerPerformanceAccumulator {
         droppedFrames += 1
     }
 
+    /// O(1): single array write + two integer ops.  Called at frame rate.
+    mutating func recordDetectionHit(_ hit: Bool) {
+        hitRing[hitRingIndex] = hit
+        hitRingIndex = (hitRingIndex + 1) % Self.hitRingCapacity
+        if hitRingIndex == 0 { hitRingFilled = true }
+    }
+
+    /// O(n) over 128 elements — called at 1 Hz, negligible.
+    private var detectRate: Double {
+        let count = hitRingFilled ? Self.hitRingCapacity : hitRingIndex
+        guard count > 0 else { return 0 }
+        let hits = hitRing.prefix(count).filter { $0 }.count
+        return Double(hits) / Double(count)
+    }
+
     func snapshot(
         thermalState: String,
         statusMessage: String? = nil
@@ -231,6 +260,7 @@ struct ScannerPerformanceAccumulator {
             detectionAttemptsPerSecond: detectionTimestamps.ratePerSecond,
             averageDetectionMilliseconds: detectionLatencies.average,
             p95DetectionMilliseconds: detectionLatencies.percentile(0.95),
+            detectRate: detectRate,
             thermalState: thermalState,
             statusMessage: statusMessage
         )

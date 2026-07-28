@@ -491,6 +491,7 @@ public final class ScannerViewController: UIViewController, AVCaptureVideoDataOu
             latencyMilliseconds: (end - start) * 1_000,
             wallTimeSeconds: end
         )
+        performance.recordDetectionHit(!results.isEmpty)
 
         if end - lastMetricsPublishTime >= 1 {
             lastMetricsPublishTime = end
