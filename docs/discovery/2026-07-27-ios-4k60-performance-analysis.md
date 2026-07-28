@@ -133,7 +133,8 @@ Rust/UniFFI `consumeQrText` P50 约 0.02～0.06 ms、P95 约
 ### 第二阶段：缩短逐帧检测路径
 
 1. 使用 NV12 Y plane 零拷贝入口。
-2. 默认 `tryHarder=false`；连续普通检测失败后才低频重试 hard 模式。
+2. 固定 `tryHarder=false`；普通检测失败、返回空结果或抛错时立即丢弃当前帧，
+   不在串行检测队列中执行 hard-mode 重试。
 3. 完成恢复后停止识别和 capture delivery。
 4. 修复 zxing-cpp assertion，并将触发帧纳入回归。
 

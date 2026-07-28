@@ -97,19 +97,17 @@ public final class ScannerViewController: UIViewController, AVCaptureVideoDataOu
     private var performance = ScannerPerformanceAccumulator()
     private var lastMetricsPublishTime: Double = 0
     private var performanceStatusMessage: String?
-    private var consecutiveNormalMisses = 0
     private var downgradePending = false
-    private let hardFallbackInterval = 30
 
     /// Reused across frames so ZXingCpp does not pay reader setup costs on each
-    /// sample. Normal mode is the measured fast path.
-    private lazy var normalReader = makeReader(tryHarder: false)
-    private lazy var hardReader = makeReader(tryHarder: true)
+    /// sample. A miss is discarded immediately; hard-mode retry is forbidden
+    /// because it blocks the serial detector queue and destroys live FPS.
+    private lazy var reader = makeReader()
 
-    private func makeReader(tryHarder: Bool) -> ZXIBarcodeReader {
+    private func makeReader() -> ZXIBarcodeReader {
         let options = ZXIReaderOptions()
         options.formats = [NSNumber(value: ZXIFormat.QR_CODE.rawValue)]
-        options.tryHarder = tryHarder
+        options.tryHarder = false
         options.tryRotate = false
         options.tryInvert = false
         options.tryDownscale = true
@@ -165,7 +163,6 @@ public final class ScannerViewController: UIViewController, AVCaptureVideoDataOu
             detectionQueue.async { [weak self] in
                 guard let self else { return }
                 self.performance.reset(activeTier: tier)
-                self.consecutiveNormalMisses = 0
                 self.lastMetricsPublishTime = 0
                 self.publishPerformance(statusMessage: "Recognition restarted")
             }
@@ -374,7 +371,6 @@ public final class ScannerViewController: UIViewController, AVCaptureVideoDataOu
             detectionQueue.sync { [weak self] in
                 guard let self else { return }
                 self.performance.reset(activeTier: nextTier)
-                self.consecutiveNormalMisses = 0
                 self.lastMetricsPublishTime = 0
             }
             connection?.isEnabled = isRecognitionEnabled()
@@ -486,15 +482,7 @@ public final class ScannerViewController: UIViewController, AVCaptureVideoDataOu
         let start = ProcessInfo.processInfo.systemUptime
         var results: [ZXIResult] = []
         do {
-            results = try normalReader.read(pixelBuffer)
-            if results.isEmpty {
-                consecutiveNormalMisses += 1
-                if consecutiveNormalMisses % hardFallbackInterval == 0 {
-                    results = try hardReader.read(pixelBuffer)
-                }
-            } else {
-                consecutiveNormalMisses = 0
-            }
+            results = try reader.read(pixelBuffer)
         } catch {
             results = []
         }
