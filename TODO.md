@@ -42,18 +42,54 @@
 
 ## P2: 兼容性与 QR 检测 Fallback
 
-- [ ] 编译 zxing-cpp 为 WASM 作为 fallback 检测器
-- [ ] 检测 BarcodeDetector 可用性，不可用时自动切换 zxing WASM
+- [x] 使用 zxing-wasm 作为 fallback 检测器，并将 WASM 静态资源打包进站点
+- [x] 检测 BarcodeDetector 可用性，不可用时自动切换 zxing WASM
 - [ ] Web Worker 中运行 QR 检测，避免阻塞 UI 线程
 - [ ] 测试 iOS Safari / Firefox / Chrome 兼容性
 
 ## P3: 性能优化
 
 - [ ] 帧预处理：自适应下采样到合理检测分辨率
-- [ ] 自适应采样率：根据检测成功率动态调整检测频率
-- [ ] 重复帧跳过：连续相同 symbol 的快速去重（已有 500ms 同文本去重）
+- [x] 逐视频帧调度：使用 requestVideoFrameCallback，移除固定 25 FPS 上限
+- [x] 重复帧识别：DecodeSession 按 PayloadId 去重并统计
 - [ ] SharedArrayBuffer 零拷贝传帧（如浏览器支持）
-- [ ] 性能 profiling 和瓶颈优化
+- [x] 性能基准：四个 4K/60 FPS MOV 均完整解码且端到端处理 >30 FPS
+- [ ] ❗ 真机性能达标：iOS Safari 实测未达标（见下方实测记录）
+
+---
+
+## 实测记录
+
+### 2026-08-25 · iPhone 15 Safari · balance.MOV 实拍屏 — ❌ 未通过
+
+- 部署版本：`web/qrstream-dev/v1.0.0`（基线 commit `4d8b257` 之后的性能改造，尚未提交）
+- 环境：iPhone 15 + Safari（无 BarcodeDetector，走 zxing-wasm fallback + rVFC 调度）
+- 现象：
+  1. **Detect FPS 仅 ~24，且数值恒定不动**（正常应随对焦/距离波动，60fps 源下预期 >30）
+  2. **进度条始终 0%**，无任何 symbol 被 accept
+- 对比：同版本在 macOS Node 基准中 balance.MOV 为 35.7 FPS、QR 命中 59.1%、完整解码（SHA-256 一致）
+- 状态：**未解决**，Node 基准通过不代表真机通过，真机门槛 >30 FPS 未达成
+
+初步分析（待真机验证）：
+
+1. 扫描循环停滞假设（优先）：数值"恒定不动"更像指标停止更新而非真实速率
+   —— 若 zxing `readBarcodesFromImageData` 在 iOS 上偶发 Promise 永不 resolve，
+   rVFC 链会断裂（`scheduleScan` 在 `finally` 中续链），此后所有指标冻结、进度为 0，
+   与现象完全吻合。需加 watchdog：单次扫描超时（如 500ms）强制续链并计数告警。
+2. 摄像头帧率假设：iOS Safari 低光下后置摄像头实际交付帧率可降至 24fps 以下，
+   rVFC 按呈现帧派发 → Detect FPS ≈ 摄像头实际帧率。需在 debug 面板确认
+   `track.getSettings().frameRate` 与 Camera frames FPS 是否同样 ~24。
+3. 检测失败假设：若 QR hit 为 0，则是 canvas 抓帧/降采样问题（1280px 下 V40
+   密集码模块尺寸过小）而非解码问题。需真机查看 debug 面板的
+   QR hit / accepted / invalid 计数定位层次。
+
+待办：
+
+- [ ] 真机复现并记录 debug 面板完整数据（Camera FPS / QR hit / accepted / invalid）
+- [ ] 扫描 watchdog：检测 Promise 超时后强制续链 rVFC，防止循环静默死亡
+- [ ] iOS 抓帧参数实验：提高抓帧分辨率 / 关闭降采样 / 尝试 `preferCurrentFrame`
+- [ ] 验证 `track.getSettings().frameRate`，必要时用 `advanced` constraints 提升帧率
+- [ ] 对比测试：iPhone Chrome、macOS Safari，区分 iOS 平台问题与 zxing-wasm 问题
 
 ## P4: 完善与体验
 
