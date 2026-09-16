@@ -3,6 +3,7 @@
 export interface CameraHandle {
   stream: MediaStream;
   video: HTMLVideoElement;
+  videoTrack: MediaStreamTrack;
   stop(): void;
 }
 
@@ -53,8 +54,9 @@ export async function startCamera(video: HTMLVideoElement): Promise<CameraHandle
     audio: false,
     video: {
       facingMode: { ideal: 'environment' },
-      width: { ideal: 1920 },
-      height: { ideal: 1080 },
+      width: { ideal: 3840 },
+      height: { ideal: 2160 },
+      frameRate: { ideal: 60, max: 60 },
     },
   };
 
@@ -76,9 +78,16 @@ export async function startCamera(video: HTMLVideoElement): Promise<CameraHandle
   video.muted = true;
   await video.play();
 
+  const videoTrack = stream.getVideoTracks()[0];
+  if (!videoTrack) {
+    for (const track of stream.getTracks()) track.stop();
+    throw new CameraError('Camera stream has no video track.', 'not-found');
+  }
+
   return {
     stream,
     video,
+    videoTrack,
     stop() {
       for (const track of stream.getTracks()) {
         track.stop();

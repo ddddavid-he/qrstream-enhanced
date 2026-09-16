@@ -44,12 +44,12 @@
 
 - [x] 使用 zxing-wasm 作为 fallback 检测器，并将 WASM 静态资源打包进站点
 - [x] 检测 BarcodeDetector 可用性，不可用时自动切换 zxing WASM
-- [ ] Web Worker 中运行 QR 检测，避免阻塞 UI 线程
+- [x] Web Worker 池中运行 QR 检测，池满丢弃旧帧并以 watchdog 回收失联 Worker
 - [ ] 测试 iOS Safari / Firefox / Chrome 兼容性
 
 ## P3: 性能优化
 
-- [ ] 帧预处理：自适应下采样到合理检测分辨率
+- [x] 帧预处理：GPU 缩放到 1280px，连续未检出时自动提升到 1600px 探测
 - [x] 逐视频帧调度：使用 requestVideoFrameCallback，移除固定 25 FPS 上限
 - [x] 重复帧识别：DecodeSession 按 PayloadId 去重并统计
 - [ ] SharedArrayBuffer 零拷贝传帧（如浏览器支持）
@@ -98,7 +98,22 @@
 - [ ] 多摄像头切换支持
 - [ ] 分辨率/帧率设置面板
 - [ ] 解码历史记录
-- [ ] 移动端 UI 适配
+- [x] 移动端 UI 适配与实时性能面板
+
+### 2026-09-16 · Worker 池与新接收界面
+
+- 从 `dev` 的 V4/RaptorQ Web 基线切出 `feature/web-decoder-performance-ui`。
+- 方案采用浅队列检测 Worker 池：逐视频帧调度、每个 Worker 最多一个在途帧、
+  池满直接丢弃旧帧、1.5 秒 watchdog 自动重建失联 Worker。
+- 摄像头优先协商 4K/60，检测帧在 GPU 路径缩放至 1280px；连续未检出时临时
+  提升到 1600px，兼顾吞吐和高版本密集 QR 的可读性。
+- `zxing_reader.wasm` 作为站点资源本地打包，不再依赖运行时 CDN。
+- 新界面展示 Camera FPS、Scan FPS、检测 P95、QR 命中率、有效块数和真实输入分辨率。
+- 本机单线程 Node 参考基准（不是浏览器 Worker 池或真机验收）：
+  - baseline.MOV：31.80 FPS，100% 恢复，SHA-256 一致；
+  - balance.MOV：33.85 FPS，100% 恢复，SHA-256 一致。
+- 浏览器 Worker 池为 30 FPS 以上提供并发余量，但 1080p/60 或 4K 输入能力仍需在目标
+  手机和浏览器上，以无持续积压、完整恢复且输出哈希一致为验收标准。
 
 ---
 
