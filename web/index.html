@@ -185,6 +185,8 @@
       font: 600 .68rem/1 ui-monospace, SFMono-Regular, Menlo, monospace;
     }
     .live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 0 4px rgba(255,125,135,.12); }
+    #app:not([data-phase="scanning"]):not([data-phase="paused"]) .live-dot { background: var(--muted-2); box-shadow: none; }
+    #app[data-phase="paused"] .live-dot { background: #ffc66d; box-shadow: 0 0 0 4px rgba(255,198,109,.12); }
 
     .video-help {
       position: absolute;
@@ -195,12 +197,43 @@
     }
 
     .receive-panel { padding: 18px 18px 16px; }
+    .capture-controls {
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      gap: clamp(24px, 8vw, 54px);
+      padding: 17px 12px 8px;
+    }
+    .control-item { display: grid; justify-items: center; gap: 7px; min-width: 62px; }
+    .control-button {
+      width: 48px;
+      height: 48px;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 50%;
+      color: var(--ink);
+      background: rgba(255,255,255,.045);
+      cursor: pointer;
+      transition: transform .15s, opacity .15s, border-color .15s, background .15s;
+    }
+    .control-button:hover:not(:disabled) { transform: scale(1.055); border-color: rgba(255,255,255,.3); }
+    .control-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    .control-button:disabled { cursor: default; opacity: .28; }
+    #start-btn { width: 58px; height: 58px; margin-top: -5px; border-color: rgba(255,125,135,.32); background: rgba(255,125,135,.07); }
+    .record-icon { width: 24px; height: 24px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 16px rgba(255,87,101,.28); }
+    .pause-icon { display: flex; gap: 5px; }
+    .pause-icon::before, .pause-icon::after { content: ""; width: 4px; height: 17px; border-radius: 2px; background: currentColor; }
+    .stop-icon { width: 16px; height: 16px; border-radius: 4px; background: currentColor; }
+    .control-label { color: var(--muted); font-size: .68rem; }
     .status-row { display: flex; align-items: center; gap: 10px; }
     #status-dot {
       flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%;
       background: var(--muted-2); box-shadow: 0 0 0 5px rgba(99,119,111,.1);
     }
     #status-dot[data-phase="scanning"] { background: var(--accent); box-shadow: 0 0 0 5px rgba(118,230,173,.1); animation: breathe 1.8s infinite; }
+    #status-dot[data-phase="starting"] { background: var(--blue); box-shadow: 0 0 0 5px rgba(102,181,255,.1); }
+    #status-dot[data-phase="paused"] { background: #ffc66d; box-shadow: 0 0 0 5px rgba(255,198,109,.1); }
     #status-dot[data-phase="done"] { background: var(--accent); box-shadow: 0 0 16px rgba(118,230,173,.6); }
     #status-dot[data-phase="error"] { background: var(--danger); }
     @keyframes breathe { 50% { box-shadow: 0 0 0 8px rgba(118,230,173,0); } }
@@ -237,14 +270,12 @@
     .metric-value { display: block; overflow: hidden; color: var(--ink); font: 640 .9rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
     .metric-label { display: block; margin-top: 5px; color: var(--muted-2); font-size: .64rem; }
 
-    .actions { display: flex; gap: 9px; margin-top: 16px; }
     .button {
       min-height: 42px; border: 1px solid var(--line); border-radius: 12px; padding: 0 15px;
       color: var(--ink); background: rgba(255,255,255,.035); cursor: pointer; transition: transform .15s, border-color .15s, background .15s;
     }
     .button:hover { transform: translateY(-1px); border-color: rgba(118,230,173,.36); background: rgba(118,230,173,.07); }
     .button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-    #reset-btn { width: 100%; }
 
     #done-panel { margin-top: 14px; padding: 16px; border: 1px solid rgba(118,230,173,.24); border-radius: 17px; background: linear-gradient(145deg, rgba(71,211,143,.12), rgba(71,211,143,.035)); }
     .done-title { display: flex; align-items: center; gap: 9px; font-size: .86rem; font-weight: 650; }
@@ -306,6 +337,21 @@
           <div class="video-help"><span>保持画面稳定，并避免屏幕反光</span><span>自动对焦</span></div>
         </div>
 
+        <div class="capture-controls" aria-label="检测控制">
+          <div class="control-item">
+            <button class="control-button" id="pause-btn" type="button" aria-label="暂停检测" disabled><span class="pause-icon" aria-hidden="true"></span></button>
+            <span class="control-label">暂停</span>
+          </div>
+          <div class="control-item">
+            <button class="control-button" id="start-btn" type="button" aria-label="开始或继续检测" disabled><span class="record-icon" aria-hidden="true"></span></button>
+            <span class="control-label" id="start-label">开始</span>
+          </div>
+          <div class="control-item">
+            <button class="control-button" id="stop-btn" type="button" aria-label="停止检测并关闭摄像头" disabled><span class="stop-icon" aria-hidden="true"></span></button>
+            <span class="control-label">停止</span>
+          </div>
+        </div>
+
         <div class="receive-panel">
           <div class="status-row">
             <span id="status-dot" data-phase="loading"></span>
@@ -351,7 +397,6 @@
             <span id="done-info"></span>
             <button class="button" id="download-btn" type="button">下载恢复文件</button>
           </div>
-          <div class="actions"><button class="button" id="reset-btn" type="button">重新开始接收</button></div>
         </section>
       </aside>
     </div>

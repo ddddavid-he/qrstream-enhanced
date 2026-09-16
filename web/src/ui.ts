@@ -4,9 +4,20 @@ import type { SessionResult, SessionSnapshot } from './decode';
 import type { RuntimeMetrics } from './metrics';
 
 export interface UiCallbacks {
-  onReset(): void;
+  onStart(): void;
+  onPause(): void;
+  onStop(): void;
   onDownload(): void;
 }
+
+export type ControlState =
+  | 'loading'
+  | 'idle'
+  | 'starting'
+  | 'scanning'
+  | 'paused'
+  | 'stopped'
+  | 'done';
 
 function fmtBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -29,7 +40,10 @@ export class Ui {
   private readonly donePanel: HTMLElement;
   private readonly doneInfo: HTMLElement;
   private readonly downloadBtn: HTMLButtonElement;
-  private readonly resetBtn: HTMLButtonElement;
+  private readonly startBtn: HTMLButtonElement;
+  private readonly startLabel: HTMLElement;
+  private readonly pauseBtn: HTMLButtonElement;
+  private readonly stopBtn: HTMLButtonElement;
   private readonly errorBox: HTMLElement;
   private readonly videoWrap: HTMLElement;
   private readonly detectorName: HTMLElement;
@@ -47,27 +61,44 @@ export class Ui {
     this.donePanel = root.querySelector<HTMLElement>('#done-panel')!;
     this.doneInfo = root.querySelector<HTMLElement>('#done-info')!;
     this.downloadBtn = root.querySelector<HTMLButtonElement>('#download-btn')!;
-    this.resetBtn = root.querySelector<HTMLButtonElement>('#reset-btn')!;
+    this.startBtn = root.querySelector<HTMLButtonElement>('#start-btn')!;
+    this.startLabel = root.querySelector<HTMLElement>('#start-label')!;
+    this.pauseBtn = root.querySelector<HTMLButtonElement>('#pause-btn')!;
+    this.stopBtn = root.querySelector<HTMLButtonElement>('#stop-btn')!;
     this.errorBox = root.querySelector<HTMLElement>('#error-box')!;
     this.videoWrap = root.querySelector<HTMLElement>('#video-wrap')!;
     this.detectorName = root.querySelector<HTMLElement>('#detector-name')!;
 
-    this.resetBtn.addEventListener('click', callbacks.onReset);
+    this.startBtn.addEventListener('click', callbacks.onStart);
+    this.pauseBtn.addEventListener('click', callbacks.onPause);
+    this.stopBtn.addEventListener('click', callbacks.onStop);
     this.downloadBtn.addEventListener('click', callbacks.onDownload);
   }
 
-  setPhase(phase: 'loading' | 'scanning' | 'done'): void {
-    this.root.dataset.phase = phase;
-    this.statusDot.dataset.phase = phase;
+  setControlState(state: ControlState): void {
+    this.root.dataset.phase = state;
+    this.statusDot.dataset.phase = state;
+    this.startBtn.disabled = !['idle', 'paused', 'stopped', 'done'].includes(state);
+    this.pauseBtn.disabled = state !== 'scanning';
+    this.stopBtn.disabled = state !== 'scanning' && state !== 'paused';
+    this.startLabel.textContent = state === 'paused'
+      ? '继续'
+      : state === 'stopped' || state === 'done'
+        ? '重新开始'
+        : state === 'starting'
+          ? '启动中'
+          : state === 'scanning'
+            ? '检测中'
+            : '开始';
   }
 
   setStatus(text: string): void {
     this.status.textContent = text;
   }
 
-  markReady(part: 'core' | 'detector' | 'camera'): void {
+  markReady(part: 'core' | 'detector' | 'camera', ready: boolean): void {
     const node = this.root.querySelector<HTMLElement>(`#ready-${part}`);
-    if (node) node.dataset.ready = 'true';
+    if (node) node.dataset.ready = String(ready);
   }
 
   setDetectorName(name: string): void {
@@ -80,6 +111,11 @@ export class Ui {
     const fps = settings.frameRate ? ` @ ${Math.round(settings.frameRate)} FPS` : '';
     const node = this.root.querySelector<HTMLElement>('#camera-settings')!;
     node.textContent = width && height ? `${width} × ${height}${fps}` : '自动协商';
+  }
+
+  setCameraInactive(): void {
+    const node = this.root.querySelector<HTMLElement>('#camera-settings')!;
+    node.textContent = '摄像头已关闭';
   }
 
   showError(message: string): void {
@@ -134,7 +170,6 @@ export class Ui {
     this.downloadBtn.dataset.url = downloadUrl;
     this.downloadBtn.dataset.filename = filename;
     this.donePanel.hidden = false;
-    this.setPhase('done');
     this.setStatus('文件已完整恢复');
   }
 
@@ -148,7 +183,7 @@ export class Ui {
     anchor.click();
   }
 
-  reset(): void {
+  resetSession(): void {
     if (this.downloadUrl) URL.revokeObjectURL(this.downloadUrl);
     this.downloadUrl = null;
     this.bar.style.width = '0%';
@@ -159,8 +194,7 @@ export class Ui {
     this.downloadBtn.dataset.url = '';
     this.downloadBtn.dataset.filename = '';
     this.errorBox.hidden = true;
-    this.setPhase('scanning');
-    this.setStatus('将二维码保持在取景框内');
+    this.setStatus('正在启动摄像头…');
   }
 
   private setMetric(id: string, value: string): void {
