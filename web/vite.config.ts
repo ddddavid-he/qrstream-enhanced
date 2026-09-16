@@ -9,7 +9,9 @@ const wasmPkgDir = path.resolve(
 );
 
 export default defineConfig({
-  base: '/web/qrstream-dev/v1.0.0/',
+  // Keep the existing deployment path for local/intranet builds. GitHub Pages
+  // overrides this with /<repository>/ in the deployment workflow.
+  base: process.env.QRSTREAM_BASE ?? '/web/qrstream-dev/v1.0.0/',
   plugins: [wasm()],
   resolve: {
     alias: {
