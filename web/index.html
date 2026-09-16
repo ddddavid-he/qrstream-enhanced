@@ -165,9 +165,9 @@
       height: 1px;
       background: linear-gradient(90deg, transparent, var(--accent), transparent);
       box-shadow: 0 0 12px var(--accent);
-      animation: scan 2.7s ease-in-out infinite;
-      opacity: .75;
+      opacity: .18;
     }
+    #app[data-phase="scanning"] .scan-line { animation: scan 2.7s ease-in-out infinite; opacity: .75; }
     @keyframes scan { 0%,100% { top: 12%; opacity: .28; } 50% { top: 88%; opacity: .9; } }
     #video-wrap.has-hit .scan-frame { transform: translate(-50%, -50%) scale(1.025); filter: drop-shadow(0 0 20px rgba(72,232,155,.7)); }
 
@@ -186,6 +186,7 @@
     }
     .live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 0 4px rgba(255,125,135,.12); }
     #app:not([data-phase="scanning"]):not([data-phase="paused"]) .live-dot { background: var(--muted-2); box-shadow: none; }
+    #app[data-phase="idle"] .live-dot { background: var(--blue); box-shadow: 0 0 0 4px rgba(102,181,255,.12); }
     #app[data-phase="paused"] .live-dot { background: #ffc66d; box-shadow: 0 0 0 4px rgba(255,198,109,.12); }
 
     .video-help {
@@ -222,8 +223,11 @@
     .control-button:disabled { cursor: default; opacity: .28; }
     #start-btn { width: 58px; height: 58px; margin-top: -5px; border-color: rgba(255,125,135,.32); background: rgba(255,125,135,.07); }
     .record-icon { width: 24px; height: 24px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 16px rgba(255,87,101,.28); }
-    .pause-icon { display: flex; gap: 5px; }
+    .pause-icon { display: none; gap: 5px; }
     .pause-icon::before, .pause-icon::after { content: ""; width: 4px; height: 17px; border-radius: 2px; background: currentColor; }
+    #app[data-phase="scanning"] #start-btn { border-color: rgba(118,230,173,.38); color: var(--accent); background: rgba(118,230,173,.08); }
+    #app[data-phase="scanning"] #start-btn .record-icon { display: none; }
+    #app[data-phase="scanning"] #start-btn .pause-icon { display: flex; }
     .stop-icon { width: 16px; height: 16px; border-radius: 4px; background: currentColor; }
     .control-label { color: var(--muted); font-size: .68rem; }
     .status-row { display: flex; align-items: center; gap: 10px; }
@@ -351,11 +355,7 @@
 
         <div class="capture-controls" aria-label="检测控制">
           <div class="control-item">
-            <button class="control-button" id="pause-btn" type="button" aria-label="暂停检测" disabled><span class="pause-icon" aria-hidden="true"></span></button>
-            <span class="control-label">暂停</span>
-          </div>
-          <div class="control-item">
-            <button class="control-button" id="start-btn" type="button" aria-label="开始或继续检测" disabled><span class="record-icon" aria-hidden="true"></span></button>
+            <button class="control-button" id="start-btn" type="button" aria-label="开始扫描" disabled><span class="record-icon" aria-hidden="true"></span><span class="pause-icon" aria-hidden="true"></span></button>
             <span class="control-label" id="start-label">开始</span>
           </div>
           <div class="control-item">

@@ -1,4 +1,4 @@
-/** Entry point: user-controlled camera -> detector pool -> WASM session -> UI. */
+/** Entry point: live camera preview -> user-controlled scan -> WASM session. */
 
 import {
   startCamera,
@@ -31,8 +31,7 @@ class App {
     const root = document.querySelector<HTMLElement>('#app')!;
     this.video = root.querySelector<HTMLVideoElement>('#video')!;
     this.ui = new Ui(root, {
-      onStart: () => void this.startScanning(),
-      onPause: () => this.pauseScanning(),
+      onToggle: () => this.toggleScanning(),
       onStop: () => this.stopScanning(),
       onResolutionChange: (id) => void this.changeResolution(id),
       onDownload: () => this.ui.download(),
@@ -41,35 +40,73 @@ class App {
 
   async initialize(): Promise<void> {
     this.setState('loading');
-    this.ui.setStatus('正在加载解码核心…');
-    try {
-      this.decoder = await createDecodeClient();
-      this.ui.markReady('core', true);
-    } catch {
+    this.ui.setStatus('正在请求摄像头权限并初始化接收器…');
+
+    // Invoke getUserMedia first so the permission request starts as soon as
+    // the page boots; decoder and detector initialization continue in parallel.
+    const cameraPromise = startCamera(this.video).then((camera) => {
+      this.configureCamera(camera);
+      return camera;
+    });
+    const decoderPromise = createDecodeClient();
+    const detectorPromise = createQrDetector();
+    const [cameraResult, decoderResult, detectorResult] = await Promise.allSettled([
+      cameraPromise,
+      decoderPromise,
+      detectorPromise,
+    ]);
+
+    if (decoderResult.status === 'rejected') {
+      if (cameraResult.status === 'fulfilled') cameraResult.value.stop();
+      if (detectorResult.status === 'fulfilled') detectorResult.value.stop();
+      this.camera = null;
+      this.ui.markReady('camera', false);
+      this.ui.setCameraInactive();
       this.ui.showError('WASM 解码核心加载失败，请刷新页面重试。');
       return;
     }
+    this.decoder = decoderResult.value;
+    this.ui.markReady('core', true);
 
-    this.ui.setStatus('正在初始化高速 QR 检测器…');
-    try {
-      this.detector = await createQrDetector();
-      this.ui.markReady('detector', true);
-      this.ui.setDetectorName(this.detector.name);
-    } catch (error) {
-      this.ui.showError(`QR 检测器加载失败：${String(error)}`);
+    if (detectorResult.status === 'rejected') {
+      if (cameraResult.status === 'fulfilled') cameraResult.value.stop();
+      decoderResult.value.stop();
+      this.camera = null;
+      this.ui.markReady('camera', false);
+      this.ui.setCameraInactive();
+      this.ui.showError(`QR 检测器加载失败：${String(detectorResult.reason)}`);
+      return;
+    }
+    this.detector = detectorResult.value;
+    this.ui.markReady('detector', true);
+    this.ui.setDetectorName(this.detector.name);
+
+    if (cameraResult.status === 'rejected') {
+      this.setState('stopped');
+      this.ui.setCameraInactive();
+      this.showCameraError(cameraResult.reason);
       return;
     }
 
+    this.metrics.reset();
     this.setState('idle');
-    this.ui.setStatus('准备就绪，点击开始检测');
-    this.ui.setCameraInactive();
+    this.ui.setStatus('摄像头已就绪，点击开始扫描');
+    this.startMetrics();
+  }
+
+  private toggleScanning(): void {
+    if (this.state === 'scanning') {
+      this.pauseScanning();
+    } else {
+      void this.startScanning();
+    }
   }
 
   private async startScanning(): Promise<void> {
     if (!this.detector || !this.decoder || this.state === 'loading' || this.state === 'starting') return;
     if (this.state === 'scanning') return;
 
-    if (this.state === 'paused' && this.camera) {
+    if ((this.state === 'idle' || this.state === 'paused') && this.camera) {
       this.setState('scanning');
       this.ui.setStatus('正在接收数据…');
       this.scheduleNextFrame();
@@ -78,30 +115,7 @@ class App {
 
     if (this.state === 'stopped' || this.state === 'done') {
       await this.newSession();
-    }
-
-    this.setState('starting');
-    this.ui.clearError();
-    this.ui.setStatus('正在请求摄像头权限…');
-    try {
-      this.camera = await startCamera(this.video);
-      this.ui.markReady('camera', true);
-      this.ui.setCameraSettings(this.camera.videoTrack.getSettings());
-      this.ui.setResolutionOptions(
-        this.camera.resolutionOptions,
-        this.camera.videoTrack.getSettings(),
-      );
-    } catch (error) {
-      this.camera = null;
-      this.setState('idle');
-      this.ui.setCameraInactive();
-      if (error instanceof CameraError) {
-        this.ui.showError(error.message);
-        this.ui.setStatus('摄像头不可用');
-      } else {
-        this.ui.showError(`无法启动摄像头：${String(error)}`);
-      }
-      return;
+      if (!await this.openCamera()) return;
     }
 
     this.metrics.reset();
@@ -120,7 +134,7 @@ class App {
   }
 
   private stopScanning(): void {
-    if (this.state !== 'scanning' && this.state !== 'paused') return;
+    if (this.state !== 'idle' && this.state !== 'scanning' && this.state !== 'paused') return;
     this.generation++;
     this.cancelFrameCallback();
     this.stopMetrics();
@@ -130,6 +144,44 @@ class App {
     this.ui.setCameraInactive();
     this.setState('stopped');
     this.ui.setStatus('检测已停止，摄像头已关闭');
+  }
+
+  private async openCamera(): Promise<boolean> {
+    this.setState('starting');
+    this.ui.clearError();
+    this.ui.setStatus('正在请求摄像头权限…');
+    try {
+      const camera = await startCamera(this.video);
+      this.configureCamera(camera);
+      this.metrics.reset();
+      this.setState('idle');
+      this.ui.setStatus('摄像头已就绪，点击开始扫描');
+      this.startMetrics();
+      return true;
+    } catch (error) {
+      this.camera = null;
+      this.setState('stopped');
+      this.ui.setCameraInactive();
+      this.showCameraError(error);
+      return false;
+    }
+  }
+
+  private configureCamera(camera: CameraHandle): void {
+    this.camera = camera;
+    this.ui.markReady('camera', true);
+    const settings = camera.videoTrack.getSettings();
+    this.ui.setCameraSettings(settings);
+    this.ui.setResolutionOptions(camera.resolutionOptions, settings);
+  }
+
+  private showCameraError(error: unknown): void {
+    if (error instanceof CameraError) {
+      this.ui.showError(error.message);
+    } else {
+      this.ui.showError(`无法启动摄像头：${String(error)}`);
+    }
+    this.ui.setStatus('摄像头不可用，点击开始可重试');
   }
 
   private async changeResolution(id: ResolutionId): Promise<void> {
@@ -148,7 +200,11 @@ class App {
       this.ui.selectResolution(id);
       this.metrics.reset();
       this.ui.setStatus(
-        this.state === 'paused' ? '检测已暂停，摄像头预览仍保持开启' : '正在接收数据…',
+        this.state === 'paused'
+          ? '检测已暂停，摄像头预览仍保持开启'
+          : this.state === 'scanning'
+            ? '正在接收数据…'
+            : '摄像头已就绪，点击开始扫描',
       );
     } catch (error) {
       if (this.camera !== camera) return;

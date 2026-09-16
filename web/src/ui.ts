@@ -5,8 +5,7 @@ import type { RuntimeMetrics } from './metrics';
 import type { ResolutionId, ResolutionOption } from './camera';
 
 export interface UiCallbacks {
-  onStart(): void;
-  onPause(): void;
+  onToggle(): void;
   onStop(): void;
   onResolutionChange(id: ResolutionId): void;
   onDownload(): void;
@@ -45,7 +44,6 @@ export class Ui {
   private readonly downloadBtn: HTMLButtonElement;
   private readonly startBtn: HTMLButtonElement;
   private readonly startLabel: HTMLElement;
-  private readonly pauseBtn: HTMLButtonElement;
   private readonly stopBtn: HTMLButtonElement;
   private readonly errorBox: HTMLElement;
   private readonly videoWrap: HTMLElement;
@@ -67,15 +65,13 @@ export class Ui {
     this.downloadBtn = root.querySelector<HTMLButtonElement>('#download-btn')!;
     this.startBtn = root.querySelector<HTMLButtonElement>('#start-btn')!;
     this.startLabel = root.querySelector<HTMLElement>('#start-label')!;
-    this.pauseBtn = root.querySelector<HTMLButtonElement>('#pause-btn')!;
     this.stopBtn = root.querySelector<HTMLButtonElement>('#stop-btn')!;
     this.errorBox = root.querySelector<HTMLElement>('#error-box')!;
     this.videoWrap = root.querySelector<HTMLElement>('#video-wrap')!;
     this.detectorName = root.querySelector<HTMLElement>('#detector-name')!;
     this.resolutionSelect = root.querySelector<HTMLSelectElement>('#resolution-select')!;
 
-    this.startBtn.addEventListener('click', callbacks.onStart);
-    this.pauseBtn.addEventListener('click', callbacks.onPause);
+    this.startBtn.addEventListener('click', callbacks.onToggle);
     this.stopBtn.addEventListener('click', callbacks.onStop);
     this.resolutionSelect.addEventListener('change', () => {
       callbacks.onResolutionChange(this.resolutionSelect.value as ResolutionId);
@@ -86,9 +82,12 @@ export class Ui {
   setControlState(state: ControlState): void {
     this.root.dataset.phase = state;
     this.statusDot.dataset.phase = state;
-    this.startBtn.disabled = !['idle', 'paused', 'stopped', 'done'].includes(state);
-    this.pauseBtn.disabled = state !== 'scanning';
-    this.stopBtn.disabled = state !== 'scanning' && state !== 'paused';
+    this.startBtn.disabled = !['idle', 'scanning', 'paused', 'stopped', 'done'].includes(state);
+    this.stopBtn.disabled = !['idle', 'scanning', 'paused'].includes(state);
+    this.startBtn.setAttribute(
+      'aria-label',
+      state === 'scanning' ? '暂停扫描' : state === 'paused' ? '继续扫描' : '开始扫描',
+    );
     this.startLabel.textContent = state === 'paused'
       ? '继续'
       : state === 'stopped' || state === 'done'
@@ -98,7 +97,7 @@ export class Ui {
           : state === 'finishing'
             ? '整理中'
             : state === 'scanning'
-              ? '检测中'
+              ? '暂停'
               : '开始';
   }
 
@@ -239,7 +238,7 @@ export class Ui {
     this.downloadBtn.dataset.url = '';
     this.downloadBtn.dataset.filename = '';
     this.errorBox.hidden = true;
-    this.setStatus('正在启动摄像头…');
+    this.setStatus('准备新的扫描任务…');
   }
 
   private setMetric(id: string, value: string): void {
