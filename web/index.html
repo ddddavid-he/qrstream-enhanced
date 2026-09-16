@@ -1,161 +1,420 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <meta name="theme-color" content="#0b0e14" />
-  <title>QRStream Decoder</title>
+  <meta name="theme-color" content="#07120f" />
+  <meta name="color-scheme" content="dark" />
+  <title>QRStream · 实时接收</title>
   <style>
     :root {
-      --bg: #0b0e14;
-      --panel: #151a23;
-      --border: #262d3a;
-      --text: #e6e9ef;
-      --muted: #8b93a3;
-      --accent: #4f8cff;
-      --accent-2: #22c55e;
-      --danger: #ef4444;
+      --ink: #eefbf5;
+      --muted: #91a69d;
+      --muted-2: #63776f;
+      --panel: rgba(12, 28, 23, .78);
+      --panel-solid: #0d1c18;
+      --line: rgba(166, 218, 194, .13);
+      --accent: #76e6ad;
+      --accent-strong: #34d88b;
+      --blue: #66b5ff;
+      --danger: #ff7d87;
+      --shadow: 0 24px 80px rgba(0, 0, 0, .38);
     }
+
     * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+
     html, body {
       margin: 0;
-      padding: 0;
-      background: var(--bg);
-      color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      min-height: 100%;
+      background: #07120f;
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    body {
       min-height: 100dvh;
+      overflow-x: hidden;
+      background:
+        radial-gradient(circle at 12% -10%, rgba(52, 216, 139, .18), transparent 32rem),
+        radial-gradient(circle at 92% 8%, rgba(63, 139, 255, .12), transparent 30rem),
+        linear-gradient(155deg, #07120f 0%, #07100e 48%, #081411 100%);
     }
-    #app {
-      max-width: 640px;
-      margin: 0 auto;
-      padding: 16px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    header h1 {
-      font-size: 1.25rem;
-      margin: 0;
-      letter-spacing: 0.02em;
-    }
-    header p {
-      margin: 4px 0 0;
-      color: var(--muted);
-      font-size: 0.85rem;
-    }
-    #video-wrap {
-      position: relative;
-      border-radius: 12px;
-      overflow: hidden;
-      background: #000;
-      border: 1px solid var(--border);
-      aspect-ratio: 4 / 3;
-    }
-    #video {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      display: block;
-    }
-    #scan-overlay {
-      position: absolute;
+
+    body::before {
+      content: "";
+      position: fixed;
       inset: 0;
       pointer-events: none;
-      background:
-        linear-gradient(to right, transparent 24%, rgba(79,140,255,.25) 24%, rgba(79,140,255,.25) 26%, transparent 26%),
-        linear-gradient(to right, transparent 74%, rgba(79,140,255,.25) 74%, rgba(79,140,255,.25) 76%, transparent 76%),
-        linear-gradient(to bottom, transparent 24%, rgba(79,140,255,.25) 24%, rgba(79,140,255,.25) 26%, transparent 26%),
-        linear-gradient(to bottom, transparent 74%, rgba(79,140,255,.25) 74%, rgba(79,140,255,.25) 76%, transparent 76%);
+      opacity: .24;
+      background-image:
+        linear-gradient(rgba(255,255,255,.018) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.018) 1px, transparent 1px);
+      background-size: 32px 32px;
+      mask-image: linear-gradient(to bottom, black, transparent 75%);
     }
-    #status {
-      color: var(--muted);
-      font-size: 0.9rem;
-      min-height: 1.2em;
+
+    button { font: inherit; }
+
+    #app {
+      position: relative;
+      z-index: 1;
+      width: min(1120px, 100%);
+      margin: 0 auto;
+      padding: max(24px, env(safe-area-inset-top)) 24px max(30px, env(safe-area-inset-bottom));
     }
-    #error-box {
-      background: rgba(239,68,68,.12);
-      border: 1px solid rgba(239,68,68,.4);
-      color: #fca5a5;
-      border-radius: 8px;
-      padding: 10px 12px;
-      font-size: 0.85rem;
-    }
-    #progress-bar {
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      height: 12px;
-      overflow: hidden;
-    }
-    #progress-fill {
-      height: 100%;
-      width: 0%;
-      background: linear-gradient(90deg, var(--accent), var(--accent-2));
-      transition: width .2s ease;
-    }
-    #stats {
-      color: var(--muted);
-      font-size: 0.8rem;
-      font-variant-numeric: tabular-nums;
-    }
-    #done-panel {
-      background: rgba(34,197,94,.1);
-      border: 1px solid rgba(34,197,94,.4);
-      border-radius: 12px;
-      padding: 14px;
+
+    .topbar {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 12px;
+      gap: 24px;
+      margin-bottom: 22px;
     }
-    #done-info { font-size: 0.9rem; }
-    button {
-      appearance: none;
-      border: 1px solid var(--border);
+
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand-mark {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(118, 230, 173, .36);
+      border-radius: 13px;
+      color: var(--accent);
+      background: linear-gradient(145deg, rgba(118,230,173,.15), rgba(118,230,173,.04));
+      box-shadow: inset 0 1px rgba(255,255,255,.08), 0 12px 30px rgba(17,102,69,.2);
+    }
+    .brand-mark svg { width: 22px; height: 22px; }
+    .brand h1 { margin: 0; font-size: 1rem; letter-spacing: -.01em; font-weight: 680; }
+    .brand p { margin: 2px 0 0; color: var(--muted-2); font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; }
+
+    .privacy-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      border: 1px solid var(--line);
+      background: rgba(10, 25, 20, .62);
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: .75rem;
+      backdrop-filter: blur(14px);
+    }
+    .privacy-pill svg { width: 14px; color: var(--accent); }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.55fr) minmax(290px, .75fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .card {
+      border: 1px solid var(--line);
       background: var(--panel);
-      color: var(--text);
-      border-radius: 8px;
-      padding: 8px 16px;
-      font-size: 0.9rem;
+      box-shadow: var(--shadow), inset 0 1px rgba(255,255,255,.035);
+      backdrop-filter: blur(22px);
+      border-radius: 24px;
+    }
+
+    .scanner-card { padding: 10px; }
+    #video-wrap {
+      position: relative;
+      aspect-ratio: 16 / 10;
+      overflow: hidden;
+      border-radius: 17px;
+      background: #020705;
+      isolation: isolate;
+    }
+    #video { width: 100%; height: 100%; object-fit: cover; display: block; }
+    #video-wrap::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      box-shadow: inset 0 0 90px rgba(0,0,0,.38);
+    }
+    .video-tint {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: linear-gradient(to top, rgba(2,8,6,.68), transparent 34%);
+    }
+    .scan-frame {
+      position: absolute;
+      width: min(56%, 340px);
+      aspect-ratio: 1;
+      left: 50%; top: 47%;
+      transform: translate(-50%, -50%);
+      border-radius: 24px;
+      background:
+        linear-gradient(var(--accent), var(--accent)) left top / 38px 2px no-repeat,
+        linear-gradient(var(--accent), var(--accent)) left top / 2px 38px no-repeat,
+        linear-gradient(var(--accent), var(--accent)) right top / 38px 2px no-repeat,
+        linear-gradient(var(--accent), var(--accent)) right top / 2px 38px no-repeat,
+        linear-gradient(var(--accent), var(--accent)) left bottom / 38px 2px no-repeat,
+        linear-gradient(var(--accent), var(--accent)) left bottom / 2px 38px no-repeat,
+        linear-gradient(var(--accent), var(--accent)) right bottom / 38px 2px no-repeat,
+        linear-gradient(var(--accent), var(--accent)) right bottom / 2px 38px no-repeat;
+      filter: drop-shadow(0 0 10px rgba(72, 232, 155, .28));
+      transition: filter .16s, transform .16s;
+    }
+    .scan-line {
+      position: absolute;
+      left: 7%; right: 7%; top: 12%;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--accent), transparent);
+      box-shadow: 0 0 12px var(--accent);
+      opacity: .18;
+    }
+    #app[data-phase="scanning"] .scan-line { animation: scan 2.7s ease-in-out infinite; opacity: .75; }
+    @keyframes scan { 0%,100% { top: 12%; opacity: .28; } 50% { top: 88%; opacity: .9; } }
+    #video-wrap.has-hit .scan-frame { transform: translate(-50%, -50%) scale(1.025); filter: drop-shadow(0 0 20px rgba(72,232,155,.7)); }
+
+    .camera-badge {
+      position: absolute;
+      top: 16px; left: 16px;
+      z-index: 2;
+      display: flex; align-items: center; gap: 7px;
+      padding: 7px 10px;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 999px;
+      color: rgba(255,255,255,.88);
+      background: rgba(3,10,8,.55);
+      backdrop-filter: blur(12px);
+      font: 600 .68rem/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 0 4px rgba(255,125,135,.12); }
+    #app:not([data-phase="scanning"]):not([data-phase="paused"]) .live-dot { background: var(--muted-2); box-shadow: none; }
+    #app[data-phase="idle"] .live-dot { background: var(--blue); box-shadow: 0 0 0 4px rgba(102,181,255,.12); }
+    #app[data-phase="paused"] .live-dot { background: #ffc66d; box-shadow: 0 0 0 4px rgba(255,198,109,.12); }
+
+    .video-help {
+      position: absolute;
+      z-index: 2;
+      left: 18px; right: 18px; bottom: 16px;
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      font-size: .74rem; color: rgba(238,251,245,.72);
+    }
+
+    .receive-panel { padding: 18px 18px 16px; }
+    .capture-controls {
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      gap: clamp(24px, 8vw, 54px);
+      padding: 17px 12px 8px;
+    }
+    .control-item { display: grid; justify-items: center; gap: 7px; min-width: 62px; }
+    .control-button {
+      width: 48px;
+      height: 48px;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: 50%;
+      color: var(--ink);
+      background: rgba(255,255,255,.045);
       cursor: pointer;
+      transition: transform .15s, opacity .15s, border-color .15s, background .15s;
     }
-    button:hover { border-color: var(--accent); }
-    #download-btn {
-      background: var(--accent);
-      border-color: var(--accent);
-      color: #fff;
-      font-weight: 600;
+    .control-button:hover:not(:disabled) { transform: scale(1.055); border-color: rgba(255,255,255,.3); }
+    .control-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    .control-button:disabled { cursor: default; opacity: .28; }
+    #start-btn { width: 58px; height: 58px; margin-top: -5px; border-color: rgba(255,125,135,.32); background: rgba(255,125,135,.07); }
+    .record-icon { width: 24px; height: 24px; border-radius: 50%; background: var(--danger); box-shadow: 0 0 16px rgba(255,87,101,.28); }
+    .pause-icon { display: none; gap: 5px; }
+    .pause-icon::before, .pause-icon::after { content: ""; width: 4px; height: 17px; border-radius: 2px; background: currentColor; }
+    #app[data-phase="scanning"] #start-btn { border-color: rgba(118,230,173,.38); color: var(--accent); background: rgba(118,230,173,.08); }
+    #app[data-phase="scanning"] #start-btn .record-icon { display: none; }
+    #app[data-phase="scanning"] #start-btn .pause-icon { display: flex; }
+    .stop-icon { width: 16px; height: 16px; border-radius: 4px; background: currentColor; }
+    .control-label { color: var(--muted); font-size: .68rem; }
+    .status-row { display: flex; align-items: center; gap: 10px; }
+    #status-dot {
+      flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%;
+      background: var(--muted-2); box-shadow: 0 0 0 5px rgba(99,119,111,.1);
     }
-    .hidden { display: none !important; }
+    #status-dot[data-phase="scanning"] { background: var(--accent); box-shadow: 0 0 0 5px rgba(118,230,173,.1); animation: breathe 1.8s infinite; }
+    #status-dot[data-phase="starting"] { background: var(--blue); box-shadow: 0 0 0 5px rgba(102,181,255,.1); }
+    #status-dot[data-phase="paused"] { background: #ffc66d; box-shadow: 0 0 0 5px rgba(255,198,109,.1); }
+    #status-dot[data-phase="done"] { background: var(--accent); box-shadow: 0 0 16px rgba(118,230,173,.6); }
+    #status-dot[data-phase="error"] { background: var(--danger); }
+    @keyframes breathe { 50% { box-shadow: 0 0 0 8px rgba(118,230,173,0); } }
+    #status { flex: 1; font-size: .88rem; font-weight: 560; }
+    #progress-label { color: var(--accent); font: 650 .86rem/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    #progress-bar {
+      margin-top: 13px; height: 7px; overflow: hidden; border-radius: 999px;
+      background: rgba(151,192,173,.1); box-shadow: inset 0 1px 2px rgba(0,0,0,.3);
+    }
+    #progress-fill { width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #32cd82, #83efb8); box-shadow: 0 0 16px rgba(76,224,148,.4); transition: width .22s ease; }
+    #stats { margin-top: 9px; color: var(--muted-2); font-size: .72rem; font-variant-numeric: tabular-nums; }
+
+    #error-box { margin: 0 8px 8px; border: 1px solid rgba(255,125,135,.25); border-radius: 14px; padding: 12px 14px; color: #ffb5bc; background: rgba(110,23,34,.22); font-size: .79rem; }
+
+    .sidebar { display: flex; flex-direction: column; gap: 14px; }
+    .side-card { padding: 20px; }
+    .eyebrow { margin: 0 0 5px; color: var(--accent); font-size: .66rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+    .side-card h2 { margin: 0; font-size: 1.05rem; letter-spacing: -.02em; }
+    .side-card-copy { margin: 7px 0 0; color: var(--muted); font-size: .77rem; line-height: 1.55; }
+
+    .ready-list { display: grid; gap: 9px; margin-top: 18px; }
+    .ready-item { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: .78rem; }
+    .ready-check { width: 19px; height: 19px; display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--line); color: transparent; background: rgba(255,255,255,.02); transition: .2s; }
+    .ready-item[data-ready="true"] { color: var(--ink); }
+    .ready-item[data-ready="true"] .ready-check { color: #062014; border-color: transparent; background: var(--accent); }
+    .ready-check svg { width: 11px; }
+
+    .engine-info { margin-top: 17px; padding-top: 15px; border-top: 1px solid var(--line); display: grid; gap: 8px; }
+    .info-row { display: flex; justify-content: space-between; gap: 10px; color: var(--muted-2); font-size: .7rem; }
+    .info-row strong { color: var(--muted); font-weight: 560; text-align: right; }
+    .resolution-select {
+      min-width: 92px;
+      padding: 5px 25px 5px 9px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+      background: rgba(255,255,255,.055);
+      font: 600 .7rem/1.2 Inter, system-ui, sans-serif;
+      color-scheme: dark;
+    }
+    .resolution-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .resolution-select:disabled { cursor: not-allowed; opacity: .48; }
+
+    .metrics-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; margin-top: 16px; }
+    .metric { min-width: 0; padding: 12px; border: 1px solid rgba(166,218,194,.09); border-radius: 14px; background: rgba(255,255,255,.018); }
+    .metric-value { display: block; overflow: hidden; color: var(--ink); font: 640 .9rem/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+    .metric-label { display: block; margin-top: 5px; color: var(--muted-2); font-size: .64rem; }
+
+    .button {
+      min-height: 42px; border: 1px solid var(--line); border-radius: 12px; padding: 0 15px;
+      color: var(--ink); background: rgba(255,255,255,.035); cursor: pointer; transition: transform .15s, border-color .15s, background .15s;
+    }
+    .button:hover { transform: translateY(-1px); border-color: rgba(118,230,173,.36); background: rgba(118,230,173,.07); }
+    .button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    #done-panel { margin-top: 14px; padding: 16px; border: 1px solid rgba(118,230,173,.24); border-radius: 17px; background: linear-gradient(145deg, rgba(71,211,143,.12), rgba(71,211,143,.035)); }
+    .done-title { display: flex; align-items: center; gap: 9px; font-size: .86rem; font-weight: 650; }
+    .done-icon { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 50%; color: #062014; background: var(--accent); }
+    .done-icon svg { width: 13px; }
+    #done-info { display: block; margin: 8px 0 13px 33px; color: var(--muted); font-size: .72rem; }
+    #download-btn { width: 100%; border-color: transparent; color: #052016; background: var(--accent); font-weight: 720; }
+    #download-btn:hover { background: #91f2c0; }
+
+    footer { margin-top: 20px; text-align: center; color: var(--muted-2); font-size: .68rem; }
+
+    @media (max-width: 820px) {
+      #app { padding-inline: 14px; }
+      .layout { grid-template-columns: 1fr; }
+      .sidebar { display: grid; grid-template-columns: 1fr 1fr; }
+      .scanner-card { border-radius: 20px; }
+    }
+    @media (max-width: 580px) {
+      #app { padding-top: max(14px, env(safe-area-inset-top)); }
+      .topbar { margin-bottom: 14px; }
+      .privacy-pill span { display: none; }
+      .privacy-pill { padding: 8px; }
+      .layout { gap: 12px; }
+      .sidebar { grid-template-columns: 1fr; gap: 12px; }
+      .scanner-card { padding: 7px; }
+      #video-wrap { aspect-ratio: 3 / 4; border-radius: 15px; }
+      .scan-frame { width: 70%; }
+      .video-help { font-size: .68rem; }
+      .receive-panel { padding: 16px 12px 13px; }
+      .side-card { padding: 18px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; }
+    }
   </style>
 </head>
 <body>
-  <div id="app">
-    <header>
-      <h1>QRStream Decoder</h1>
-      <p>Point your camera at a QRStream display — files decode in real time.</p>
+  <main id="app" data-phase="loading">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h5v5H4zM15 4h5v5h-5zM4 15h5v5H4zM15 15h2v2h-2zM18 18h2v2h-2zM18 14h2v2h-2zM14 18h2v2h-2z"/></svg>
+        </div>
+        <div><h1>QRStream</h1><p>Realtime receiver</p></div>
+      </div>
+      <div class="privacy-pill" title="所有处理都在当前设备完成">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg>
+        <span>本机处理 · 不上传</span>
+      </div>
     </header>
 
-    <div id="video-wrap">
-      <video id="video" autoplay muted playsinline></video>
-      <div id="scan-overlay"></div>
+    <div class="layout">
+      <section class="card scanner-card" aria-label="摄像头扫描器">
+        <div id="video-wrap">
+          <video id="video" autoplay muted playsinline></video>
+          <div class="video-tint"></div>
+          <div class="camera-badge"><span class="live-dot"></span><span id="camera-settings">正在连接</span></div>
+          <div class="scan-frame" aria-hidden="true"><div class="scan-line"></div></div>
+          <div class="video-help"><span>保持画面稳定，并避免屏幕反光</span><span>自动对焦</span></div>
+        </div>
+
+        <div class="capture-controls" aria-label="检测控制">
+          <div class="control-item">
+            <button class="control-button" id="start-btn" type="button" aria-label="开始扫描" disabled><span class="record-icon" aria-hidden="true"></span><span class="pause-icon" aria-hidden="true"></span></button>
+            <span class="control-label" id="start-label">开始</span>
+          </div>
+          <div class="control-item">
+            <button class="control-button" id="stop-btn" type="button" aria-label="停止检测并关闭摄像头" disabled><span class="stop-icon" aria-hidden="true"></span></button>
+            <span class="control-label">停止</span>
+          </div>
+        </div>
+
+        <div class="receive-panel">
+          <div class="status-row">
+            <span id="status-dot" data-phase="loading"></span>
+            <span id="status" role="status" aria-live="polite">正在初始化…</span>
+            <span id="progress-label">0%</span>
+          </div>
+          <div id="progress-bar" role="progressbar" aria-label="文件接收进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="progress-fill"></div></div>
+          <div id="stats">等待第一个有效数据块</div>
+        </div>
+        <div id="error-box" role="alert" hidden></div>
+      </section>
+
+      <aside class="sidebar">
+        <section class="card side-card">
+          <p class="eyebrow">Connection</p>
+          <h2>接收器状态</h2>
+          <p class="side-card-copy">打开编码端的 QR 视频，将二维码完整放入左侧取景框。</p>
+          <div class="ready-list">
+            <div class="ready-item" id="ready-core"><span class="ready-check"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m3 8 3 3 7-7"/></svg></span>RaptorQ 解码核心</div>
+            <div class="ready-item" id="ready-detector"><span class="ready-check"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m3 8 3 3 7-7"/></svg></span>并行 QR 检测器</div>
+            <div class="ready-item" id="ready-camera"><span class="ready-check"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m3 8 3 3 7-7"/></svg></span>高清摄像头</div>
+          </div>
+          <div class="engine-info">
+            <div class="info-row"><span>检测引擎</span><strong id="detector-name">初始化中</strong></div>
+            <div class="info-row"><label for="resolution-select">采集画质</label><select class="resolution-select" id="resolution-select" aria-label="摄像头采集分辨率" disabled><option>启动后可选</option></select></div>
+            <div class="info-row"><span>协议</span><strong>V4 · RaptorQ</strong></div>
+          </div>
+        </section>
+
+        <section class="card side-card">
+          <p class="eyebrow">Live telemetry</p>
+          <h2>实时性能</h2>
+          <div class="metrics-grid">
+            <div class="metric"><span class="metric-value" id="metric-camera">—</span><span class="metric-label">摄像头帧率</span></div>
+            <div class="metric"><span class="metric-value" id="metric-scan">—</span><span class="metric-label">检测帧率</span></div>
+            <div class="metric"><span class="metric-value" id="metric-latency">—</span><span class="metric-label">检测 P95</span></div>
+            <div class="metric"><span class="metric-value" id="metric-hit">—</span><span class="metric-label">QR 命中率</span></div>
+            <div class="metric"><span class="metric-value" id="metric-accepted">0</span><span class="metric-label">有效数据块</span></div>
+            <div class="metric"><span class="metric-value" id="metric-resolution">—</span><span class="metric-label">输入分辨率</span></div>
+          </div>
+
+          <div id="done-panel" hidden>
+            <div class="done-title"><span class="done-icon"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m3 8 3 3 7-7"/></svg></span>接收完成</div>
+            <span id="done-info"></span>
+            <button class="button" id="download-btn" type="button">下载恢复文件</button>
+          </div>
+        </section>
+      </aside>
     </div>
-
-    <div id="status">Initializing…</div>
-    <div id="error-box" class="hidden" role="alert"></div>
-
-    <div id="progress-bar" class="hidden"><div id="progress-fill"></div></div>
-    <div id="stats" class="hidden"></div>
-
-    <div id="done-panel" class="hidden">
-      <span id="done-info"></span>
-      <button id="download-btn">Download</button>
-    </div>
-
-    <div>
-      <button id="reset-btn">Reset session</button>
-    </div>
-  </div>
+    <footer>QRStream 在浏览器内完成检测与恢复，摄像头画面不会离开此设备。</footer>
+  </main>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

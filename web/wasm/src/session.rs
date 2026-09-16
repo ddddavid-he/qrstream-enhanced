@@ -14,6 +14,7 @@ pub struct SessionResult {
     pub done: bool,
     pub progress: f64,
     pub num_recovered: u32,
+    pub num_received: u32,
     pub symbol_count: Option<u32>,
     pub filesize: Option<u64>,
     pub protocol_version: Option<u8>,
@@ -26,6 +27,7 @@ pub struct SessionSnapshot {
     pub done: bool,
     pub progress: f64,
     pub num_recovered: u32,
+    pub num_received: u32,
     pub symbol_count: Option<u32>,
     pub filesize: Option<u64>,
     pub protocol_version: Option<u8>,
@@ -72,14 +74,18 @@ impl RaptorQState {
         self.result.is_some()
     }
 
-    fn progress(&self) -> f64 {
+    fn progress(&self, received: u32) -> f64 {
         if self.k == 0 {
             return 0.0;
         }
         if self.done() {
             return 1.0;
         }
-        (self.eliminated.len() as f64 / self.k as f64).min(0.99)
+        // RaptorQ repair symbols contribute useful rank even though they are
+        // not systematic source symbols. The crate only exposes the final
+        // decode result, so unique symbols received is the least misleading
+        // real-time estimate. Keep 100% reserved for an actual decode.
+        (received as f64 / self.k as f64).min(0.99)
     }
 
     fn num_recovered(&self) -> u32 {
@@ -235,6 +241,7 @@ impl DecodeSession {
                 done: false,
                 progress: 0.0,
                 num_recovered: 0,
+                num_received: 0,
                 symbol_count: None,
                 filesize: None,
                 protocol_version: None,
@@ -242,8 +249,9 @@ impl DecodeSession {
             Some(state) => SessionSnapshot {
                 initialized: true,
                 done: state.done(),
-                progress: state.progress(),
+                progress: state.progress(self.seen_blocks.len() as u32),
                 num_recovered: state.num_recovered(),
+                num_received: self.seen_blocks.len() as u32,
                 symbol_count: Some(state.k),
                 filesize: Some(state.filesize),
                 protocol_version: Some(state.protocol_version),
@@ -284,6 +292,7 @@ impl DecodeSession {
             done,
             progress: snapshot.progress,
             num_recovered: snapshot.num_recovered,
+            num_received: snapshot.num_received,
             symbol_count: snapshot.symbol_count,
             filesize: snapshot.filesize,
             protocol_version: snapshot.protocol_version,

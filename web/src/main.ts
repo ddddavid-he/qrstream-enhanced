@@ -1,156 +1,381 @@
-/** Entry point: wires camera → detector → WASM decode session → UI. */
+/** Entry point: live camera preview -> user-controlled scan -> WASM session. */
 
-import { startCamera, CameraError, type CameraHandle } from './camera';
-import { createQrDetector } from './detector';
-import { loadWasm, createSession, parseResult } from './decode';
-import { Ui } from './ui';
-import type { WasmDecodeSession } from 'qrstream-decode';
-
-const SCAN_INTERVAL_MS = 40; // ~25 fps detection rate
+import {
+  startCamera,
+  CameraError,
+  type CameraHandle,
+  type ResolutionId,
+} from './camera';
+import { createQrDetector, type QrDetector } from './detector';
+import { createDecodeClient, type DecodeWorkerClient } from './decode';
+import { MetricsTracker } from './metrics';
+import { Ui, type ControlState } from './ui';
 
 class App {
   private readonly video: HTMLVideoElement;
   private readonly ui: Ui;
+  private readonly metrics = new MetricsTracker();
   private camera: CameraHandle | null = null;
-  private session: WasmDecodeSession | null = null;
-  private scanTimer: number | null = null;
-  private scanBusy = false;
-  private lastSeenText: string | null = null;
-  private lastSeenAt = 0;
-  private finished = false;
+  private detector: QrDetector | null = null;
+  private decoder: DecodeWorkerClient | null = null;
+  private frameCallbackId: number | null = null;
+  private animationFrameId: number | null = null;
+  private metricsTimer: number | null = null;
+  private state: ControlState = 'loading';
+  private generation = 0;
+  private metricsPending = false;
+  private resolutionChanging = false;
+  private readonly pendingTexts = new Set<string>();
 
   constructor() {
     const root = document.querySelector<HTMLElement>('#app')!;
     this.video = root.querySelector<HTMLVideoElement>('#video')!;
     this.ui = new Ui(root, {
-      onReset: () => this.reset(),
+      onToggle: () => this.toggleScanning(),
+      onStop: () => this.stopScanning(),
+      onResolutionChange: (id) => void this.changeResolution(id),
       onDownload: () => this.ui.download(),
     });
   }
 
-  async start(): Promise<void> {
-    this.ui.setStatus('Loading decoder…');
-    try {
-      await loadWasm();
-    } catch {
-      this.ui.showError('Failed to load the WASM decoder core.');
+  async initialize(): Promise<void> {
+    this.setState('loading');
+    this.ui.setStatus('正在请求摄像头权限并初始化接收器…');
+
+    // Invoke getUserMedia first so the permission request starts as soon as
+    // the page boots; decoder and detector initialization continue in parallel.
+    const cameraPromise = startCamera(this.video).then((camera) => {
+      this.configureCamera(camera);
+      return camera;
+    });
+    const decoderPromise = createDecodeClient();
+    const detectorPromise = createQrDetector();
+    const [cameraResult, decoderResult, detectorResult] = await Promise.allSettled([
+      cameraPromise,
+      decoderPromise,
+      detectorPromise,
+    ]);
+
+    if (decoderResult.status === 'rejected') {
+      if (cameraResult.status === 'fulfilled') cameraResult.value.stop();
+      if (detectorResult.status === 'fulfilled') detectorResult.value.stop();
+      this.camera = null;
+      this.ui.markReady('camera', false);
+      this.ui.setCameraInactive();
+      this.ui.showError('WASM 解码核心加载失败，请刷新页面重试。');
+      return;
+    }
+    this.decoder = decoderResult.value;
+    this.ui.markReady('core', true);
+
+    if (detectorResult.status === 'rejected') {
+      if (cameraResult.status === 'fulfilled') cameraResult.value.stop();
+      decoderResult.value.stop();
+      this.camera = null;
+      this.ui.markReady('camera', false);
+      this.ui.setCameraInactive();
+      this.ui.showError(`QR 检测器加载失败：${String(detectorResult.reason)}`);
+      return;
+    }
+    this.detector = detectorResult.value;
+    this.ui.markReady('detector', true);
+    this.ui.setDetectorName(this.detector.name);
+
+    if (cameraResult.status === 'rejected') {
+      this.setState('stopped');
+      this.ui.setCameraInactive();
+      this.showCameraError(cameraResult.reason);
       return;
     }
 
-    if (!('BarcodeDetector' in globalThis)) {
-      this.ui.setStatus('BarcodeDetector unavailable — using zxing-wasm fallback…');
-    }
+    this.metrics.reset();
+    this.setState('idle');
+    this.ui.setStatus('摄像头已就绪，点击开始扫描');
+    this.startMetrics();
+  }
 
-    this.ui.setStatus('Starting camera…');
-    try {
-      this.camera = await startCamera(this.video);
-    } catch (err) {
-      if (err instanceof CameraError) {
-        this.ui.showError(err.message);
-        this.ui.setStatus('Camera unavailable');
-      } else {
-        this.ui.showError(`Unexpected camera error: ${String(err)}`);
-      }
+  private toggleScanning(): void {
+    if (this.state === 'scanning') {
+      this.pauseScanning();
+    } else {
+      void this.startScanning();
+    }
+  }
+
+  private async startScanning(): Promise<void> {
+    if (!this.detector || !this.decoder || this.state === 'loading' || this.state === 'starting') return;
+    if (this.state === 'scanning') return;
+
+    if ((this.state === 'idle' || this.state === 'paused') && this.camera) {
+      this.setState('scanning');
+      this.ui.setStatus('正在接收数据…');
+      this.scheduleNextFrame();
       return;
     }
 
-    const detector = await createQrDetector();
-    this.session = createSession();
+    if (this.state === 'stopped' || this.state === 'done') {
+      await this.newSession();
+      if (!await this.openCamera()) return;
+    }
+
+    this.metrics.reset();
+    this.setState('scanning');
+    this.ui.setStatus('将二维码保持在取景框内');
+    this.scheduleNextFrame();
+    this.startMetrics();
+  }
+
+  private pauseScanning(): void {
+    if (this.state !== 'scanning') return;
+    this.generation++;
+    this.cancelFrameCallback();
+    this.setState('paused');
+    this.ui.setStatus('检测已暂停，摄像头预览仍保持开启');
+  }
+
+  private stopScanning(): void {
+    if (this.state !== 'idle' && this.state !== 'scanning' && this.state !== 'paused') return;
+    this.generation++;
+    this.cancelFrameCallback();
+    this.stopMetrics();
+    this.camera?.stop();
+    this.camera = null;
+    this.ui.markReady('camera', false);
+    this.ui.setCameraInactive();
+    this.setState('stopped');
+    this.ui.setStatus('检测已停止，摄像头已关闭');
+  }
+
+  private async openCamera(): Promise<boolean> {
+    this.setState('starting');
     this.ui.clearError();
-    this.ui.setStatus('Point the camera at a QRStream display');
-
-    this.scanTimer = window.setInterval(() => {
-      void this.scan(detector);
-    }, SCAN_INTERVAL_MS);
-  }
-
-  private async scan(
-    detector: (video: HTMLVideoElement) => Promise<string[]>,
-  ): Promise<void> {
-    if (this.scanBusy || this.finished || !this.session) return;
-    const video = this.camera?.video;
-    if (!video || video.readyState < 2) return;
-    this.scanBusy = true;
+    this.ui.setStatus('正在请求摄像头权限…');
     try {
-      const texts = await detector(video);
-      const now = performance.now();
-      for (const text of texts) {
-        // Skip repeated identical payloads within 500 ms (same QR on screen).
-        if (text === this.lastSeenText && now - this.lastSeenAt < 500) continue;
-        this.lastSeenText = text;
-        this.lastSeenAt = now;
-        this.feed(text);
-        if (this.finished) break;
-      }
-    } catch {
-      // Transient detection errors are non-fatal; keep scanning.
-    } finally {
-      this.scanBusy = false;
+      const camera = await startCamera(this.video);
+      this.configureCamera(camera);
+      this.metrics.reset();
+      this.setState('idle');
+      this.ui.setStatus('摄像头已就绪，点击开始扫描');
+      this.startMetrics();
+      return true;
+    } catch (error) {
+      this.camera = null;
+      this.setState('stopped');
+      this.ui.setCameraInactive();
+      this.showCameraError(error);
+      return false;
     }
   }
 
-  private feed(text: string): void {
-    if (!this.session) return;
+  private configureCamera(camera: CameraHandle): void {
+    this.camera = camera;
+    this.ui.markReady('camera', true);
+    const settings = camera.videoTrack.getSettings();
+    this.ui.setCameraSettings(settings);
+    this.ui.setResolutionOptions(camera.resolutionOptions, settings);
+  }
+
+  private showCameraError(error: unknown): void {
+    if (error instanceof CameraError) {
+      this.ui.showError(error.message);
+    } else {
+      this.ui.showError(`无法启动摄像头：${String(error)}`);
+    }
+    this.ui.setStatus('摄像头不可用，点击开始可重试');
+  }
+
+  private async changeResolution(id: ResolutionId): Promise<void> {
+    if (!this.camera || this.resolutionChanging) return;
+    const camera = this.camera;
+    this.resolutionChanging = true;
+    this.generation++;
+    this.cancelFrameCallback();
+    this.ui.setResolutionBusy(true);
+    this.ui.clearError();
+    this.ui.setStatus(`正在切换到 ${id === '4k' ? '4K' : id}…`);
+    try {
+      const settings = await camera.setResolution(id);
+      if (this.camera !== camera) return;
+      this.ui.setCameraSettings(settings);
+      this.ui.selectResolution(id);
+      this.metrics.reset();
+      this.ui.setStatus(
+        this.state === 'paused'
+          ? '检测已暂停，摄像头预览仍保持开启'
+          : this.state === 'scanning'
+            ? '正在接收数据…'
+            : '摄像头已就绪，点击开始扫描',
+      );
+    } catch (error) {
+      if (this.camera !== camera) return;
+      this.ui.setResolutionOptions(camera.resolutionOptions, camera.videoTrack.getSettings());
+      this.ui.showError(`无法切换分辨率：${String(error)}`);
+      this.ui.setStatus('分辨率切换失败，已保留当前档位');
+    } finally {
+      this.resolutionChanging = false;
+      if (this.camera === camera) {
+        this.ui.setResolutionBusy(false);
+        if (this.state === 'scanning') this.scheduleNextFrame();
+      }
+    }
+  }
+
+  private scheduleNextFrame(): void {
+    if (this.state !== 'scanning' || !this.detector || !this.camera) return;
+    if ('requestVideoFrameCallback' in this.video) {
+      this.frameCallbackId = this.video.requestVideoFrameCallback((now, metadata) => {
+        this.frameCallbackId = null;
+        this.onVideoFrame(now, metadata.presentedFrames);
+      });
+    } else {
+      this.animationFrameId = requestAnimationFrame((now) => {
+        this.animationFrameId = null;
+        this.onVideoFrame(now);
+      });
+    }
+  }
+
+  private onVideoFrame(now: number, presentedFrames?: number): void {
+    if (this.state !== 'scanning') return;
+    this.metrics.recordVideoFrame(now, presentedFrames);
+    this.scheduleNextFrame();
+    if (!this.detector || this.video.readyState < 2) return;
+    const generation = this.generation;
+    void this.detector.detect(this.video)
+      .then((batch) => {
+        if (!batch || generation !== this.generation || this.state !== 'scanning') return;
+        const completedAt = performance.now();
+        this.metrics.recordScan(completedAt, batch.detectMs, batch.texts.length);
+        this.ui.pulseScan(batch.texts.length > 0);
+        for (const text of batch.texts) {
+          void this.feed(text);
+          if ((this.state as ControlState) !== 'scanning') break;
+        }
+      })
+      .catch(() => {
+        // A transient capture failure must not break the frame callback chain.
+      });
+  }
+
+  private async feed(text: string): Promise<void> {
+    if (!this.decoder || this.state !== 'scanning' || this.pendingTexts.has(text)) return;
+    this.pendingTexts.add(text);
+    const generation = this.generation;
+    const startedAt = performance.now();
     let result;
     try {
-      result = parseResult(this.session.consume_qr_text(text));
+      result = await this.decoder.consume(text);
     } catch {
-      return; // WASM boundary failure — treat as a bad frame.
+      return;
+    } finally {
+      this.pendingTexts.delete(text);
     }
+    if (!result || generation !== this.generation || this.state !== 'scanning') return;
+    const finishedAt = performance.now();
+    this.metrics.recordDecode(finishedAt, finishedAt - startedAt, result);
     if (result.error && !result.accepted) {
-      // Malformed/CRC failure: ignore but surface once per stream.
-      this.ui.setStatus(`Skipping invalid frame (${result.error})`);
+      this.ui.setStatus('已忽略一个损坏帧，继续扫描…');
       return;
     }
-    if (result.duplicate) {
-      return;
-    }
-    if (result.accepted) {
+    if (result.accepted && !result.duplicate) {
       this.ui.updateProgress(result);
-      if (!result.done) {
-        this.ui.setStatus('Receiving…');
-      }
+      if (!result.done) this.ui.setStatus('正在接收数据…');
     }
-    if (result.done && !this.finished) {
-      this.finish();
+    if (result.done) void this.finish();
+  }
+
+  private async publishMetrics(): Promise<void> {
+    if (!this.decoder || !this.detector || !this.camera || this.metricsPending) return;
+    this.metricsPending = true;
+    try {
+      const snapshot = await this.decoder.snapshot();
+      if (!this.camera) return;
+      this.ui.updateRuntimeMetrics(this.metrics.snapshot(
+        this.detector.name,
+        this.video,
+        this.camera.videoTrack,
+        snapshot,
+      ));
+    } catch {
+      // Metrics are diagnostic only and must never stop decoding.
+    } finally {
+      this.metricsPending = false;
     }
   }
 
-  private finish(): void {
-    if (!this.session) return;
-    this.finished = true;
+  private async finish(): Promise<void> {
+    if (!this.decoder || this.state !== 'scanning') return;
+    this.generation++;
+    this.cancelFrameCallback();
+    this.stopMetrics();
+    this.camera?.stop();
+    this.camera = null;
+    this.ui.markReady('camera', false);
+    this.ui.setCameraInactive();
+    this.setState('finishing');
+    this.ui.setStatus('数据已齐，正在整理文件…');
     let bytes: Uint8Array;
     try {
-      bytes = this.session.result_bytes();
-    } catch (e) {
-      this.finished = false;
-      this.ui.showError(`Decode failed at finalize: ${String(e)}`);
+      bytes = await this.decoder.resultBytes();
+    } catch (error) {
+      this.ui.showError(`文件恢复失败：${String(error)}`);
+      this.setState('stopped');
       return;
     }
+    this.setState('done');
     const blob = new Blob([bytes.slice().buffer as ArrayBuffer], {
       type: 'application/octet-stream',
     });
-    const url = URL.createObjectURL(blob);
-    this.ui.showDone(url, 'qrstream-output.bin', bytes.length);
+    this.ui.showDone(URL.createObjectURL(blob), 'qrstream-output.bin', bytes.length);
   }
 
-  private reset(): void {
-    this.finished = false;
-    this.lastSeenText = null;
-    this.session?.free();
-    this.session = createSession();
-    this.ui.reset();
+  private async newSession(): Promise<void> {
+    this.generation++;
+    this.pendingTexts.clear();
+    await this.decoder?.reset();
+    this.metrics.reset();
+    this.ui.resetSession();
   }
 
-  stop(): void {
-    if (this.scanTimer != null) {
-      clearInterval(this.scanTimer);
-      this.scanTimer = null;
+  private startMetrics(): void {
+    if (this.metricsTimer == null) {
+      this.metricsTimer = window.setInterval(() => void this.publishMetrics(), 500);
     }
+  }
+
+  private stopMetrics(): void {
+    if (this.metricsTimer != null) {
+      clearInterval(this.metricsTimer);
+      this.metricsTimer = null;
+    }
+  }
+
+  private setState(state: ControlState): void {
+    this.state = state;
+    this.ui.setControlState(state);
+  }
+
+  private cancelFrameCallback(): void {
+    if (this.frameCallbackId != null) {
+      this.video.cancelVideoFrameCallback(this.frameCallbackId);
+      this.frameCallbackId = null;
+    }
+    if (this.animationFrameId != null) {
+      cancelAnimationFrame(this.animationFrameId);
+      this.animationFrameId = null;
+    }
+  }
+
+  shutdown(): void {
+    this.generation++;
+    this.cancelFrameCallback();
+    this.stopMetrics();
+    this.detector?.stop();
     this.camera?.stop();
-    this.session?.free();
+    this.decoder?.stop();
   }
 }
 
 const app = new App();
-void app.start();
+window.addEventListener('pagehide', () => app.shutdown(), { once: true });
+void app.initialize();

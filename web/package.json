@@ -9,6 +9,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test:wasm": "node tests/wasm-smoke.mjs",
+    "bench:video": "node tests/video-bench.mjs",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

@@ -44,12 +44,12 @@
 
 - [x] 使用 zxing-wasm 作为 fallback 检测器，并将 WASM 静态资源打包进站点
 - [x] 检测 BarcodeDetector 可用性，不可用时自动切换 zxing WASM
-- [ ] Web Worker 中运行 QR 检测，避免阻塞 UI 线程
+- [x] Web Worker 池中运行 QR 检测，池满丢弃旧帧并以 watchdog 回收失联 Worker
 - [ ] 测试 iOS Safari / Firefox / Chrome 兼容性
 
 ## P3: 性能优化
 
-- [ ] 帧预处理：自适应下采样到合理检测分辨率
+- [x] 帧预处理：GPU 缩放到 1280px，连续未检出时自动提升到 1600px 探测
 - [x] 逐视频帧调度：使用 requestVideoFrameCallback，移除固定 25 FPS 上限
 - [x] 重复帧识别：DecodeSession 按 PayloadId 去重并统计
 - [ ] SharedArrayBuffer 零拷贝传帧（如浏览器支持）
@@ -86,7 +86,7 @@
 待办：
 
 - [ ] 真机复现并记录 debug 面板完整数据（Camera FPS / QR hit / accepted / invalid）
-- [ ] 扫描 watchdog：检测 Promise 超时后强制续链 rVFC，防止循环静默死亡
+- [x] 扫描 watchdog：检测 Promise 超时后回收失联 Worker，帧循环不等待检测完成
 - [ ] iOS 抓帧参数实验：提高抓帧分辨率 / 关闭降采样 / 尝试 `preferCurrentFrame`
 - [ ] 验证 `track.getSettings().frameRate`，必要时用 `advanced` constraints 提升帧率
 - [ ] 对比测试：iPhone Chrome、macOS Safari，区分 iOS 平台问题与 zxing-wasm 问题
@@ -98,7 +98,55 @@
 - [ ] 多摄像头切换支持
 - [ ] 分辨率/帧率设置面板
 - [ ] 解码历史记录
-- [ ] 移动端 UI 适配
+- [x] 移动端 UI 适配与实时性能面板
+
+### 2026-09-16 · Worker 池与新接收界面
+
+- 从 `dev` 的 V4/RaptorQ Web 基线切出 `feature/web-decoder-performance-ui`。
+- 方案采用浅队列检测 Worker 池：逐视频帧调度、每个 Worker 最多一个在途帧、
+  池满直接丢弃旧帧、1.5 秒 watchdog 自动重建失联 Worker。
+- 摄像头优先协商 4K/60，检测帧在 GPU 路径缩放至 1280px；连续未检出时临时
+  提升到 1600px，兼顾吞吐和高版本密集 QR 的可读性。
+- `zxing_reader.wasm` 作为站点资源本地打包，不再依赖运行时 CDN。
+- 新界面展示 Camera FPS、Scan FPS、检测 P95、QR 命中率、有效块数和真实输入分辨率。
+- 默认保持低功耗待机；由用户通过录像式开始、暂停、停止按钮控制检测。暂停保留预览，
+  停止和解码完成都会关闭摄像头并取消帧循环。
+- 本机单线程 Node 参考基准（不是浏览器 Worker 池或真机验收）：
+  - baseline.MOV：31.80 FPS，100% 恢复，SHA-256 一致；
+  - balance.MOV：33.85 FPS，100% 恢复，SHA-256 一致。
+- 浏览器 Worker 池为 30 FPS 以上提供并发余量，但 1080p/60 或 4K 输入能力仍需在目标
+  手机和浏览器上，以无持续积压、完整恢复且输出哈希一致为验收标准。
+
+### 2026-09-16 · iPhone 15 Pro / Safari 24 FPS 与大文件停顿优化
+
+- 相机从“4K 优先”改为“帧率优先的 1080p/60”，首次协商要求至少 30 FPS；不支持该
+  约束时分两级降级，避免 Safari 因 4K 偏好选择 24 FPS 档位。
+- 实时检测分辨率由 1280px 调整为 1080px，连续未命中时提升到 1440px；关闭 ZXing
+  `tryHarder`，识别失败的帧直接丢弃，避免移动端检测队列产生重压和发热。
+- RaptorQ WASM 状态机与最终解压迁移到独立 Worker；主线程仅收发消息，最多保留 32 个
+  待处理符号，避免大文件恢复阶段阻塞视频帧回调和界面。
+- 进度改为按“已接收唯一符号 / 源符号目标”估算，修复符号也会推进；真正完成前最多
+  显示 99%，不再出现修复符号有效但进度长时间静止的假象。
+- 摄像头启动后按硬件 `getCapabilities()` 与 720p–4K 允许范围的交集，提供
+  720p / 1080p / 1440p / 4K 档位；切换再以 `applyConstraints(exact)` 校验，失败保留
+  原档位，且不会清空已经接收的数据。
+- 使用 `~/Downloads` 中四段 MOV、与实时端一致的本机回放基准（1080px、
+  `tryHarder=false`）：
+  - baseline.MOV：38.92 FPS，QR 命中 79.3%，完整恢复且 SHA-256 一致；
+  - balance.MOV：40.96 FPS，QR 命中 59.1%，完整恢复且 SHA-256 一致；
+  - dense.MOV：40.87 FPS，QR 命中 59.2%，完整恢复且 SHA-256 一致；
+  - throughput.MOV：38.51 FPS，QR 命中 41.3%，完整恢复且 SHA-256 一致。
+- 上述回放证明了检测策略和文件完整性，但 iPhone 15 Pro Safari 的实际采集帧率、热稳定性
+  和大文件长时间表现仍需重新部署后真机复测。
+
+### 2026-09-16 · 启动预览与扫描控制调整
+
+- 页面加载即申请摄像头权限、启动预览并读取真实分辨率、帧率和硬件可选档位；此时不创建
+  视频帧检测回调，也不向 QR 检测 Worker 提交画面。
+- 开始与暂停合并为一个状态按钮：待机/暂停时开始或继续扫描，扫描中原位切换为暂停；
+  停止按钮独立存在，并可从预览待机、扫描或暂停状态关闭摄像头。
+- 扫描线动画仅在 `scanning` 状态运行，预览待机和暂停时保持静止，明确区分“摄像头开启”
+  与“正在扫描”。
 
 ---
 
