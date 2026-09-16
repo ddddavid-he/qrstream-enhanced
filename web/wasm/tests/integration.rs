@@ -168,6 +168,27 @@ fn duplicate_frames_are_reported() {
 }
 
 #[test]
+fn repair_symbol_advances_receive_progress() {
+    let cases = load_cases();
+    let case = cases
+        .iter()
+        .find(|c| c.name == "medium_50k")
+        .expect("medium case");
+    let repair_index = case.k as usize;
+    assert!(repair_index < case.qr_texts_base45.len());
+
+    let mut session = DecodeSession::new();
+    let result = session.consume_qr_text(&case.qr_texts_base45[repair_index]);
+    assert!(result.accepted && !result.done);
+    assert_eq!(result.num_recovered, 0, "repair is not a systematic symbol");
+    assert_eq!(result.num_received, 1);
+    assert!(
+        result.progress > 0.0,
+        "useful repair symbols must move progress"
+    );
+}
+
+#[test]
 fn mixed_base45_and_base64_frames() {
     let cases = load_cases();
     let case = cases

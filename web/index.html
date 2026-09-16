@@ -264,6 +264,18 @@
     .engine-info { margin-top: 17px; padding-top: 15px; border-top: 1px solid var(--line); display: grid; gap: 8px; }
     .info-row { display: flex; justify-content: space-between; gap: 10px; color: var(--muted-2); font-size: .7rem; }
     .info-row strong { color: var(--muted); font-weight: 560; text-align: right; }
+    .resolution-select {
+      min-width: 92px;
+      padding: 5px 25px 5px 9px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+      background: rgba(255,255,255,.055);
+      font: 600 .7rem/1.2 Inter, system-ui, sans-serif;
+      color-scheme: dark;
+    }
+    .resolution-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .resolution-select:disabled { cursor: not-allowed; opacity: .48; }
 
     .metrics-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 9px; margin-top: 16px; }
     .metric { min-width: 0; padding: 12px; border: 1px solid rgba(166,218,194,.09); border-radius: 14px; background: rgba(255,255,255,.018); }
@@ -376,6 +388,7 @@
           </div>
           <div class="engine-info">
             <div class="info-row"><span>检测引擎</span><strong id="detector-name">初始化中</strong></div>
+            <div class="info-row"><label for="resolution-select">采集画质</label><select class="resolution-select" id="resolution-select" aria-label="摄像头采集分辨率" disabled><option>启动后可选</option></select></div>
             <div class="info-row"><span>协议</span><strong>V4 · RaptorQ</strong></div>
           </div>
         </section>

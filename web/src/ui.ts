@@ -2,11 +2,13 @@
 
 import type { SessionResult, SessionSnapshot } from './decode';
 import type { RuntimeMetrics } from './metrics';
+import type { ResolutionId, ResolutionOption } from './camera';
 
 export interface UiCallbacks {
   onStart(): void;
   onPause(): void;
   onStop(): void;
+  onResolutionChange(id: ResolutionId): void;
   onDownload(): void;
 }
 
@@ -16,6 +18,7 @@ export type ControlState =
   | 'starting'
   | 'scanning'
   | 'paused'
+  | 'finishing'
   | 'stopped'
   | 'done';
 
@@ -47,6 +50,7 @@ export class Ui {
   private readonly errorBox: HTMLElement;
   private readonly videoWrap: HTMLElement;
   private readonly detectorName: HTMLElement;
+  private readonly resolutionSelect: HTMLSelectElement;
   private downloadUrl: string | null = null;
   private pulseTimer: number | null = null;
 
@@ -68,10 +72,14 @@ export class Ui {
     this.errorBox = root.querySelector<HTMLElement>('#error-box')!;
     this.videoWrap = root.querySelector<HTMLElement>('#video-wrap')!;
     this.detectorName = root.querySelector<HTMLElement>('#detector-name')!;
+    this.resolutionSelect = root.querySelector<HTMLSelectElement>('#resolution-select')!;
 
     this.startBtn.addEventListener('click', callbacks.onStart);
     this.pauseBtn.addEventListener('click', callbacks.onPause);
     this.stopBtn.addEventListener('click', callbacks.onStop);
+    this.resolutionSelect.addEventListener('change', () => {
+      callbacks.onResolutionChange(this.resolutionSelect.value as ResolutionId);
+    });
     this.downloadBtn.addEventListener('click', callbacks.onDownload);
   }
 
@@ -87,9 +95,11 @@ export class Ui {
         ? '重新开始'
         : state === 'starting'
           ? '启动中'
-          : state === 'scanning'
-            ? '检测中'
-            : '开始';
+          : state === 'finishing'
+            ? '整理中'
+            : state === 'scanning'
+              ? '检测中'
+              : '开始';
   }
 
   setStatus(text: string): void {
@@ -113,9 +123,44 @@ export class Ui {
     node.textContent = width && height ? `${width} × ${height}${fps}` : '自动协商';
   }
 
+  setResolutionOptions(
+    options: ResolutionOption[],
+    settings: MediaTrackSettings,
+  ): void {
+    this.resolutionSelect.replaceChildren();
+    if (options.length === 0) {
+      this.resolutionSelect.add(new Option('硬件未报告', ''));
+      this.resolutionSelect.disabled = true;
+      return;
+    }
+    for (const option of options) {
+      this.resolutionSelect.add(new Option(option.label, option.id));
+    }
+    const width = settings.width ?? 0;
+    const height = settings.height ?? 0;
+    const selected = options.find((option) =>
+      (option.width === width && option.height === height) ||
+      (option.width === height && option.height === width),
+    ) ?? options.find((option) => option.id === '1080p') ?? options[0];
+    this.resolutionSelect.value = selected.id;
+    this.resolutionSelect.disabled = false;
+  }
+
+  setResolutionBusy(busy: boolean): void {
+    this.resolutionSelect.disabled = busy || this.resolutionSelect.options.length === 0;
+  }
+
+  selectResolution(id: ResolutionId): void {
+    if (Array.from(this.resolutionSelect.options).some((option) => option.value === id)) {
+      this.resolutionSelect.value = id;
+    }
+  }
+
   setCameraInactive(): void {
     const node = this.root.querySelector<HTMLElement>('#camera-settings')!;
     node.textContent = '摄像头已关闭';
+    this.resolutionSelect.replaceChildren(new Option('启动后可选', ''));
+    this.resolutionSelect.disabled = true;
   }
 
   showError(message: string): void {
@@ -145,7 +190,7 @@ export class Ui {
 
     const parts: string[] = [];
     if (result.symbol_count != null) {
-      parts.push(`${result.num_recovered} / ${result.symbol_count} 数据块`);
+      parts.push(`${result.num_received} / ${result.symbol_count} 接收符号`);
     }
     if (result.filesize != null) parts.push(fmtBytes(result.filesize));
     if (result.protocol_version != null) parts.push(`协议 V${result.protocol_version}`);

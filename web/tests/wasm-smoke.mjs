@@ -39,6 +39,7 @@ for (const c of cases) {
     const snap = JSON.parse(s.snapshot());
     assert.equal(snap.done, true);
     assert.equal(snap.progress, 1);
+    assert.ok(snap.num_received >= c.K, `${c.name}: received count below K`);
     passed++;
   }
   // 2. Shuffled raw-block delivery
@@ -67,6 +68,7 @@ for (const c of cases) {
     const r2 = JSON.parse(s.consume_qr_text(c.qr_texts_base45[0]));
     assert.ok(r1.accepted && !r1.duplicate, `${c.name}: first frame not fresh`);
     assert.ok(r2.accepted && r2.duplicate, `${c.name}: dup not flagged`);
+    assert.equal(r2.num_received, r1.num_received, `${c.name}: duplicate moved progress`);
     passed++;
   }
   console.log(`case "${c.name}" OK (filesize=${c.filesize}, K=${c.K}, frames=${c.num_frames})`);

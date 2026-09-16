@@ -133,7 +133,9 @@ async function benchmark(video) {
       const detectStart = performance.now();
       const results = await zxing.readBarcodesFromImageData(image, {
         formats: ['QRCode'],
-        tryHarder: true,
+        // Match the live receiver: misses are dropped instead of running an
+        // expensive second-pass search that causes mobile backpressure.
+        tryHarder: false,
       });
       detectMs += performance.now() - detectStart;
       frames++;

@@ -50,7 +50,7 @@ async function detect(
     const image = context.getImageData(0, 0, width, height);
     const results = await readBarcodesFromImageData(image, {
       formats: ['QRCode'],
-      tryHarder: true,
+      tryHarder: false,
     });
     scope.postMessage({
       type: 'result',

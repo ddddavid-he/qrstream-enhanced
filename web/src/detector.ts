@@ -40,8 +40,8 @@ interface WorkerSlot {
 }
 
 const WATCHDOG_MS = 1_500;
-const DEFAULT_DETECT_DIM = 1_280;
-const PROBE_DETECT_DIM = 1_600;
+const DEFAULT_DETECT_DIM = 1_080;
+const PROBE_DETECT_DIM = 1_440;
 
 function getBarcodeDetectorCtor(): BarcodeDetectorCtor | null {
   const ctor = (globalThis as Record<string, unknown>).BarcodeDetector;
@@ -281,7 +281,7 @@ class MainThreadZxingDetector implements QrDetector {
       const startedAt = performance.now();
       this.context.drawImage(video, 0, 0, width, height);
       const image = this.context.getImageData(0, 0, width, height);
-      const codes = await this.read(image, { formats: ['QRCode'], tryHarder: true });
+      const codes = await this.read(image, { formats: ['QRCode'], tryHarder: false });
       return {
         texts: codes.map((code) => code.text),
         detectMs: performance.now() - startedAt,
