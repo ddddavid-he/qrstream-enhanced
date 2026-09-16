@@ -26,6 +26,11 @@ inputs/
 outputs/
 output
 skills/
+.agent/
+
+# Rust / generated benchmark artifacts
+web/wasm/target/
+web/wasm/tests/bench_vectors.json
 
 # Test / cache
 .pytest_cache/
