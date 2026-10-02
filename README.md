@@ -4,6 +4,37 @@
 
 Transfer arbitrary files through QR code video streams. Built on **RaptorQ (RFC 6330)** and **LT Fountain Codes** for reliable, feedback-free data transmission — the original file can be fully recovered even if some frames are lost.
 
+## Web receiver (phone camera)
+
+**[Open QRStream on GitHub Pages](https://ddddavid-he.github.io/qrstream-enhanced/)**
+
+Play a **V4 / RaptorQ** QR stream on your computer, open the link on your phone over HTTPS, and allow camera access. Preview starts immediately; press the red shutter to begin receiving. The browser receiver currently supports V4 / RaptorQ only, not legacy LT/V3 streams.
+
+- **Camera view:** a central crosshair helps alignment; the full camera image stays visible without cropping. The subtle glass controls respect the screen safe areas.
+- **Receive / pause / stop:** the red shutter toggles reception and pause. Pause keeps the preview and collected data. Stop closes the camera and asks for confirmation if data has been collected; restarting creates a fresh session.
+- **Progress and metrics:** the shutter ring shows estimated collection progress, reaching 100% only after file recovery. The upper-right readout shows QR recognition rate and detection FPS; the timer counts active reception time. Recognition rate is the proportion of scans detecting any QR code over the last three seconds, including duplicates.
+- **Resolution:** tap the compact resolution label at the upper left to cycle through supported camera modes, like the iOS video camera’s HD/4K control. No menu opens. The default request is 1080p, with the actual negotiated mode displayed. Changing modes retains file progress; performance counters restart.
+- **Details:** the ellipsis opens a bottom sheet with file information, performance and receiver status. Opening it keeps reception running; dismiss with the close button, backdrop, Escape, or a downward swipe on the handle.
+- **Save:** after recovery, use the save button beside the file result. The current Web protocol does not carry the original filename; the download is named `qrstream-output.bin` and can be renamed. Starting another reception asks you to save first.
+
+Camera frames and recovered file contents are processed locally in the browser, without uploading them. Camera access requires HTTPS or localhost; actual modes and capture speed depend on the device and browser. The crosshair is an alignment guide, not a detection crop.
+
+### Web development and Pages deployment
+
+```bash
+cd web
+npm ci
+npm run build:wasm  # requires Rust, wasm32-unknown-unknown and wasm-pack
+npm run typecheck
+npm run test:wasm
+QRSTREAM_BASE=/qrstream-enhanced/ npm run build
+npm run dev
+```
+
+The default development URL is `http://localhost:5173/web/qrstream-dev/v1.0.0/`. For the camera-free UI regression harness, open `http://localhost:5173/web/qrstream-dev/v1.0.0/tests/ui.html`; `document.documentElement.dataset.testResult` should be `passed`. Its example metrics are test fixtures only.
+
+[The Pages workflow](.github/workflows/pages.yml) builds and deploys changes to `web/**` pushed to `main`, and also supports manual dispatch. Set the repository's **Settings → Pages → Source** to **GitHub Actions**. A local build does not update the published site.
+
 ## How It Works
 
 ```

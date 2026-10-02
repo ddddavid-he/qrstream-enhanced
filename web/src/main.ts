@@ -1,5 +1,7 @@
 /** Entry point: live camera preview -> user-controlled scan -> WASM session. */
 
+import './styles.css';
+
 import {
   startCamera,
   CameraError,
@@ -62,6 +64,8 @@ class App {
       this.camera = null;
       this.ui.markReady('camera', false);
       this.ui.setCameraInactive();
+      this.setState('error');
+      this.ui.setStatus('接收器加载失败，点击红色按钮刷新');
       this.ui.showError('WASM 解码核心加载失败，请刷新页面重试。');
       return;
     }
@@ -74,6 +78,8 @@ class App {
       this.camera = null;
       this.ui.markReady('camera', false);
       this.ui.setCameraInactive();
+      this.setState('error');
+      this.ui.setStatus('接收器加载失败，点击红色按钮刷新');
       this.ui.showError(`QR 检测器加载失败：${String(detectorResult.reason)}`);
       return;
     }
@@ -90,7 +96,7 @@ class App {
 
     this.metrics.reset();
     this.setState('idle');
-    this.ui.setStatus('摄像头已就绪，点击开始扫描');
+    this.ui.setStatus('对准电脑上的二维码');
     this.startMetrics();
   }
 
@@ -108,13 +114,21 @@ class App {
 
     if ((this.state === 'idle' || this.state === 'paused') && this.camera) {
       this.setState('scanning');
-      this.ui.setStatus('正在接收数据…');
+      this.ui.setStatus('正在接收');
       this.scheduleNextFrame();
       return;
     }
 
     if (this.state === 'stopped' || this.state === 'done') {
-      await this.newSession();
+      this.setState('starting');
+      try {
+        await this.newSession();
+      } catch (error) {
+        this.setState('error');
+        this.ui.setStatus('无法创建新任务，点击红色按钮刷新');
+        this.ui.showError(String(error));
+        return;
+      }
       if (!await this.openCamera()) return;
     }
 
@@ -130,7 +144,7 @@ class App {
     this.generation++;
     this.cancelFrameCallback();
     this.setState('paused');
-    this.ui.setStatus('检测已暂停，摄像头预览仍保持开启');
+    this.ui.setStatus('已暂停');
   }
 
   private stopScanning(): void {
@@ -143,7 +157,7 @@ class App {
     this.ui.markReady('camera', false);
     this.ui.setCameraInactive();
     this.setState('stopped');
-    this.ui.setStatus('检测已停止，摄像头已关闭');
+    this.ui.setStatus('已停止');
   }
 
   private async openCamera(): Promise<boolean> {
@@ -155,7 +169,7 @@ class App {
       this.configureCamera(camera);
       this.metrics.reset();
       this.setState('idle');
-      this.ui.setStatus('摄像头已就绪，点击开始扫描');
+      this.ui.setStatus('对准电脑上的二维码');
       this.startMetrics();
       return true;
     } catch (error) {
@@ -197,14 +211,14 @@ class App {
       const settings = await camera.setResolution(id);
       if (this.camera !== camera) return;
       this.ui.setCameraSettings(settings);
-      this.ui.selectResolution(id);
+      this.ui.setResolutionOptions(camera.resolutionOptions, settings);
       this.metrics.reset();
       this.ui.setStatus(
         this.state === 'paused'
-          ? '检测已暂停，摄像头预览仍保持开启'
+          ? '已暂停'
           : this.state === 'scanning'
-            ? '正在接收数据…'
-            : '摄像头已就绪，点击开始扫描',
+            ? '正在接收'
+            : '对准电脑上的二维码',
       );
     } catch (error) {
       if (this.camera !== camera) return;
@@ -279,7 +293,7 @@ class App {
     }
     if (result.accepted && !result.duplicate) {
       this.ui.updateProgress(result);
-      if (!result.done) this.ui.setStatus('正在接收数据…');
+      if (!result.done) this.ui.setStatus('正在接收');
     }
     if (result.done) void this.finish();
   }
@@ -313,7 +327,7 @@ class App {
     this.ui.markReady('camera', false);
     this.ui.setCameraInactive();
     this.setState('finishing');
-    this.ui.setStatus('数据已齐，正在整理文件…');
+    this.ui.setStatus('正在恢复文件…');
     let bytes: Uint8Array;
     try {
       bytes = await this.decoder.resultBytes();
@@ -373,6 +387,7 @@ class App {
     this.detector?.stop();
     this.camera?.stop();
     this.decoder?.stop();
+    this.ui.dispose();
   }
 }
 

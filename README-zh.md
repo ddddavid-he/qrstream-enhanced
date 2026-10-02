@@ -4,6 +4,37 @@
 
 通过 QR 码视频流传输任意文件。基于 **RaptorQ（RFC 6330）** 和 **LT 喷泉码** 实现可靠的无反馈信道数据传输——即使丢失部分帧也能完整恢复原始文件。
 
+## 网页接收器（手机摄像头）
+
+**[打开 GitHub Pages 网页接收器](https://ddddavid-he.github.io/qrstream-enhanced/)**
+
+在电脑上播放 **V4 / RaptorQ** 二维码流，手机通过 HTTPS 打开上述地址并允许使用摄像头。页面会立即显示预览，点击红色快门后开始接收。网页端目前仅支持 V4 / RaptorQ，不支持旧版 LT / V3 码流。
+
+- **相机取景**：中央十字准星辅助对齐，完整显示摄像头画面，不裁切；轻量玻璃控件适配屏幕安全区域。
+- **接收、暂停与停止**：红色快门切换接收与暂停。暂停保留预览和数据；停止关闭摄像头，已有数据时先确认，重新开始会创建新任务。
+- **进度与指标**：快门外环显示数据收集的估算进度，文件完整恢复后才到 100%。右上角显示识别率与检测 FPS；计时只累计接收中的时间。识别率表示近 3 秒检测中识别出任意二维码的比例，包含重复码。
+- **分辨率**：左上角采用类似 iOS 录像 HD/4K 的紧凑文字切换器，直接点按即可循环切换摄像头支持的档位，不弹出菜单。默认请求 1080p，显示实际协商结果。切换保留文件进度，性能统计重新计数。
+- **详情叠层**：右下角省略号打开文件信息、性能和接收器状态，打开时继续接收。可点击关闭、背景、按 Escape，或向下拖动顶部横条关闭。
+- **保存文件**：恢复完成后，点击文件结果旁的保存按钮。当前网页协议不包含原文件名，下载名为 `qrstream-output.bin`，可自行重命名。开始下一次接收前会提示先保存结果。
+
+摄像头画面和接收文件均在浏览器本机处理，不上传。摄像头需要 HTTPS 或 localhost；实际分辨率及采集速度由设备和浏览器决定。准星仅用于辅助对齐，不限制检测区域。
+
+### 网页开发与 Pages 部署
+
+```bash
+cd web
+npm ci
+npm run build:wasm  # 需安装 Rust、wasm32-unknown-unknown 和 wasm-pack
+npm run typecheck
+npm run test:wasm
+QRSTREAM_BASE=/qrstream-enhanced/ npm run build
+npm run dev
+```
+
+默认开发地址为 `http://localhost:5173/web/qrstream-dev/v1.0.0/`。无需摄像头的界面回归页位于 `http://localhost:5173/web/qrstream-dev/v1.0.0/tests/ui.html`，运行后 `document.documentElement.dataset.testResult` 应为 `passed`；其中指标仅为测试示例数据。
+
+[Pages 工作流](.github/workflows/pages.yml) 会在 `main` 分支收到 `web/**` 相关更新时构建部署，也支持手动触发。仓库 **Settings → Pages → Source** 需选择 **GitHub Actions**。本地构建不会更新已发布页面。
+
 ## 原理概览
 
 ```

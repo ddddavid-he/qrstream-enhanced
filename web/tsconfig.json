@@ -17,5 +17,5 @@
       "qrstream-decode": ["wasm/pkg/qrstream_decode.d.ts"]
     }
   },
-  "include": ["src", "vite.config.ts"]
+  "include": ["src", "tests/ui.ts", "vite.config.ts"]
 }
