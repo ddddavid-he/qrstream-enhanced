@@ -59,6 +59,9 @@ jobs:
       - name: Run WebAssembly smoke tests
         run: npm run test:wasm
 
+      - name: Check stop retains camera preview
+        run: npm run test:stop-preview
+
       - name: Build GitHub Pages site
         env:
           QRSTREAM_BASE: /${{ github.event.repository.name }}/

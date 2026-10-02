@@ -34,7 +34,7 @@ class App {
     this.video = root.querySelector<HTMLVideoElement>('#video')!;
     this.ui = new Ui(root, {
       onToggle: () => this.toggleScanning(),
-      onStop: () => this.stopScanning(),
+      onStop: () => void this.stopScanning(),
       onResolutionChange: (id) => void this.changeResolution(id),
       onDownload: () => this.ui.download(),
     });
@@ -147,17 +147,24 @@ class App {
     this.ui.setStatus('已暂停');
   }
 
-  private stopScanning(): void {
+  private async stopScanning(): Promise<void> {
     if (this.state !== 'idle' && this.state !== 'scanning' && this.state !== 'paused') return;
     this.generation++;
     this.cancelFrameCallback();
     this.stopMetrics();
-    this.camera?.stop();
-    this.camera = null;
-    this.ui.markReady('camera', false);
-    this.ui.setCameraInactive();
-    this.setState('stopped');
-    this.ui.setStatus('已停止');
+    // Stop reception, not the live preview. Gate controls until the worker has
+    // discarded every collected block, including consume requests in flight.
+    this.setState('starting');
+    try {
+      await this.newSession();
+      this.setState('idle');
+      this.ui.setStatus('已停止并清空数据，点击开始接收');
+      this.startMetrics();
+    } catch (error) {
+      this.setState('error');
+      this.ui.setStatus('清空接收数据失败，点击红色按钮刷新');
+      this.ui.showError(String(error));
+    }
   }
 
   private async openCamera(): Promise<boolean> {
@@ -301,9 +308,10 @@ class App {
   private async publishMetrics(): Promise<void> {
     if (!this.decoder || !this.detector || !this.camera || this.metricsPending) return;
     this.metricsPending = true;
+    const generation = this.generation;
     try {
       const snapshot = await this.decoder.snapshot();
-      if (!this.camera) return;
+      if (!this.camera || generation !== this.generation) return;
       this.ui.updateRuntimeMetrics(this.metrics.snapshot(
         this.detector.name,
         this.video,

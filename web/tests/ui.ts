@@ -18,7 +18,7 @@ const options = [
 ];
 const ui = new Ui(root, {
   onToggle: () => { toggles++; ui.setControlState(root.dataset.phase === 'scanning' ? 'paused' : 'scanning'); },
-  onStop: () => { stops++; ui.setCameraInactive(); ui.setControlState('stopped'); },
+  onStop: () => { stops++; ui.resetSession(); ui.setControlState('idle'); },
   onDownload: () => ui.download(),
   onResolutionChange: id => {
     ui.setResolutionBusy(true);
@@ -57,7 +57,9 @@ try {
   assert(node<HTMLButtonElement>('start-btn').disabled && node<HTMLButtonElement>('resolution-btn').disabled, 'switch in flight must gate controls');
   ui.setResolutionBusy(false);
   click('stop-btn'); click('confirm-action'); await tick();
-  assert(stops === 1 && node<HTMLButtonElement>('resolution-btn').disabled, 'confirmed stop closes camera controls');
+  assert(stops === 1 && !node<HTMLButtonElement>('resolution-btn').disabled, 'confirmed stop preserves camera controls');
+  assert(node('progress-label').textContent === '0%' && node('file-blocks').textContent === '等待接收', 'stop clears collected blocks and progress');
+  assert(node('elapsed').textContent === '00:00' && root.dataset.phase === 'idle', 'stop resets timer and returns to preview');
   ui.resetSession(); ui.setControlState('scanning');
   ui.updateProgress({ ...progress, done: true, progress: 1 });
   assert(node('progress-bar').getAttribute('aria-valuenow') === '99', '100% must wait for actual file');

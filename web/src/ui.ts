@@ -44,7 +44,7 @@ export class Ui {
     });
     this.node('stop-btn').addEventListener('click', () => {
       if (this.received > 0) {
-        this.confirm('停止接收？', '摄像头将关闭。重新开始会清空当前文件的接收进度。', '停止接收', callbacks.onStop);
+        this.confirm('停止接收？', '将清空已识别的数据块和接收进度，摄像头预览保持开启。', '停止接收', callbacks.onStop);
       } else callbacks.onStop();
     });
     this.node('details-btn').addEventListener('click', () => this.openSheet('details', '接收详情', 'details-btn'));
