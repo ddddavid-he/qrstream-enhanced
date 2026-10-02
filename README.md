@@ -92,6 +92,12 @@ The old top-level `BRANCHING.md` has been retired; branch and workflow rules now
 - Python >= 3.10 (3.10 – 3.14 tested)
 - Dependencies: `opencv-python-headless`, `numpy`, `rich`, `zxing-cpp`, `av`, `PySide6-Essentials`, `raptorq`
 
+`zxing-cpp` requires `>=3.0.0,!=3.1.0`; version 3.1.1 or newer is recommended.
+Version 3.1.0 has a [real-camera QR detection regression](https://github.com/zxing-cpp/zxing-cpp/issues/1132),
+fixed in [3.1.1](https://github.com/zxing-cpp/zxing-cpp/releases/tag/v3.1.1).
+The earlier `<3.1.0` cap has been removed after validating 3.1.1 against the
+reported frame and the four phone-recording fixtures.
+
 ## Usage
 
 ```bash

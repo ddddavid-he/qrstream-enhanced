@@ -90,6 +90,11 @@ uv sync --dev
 - Python >= 3.10（已测试 3.10 – 3.14）
 - 依赖：`opencv-python-headless`, `numpy`, `rich`, `zxing-cpp`, `av`, `PySide6-Essentials`, `raptorq`
 
+`zxing-cpp` 的版本要求为 `>=3.0.0,!=3.1.0`，推荐使用 3.1.1 或更新版本。
+3.1.0 存在[真实录像 QR 检测回归](https://github.com/zxing-cpp/zxing-cpp/issues/1132)，
+已在 [3.1.1](https://github.com/zxing-cpp/zxing-cpp/releases/tag/v3.1.1) 中修复。
+验证 3.1.1 能正确解码上游复现帧及四个真实手机录像样例后，已移除原来的 `<3.1.0` 上限。
+
 ## 使用方式
 
 ```bash

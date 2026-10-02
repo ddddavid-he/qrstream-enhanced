@@ -21,3 +21,4 @@ def test_zxing_cpp_excludes_known_real_world_regression() -> None:
 
     assert Version("3.0.0") in requirement.specifier
     assert Version("3.1.0") not in requirement.specifier
+    assert Version("3.1.1") in requirement.specifier

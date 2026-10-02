@@ -61,7 +61,7 @@ class TestBackend:
         import zxingcpp
         assert hasattr(zxingcpp, 'create_barcode'), (
             "zxing-cpp missing create_barcode; upgrade with "
-            "`pip install zxing-cpp>=3.0.0`"
+            "`pip install 'zxing-cpp>=3.0.0,!=3.1.0'`"
         )
 
     def test_qr_utils_uses_zxingcpp(self):
