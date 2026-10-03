@@ -24,7 +24,7 @@
     <footer class="controls">
       <p id="status" role="status">正在初始化接收器…</p>
       <p id="error-box" role="alert" hidden></p>
-      <div id="done-panel" class="result glass" hidden><div><strong>文件已恢复</strong><small id="done-info"></small></div><button id="download-btn" class="icon-button" type="button" aria-label="保存文件"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M5 16v4h14v-4"/></svg></button></div>
+      <div id="done-panel" class="result glass" hidden><div><strong>文件已恢复</strong><small id="done-info"></small></div><button id="download-btn" class="icon-button" type="button" aria-label="保存文件" aria-haspopup="dialog" aria-controls="sheet" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M5 16v4h14v-4"/></svg></button></div>
       <div class="transport">
         <div class="control"><button id="stop-btn" class="icon-button" type="button" aria-label="停止接收并清空数据，保留预览" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/></svg></button><span>停止</span></div>
         <div class="control main-control"><div class="shutter-wrap"><div id="progress-bar" class="progress-ring" role="progressbar" aria-label="文件收集进度（估算）" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div><button id="start-btn" class="shutter" type="button" aria-label="开始接收" disabled><span class="shutter-core"><span class="pause-mark"></span></span></button></div><span id="progress-label">0%</span><span id="start-label" class="sr-only">开始</span></div>
@@ -34,7 +34,12 @@
   </div>
   <dialog id="sheet" aria-labelledby="sheet-title">
     <div id="sheet-handle" class="grab-area" aria-hidden="true"><span></span></div>
-    <header class="sheet-header"><h1 id="sheet-title">接收详情</h1><button id="sheet-close" class="icon-button" type="button" aria-label="关闭叠层" autofocus><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></header>
+    <header class="sheet-header">
+      <button id="save-cancel" class="save-navigation" type="button">取消</button>
+      <h1 id="sheet-title">接收详情</h1>
+      <button id="save-action" class="save-navigation save-submit" type="submit" form="save-body">保存</button>
+      <button id="sheet-close" class="icon-button" type="button" aria-label="关闭叠层" autofocus><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+    </header>
     <div class="sheet-body" id="details-body">
       <h2>当前文件</h2>
       <dl class="group"><div><dt>文件大小</dt><dd id="file-size">—</dd></div><div><dt>有效数据块</dt><dd id="file-blocks">等待接收</dd></div><div><dt>协议</dt><dd id="file-protocol">V4 / RaptorQ</dd></div></dl>
@@ -47,6 +52,11 @@
       <p class="privacy">QRStream · 本机处理<br><span>摄像头画面与接收文件不上传</span></p>
     </div>
     <div class="sheet-body" id="confirm-body" hidden><p id="confirm-copy"></p><button id="confirm-action" class="sheet-action destructive" type="button">停止接收</button><button id="confirm-cancel" class="sheet-action" type="button">取消</button></div>
+    <form class="sheet-body" id="save-body" hidden>
+      <label for="save-filename">文件名</label>
+      <div class="save-name-group"><input id="save-filename" name="filename" type="text" required autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="save-hint" /></div>
+      <p id="save-hint">可修改名称和扩展名。请保留与文件内容对应的扩展名。</p>
+    </form>
   </dialog>
 </main>
 <script type="module" src="/src/main.ts"></script>

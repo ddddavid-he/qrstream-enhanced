@@ -24,6 +24,7 @@ export class Ui {
   private confirmation: (() => void) | null = null;
   private downloadUrl: string | null = null;
   private filename = '';
+  private fileSize = 0;
   private received = 0;
   private pulseTimer: number | null = null;
   private readonly clockTimer: number;
@@ -52,7 +53,31 @@ export class Ui {
       const next = this.nextResolution();
       if (next && !this.resolutionBusy) this.callbacks.onResolutionChange(next.id);
     });
-    this.node('download-btn').addEventListener('click', callbacks.onDownload);
+    this.node('download-btn').addEventListener('click', () => {
+      if (!this.downloadUrl) return;
+      const input = this.node<HTMLInputElement>('save-filename');
+      input.value = this.filename;
+      input.setCustomValidity('');
+      this.openSheet('save', '保存文件', 'download-btn');
+      input.focus();
+      const extension = this.filename.lastIndexOf('.');
+      input.setSelectionRange(0, extension > 0 ? extension : this.filename.length);
+    });
+    this.node('save-cancel').addEventListener('click', () => this.sheet.close());
+    this.node('save-filename').addEventListener('input', () => this.node<HTMLInputElement>('save-filename').setCustomValidity(''));
+    this.node('save-body').addEventListener('submit', (event) => {
+      event.preventDefault();
+      if (!this.downloadUrl) return;
+      const input = this.node<HTMLInputElement>('save-filename');
+      const filename = input.value.trim();
+      const invalid = !filename || filename === '.' || filename === '..' || /[<>:"/\\|?*\u0000-\u001f\u007f]/.test(filename);
+      input.setCustomValidity(invalid ? '请输入有效文件名，不要包含路径或特殊字符（< > : " / \\ | ? *）。' : '');
+      if (!input.reportValidity()) return;
+      this.filename = filename;
+      this.text('done-info', `${filename} · ${fmtBytes(this.fileSize)}`);
+      this.sheet.close();
+      callbacks.onDownload();
+    });
     this.node('sheet-close').addEventListener('click', () => this.sheet.close());
     this.node('confirm-cancel').addEventListener('click', () => this.sheet.close());
     this.node('confirm-action').addEventListener('click', () => {
@@ -89,8 +114,9 @@ export class Ui {
     return this.root.querySelector<T>(`#${id}`)!;
   }
   private text(id: string, value: string): void { this.node(id).textContent = value; }
-  private openSheet(body: 'details' | 'confirm', title: string, opener: string): void {
-    for (const id of ['details', 'confirm']) this.node(`${id}-body`).hidden = id !== body;
+  private openSheet(body: 'details' | 'confirm' | 'save', title: string, opener: string): void {
+    this.sheet.dataset.view = body;
+    for (const id of ['details', 'confirm', 'save']) this.node(`${id}-body`).hidden = id !== body;
     this.text('sheet-title', title);
     this.opener = this.node<HTMLButtonElement>(opener);
     this.opener.setAttribute('aria-expanded', 'true');
@@ -199,6 +225,7 @@ export class Ui {
     if (this.downloadUrl) URL.revokeObjectURL(this.downloadUrl);
     this.downloadUrl = downloadUrl;
     this.filename = filename;
+    this.fileSize = size;
     this.setProgress(100);
     this.text('done-info', `${filename} · ${fmtBytes(size)}`);
     this.node('done-panel').hidden = false;
@@ -211,8 +238,9 @@ export class Ui {
     document.body.append(anchor); anchor.click(); anchor.remove();
   }
   resetSession(): void {
+    if (this.sheet.open && !this.node('save-body').hidden) this.sheet.close();
     if (this.downloadUrl) URL.revokeObjectURL(this.downloadUrl);
-    this.downloadUrl = null; this.filename = ''; this.received = 0;
+    this.downloadUrl = null; this.filename = ''; this.fileSize = 0; this.received = 0;
     this.elapsedMs = 0; this.activeSince = null; this.renderClock();
     this.setProgress(0);
     this.text('file-size', '—'); this.text('file-blocks', '等待接收'); this.text('file-protocol', 'V4 / RaptorQ');

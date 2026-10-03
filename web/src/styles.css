@@ -609,6 +609,143 @@ dd {
   color:#ff6961;
 }
 
+.save-navigation {
+  display:none;
+}
+
+dialog[data-view=save] {
+  --save-accent:#0a84ff;
+  width:100%;
+  max-width:470px;
+  background:#1c1c1e;
+  color:#f5f5f7;
+  border-radius:24px 24px 0 0;
+  box-shadow:0 -1px 0 #ffffff0a,0 -16px 60px #0006;
+  backdrop-filter:none;
+  -webkit-backdrop-filter:none;
+}
+
+dialog[data-view=save]::backdrop {
+  background:#0007;
+}
+
+dialog[data-view=save] .grab-area {
+  height:24px;
+}
+
+dialog[data-view=save] .grab-area span {
+  width:36px;
+  height:5px;
+  background:#48484a;
+}
+
+dialog[data-view=save] .sheet-header {
+  display:grid;
+  grid-template-columns:72px 1fr 72px;
+  align-items:center;
+  padding:0 16px 12px;
+  border-bottom:1px solid #ffffff0a;
+}
+
+dialog[data-view=save] .sheet-header h1 {
+  text-align:center;
+  font-size:17px;
+  letter-spacing:-.3px;
+}
+
+dialog[data-view=save] #sheet-close {
+  display:none;
+}
+
+dialog[data-view=save] .save-navigation {
+  display:block;
+  min-height:44px;
+  padding:0 8px;
+  border-radius:12px;
+  font-size:17px;
+  color:#409cff;
+}
+
+dialog[data-view=save] #save-cancel {
+  text-align:left;
+}
+
+dialog[data-view=save] .save-submit {
+  justify-self:end;
+  min-width:64px;
+  font-weight:600;
+}
+
+dialog[data-view=save] .save-navigation:focus-visible {
+  outline-color:#409cff;
+}
+
+dialog[data-view=save] .save-navigation:active {
+  background:#0a84ff18;
+}
+
+#save-body {
+  padding:18px 20px 24px;
+}
+
+#save-body label {
+  display:block;
+  margin:0 16px 8px;
+  font-size:13px;
+  color:#aeaeb2;
+}
+
+.save-name-group {
+  border:1px solid #636366;
+  border-radius:13px;
+  background:#2c2c2e;
+  transition:border-color .15s,box-shadow .15s;
+}
+
+.save-name-group:focus-within {
+  border-color:#409cff;
+  box-shadow:0 0 0 3px #0a84ff30;
+}
+
+#save-filename {
+  width:100%;
+  min-height:52px;
+  border:0;
+  border-radius:inherit;
+  padding:14px 16px;
+  background:none;
+  color:inherit;
+  font:inherit;
+  font-size:16px;
+  caret-color:var(--save-accent);
+  outline:none;
+}
+
+#save-filename::selection {
+  background:#0a84ff55;
+}
+
+#save-hint {
+  margin:10px 16px 0;
+  color:#aeaeb2;
+  font-size:12px;
+  line-height:1.55;
+}
+
+@media(min-width:600px) and (min-height:501px) {
+  dialog[data-view=save] {
+    inset:0;
+    margin:auto;
+    border-radius:24px;
+  }
+}
+
+@media(max-height:500px) {
+  #save-body {
+    padding-bottom:18px;
+  }
+}
+
 #confirm-copy {
   font-size:14px;
   line-height:1.7;
