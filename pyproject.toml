@@ -40,7 +40,8 @@ dependencies = [
     "zxing-cpp>=3.0.0,!=3.1.0",
     "av>=17.0.0",
     "PySide6-Essentials>=6.7.0",
-    "raptorq-wheel>=2.0.0",
+    # 2.0.2 is the first upstream release with wheels beyond Linux x86_64.
+    "raptorq>=2.0.2",
 ]
 
 [project.urls]
